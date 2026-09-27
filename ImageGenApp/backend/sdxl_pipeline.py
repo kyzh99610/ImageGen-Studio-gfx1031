@@ -130,10 +130,12 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
             requires_pooled=[False, True],
             truncate_long_prompts=False,
         )
-        from backend.prompt_syntax import a1111_to_compel   # (x:1.2) → (x)1.2
-        pos, pos_pool = c(a1111_to_compel(prompt))
-        neg, neg_pool = c(a1111_to_compel(neg_prompt))
-        [pos, neg] = c.pad_conditioning_tensors_to_same_length([pos, neg])
+        # 75-token chunks cut at tag boundaries (BREAK = new chunk); pooled embedding
+        # from the first chunk, as A1111 does
+        from backend.prompt_tools import encode_chunked, pad_to_same_chunks
+        pos, pos_pool = encode_chunked(c, prompt, pipe.tokenizer, sdxl=True)
+        neg, neg_pool = encode_chunked(c, neg_prompt, pipe.tokenizer, sdxl=True)
+        pos, neg = pad_to_same_chunks(c, pos, neg, sdxl=True)
 
         # ── Restore TEs to float16 BEFORE returning ──
         if te1_was_half:

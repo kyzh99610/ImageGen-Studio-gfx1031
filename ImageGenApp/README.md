@@ -118,6 +118,12 @@ Generate images from text prompts using Stable Diffusion checkpoints. The output
 
 **Seeds you can reuse:** every PNG stores the seed that was actually used, including random ones. In a batch, images get seed, seed+1, … so each is reproducible on its own. **♻️ Last seed** puts it back; **🎲** returns to random.
 
+**Every image can be made again:** each PNG records the checkpoint, VAE, LoRAs with their weights, prompts, sampler, steps, CFG, size and seed (A1111-compatible text that Civitai/Forge read, plus an exact record for this app, including the A1111 model hash). **Drop it into Image-to-Image** and all of that comes back (models are found by file name, or by hash if you renamed them). Untick "Use img2img mode" and Generate to recreate it, or keep it ticked to make variations. The GPU isn't bit-exact, so a recreated image differs by under ~2/255 per pixel.
+
+**LoRA keywords you can click:** pick a LoRA and its keywords appear as chips under the slots. They include Civitai trigger words (🔑) and the creator's full prompts, e.g. one per outfit (📋). There are also the tags from its training captions with how many training images had them (%); the higher the share, the more strongly the LoRA ties that tag to its character. Likely triggers are marked 🗝: name-like tags in almost every training image, even when Civitai lists another spelling. **✨ Add character tags** adds the triggers plus every tag in at least half of the training images, right after your quality tags.
+
+**Long prompts and duplicates:** a counter under the prompts shows tokens and 75-token chunks, and where each chunk starts. Nothing is cut off, and a tag is never split between chunks. `BREAK` starts a new chunk. It warns when a LoRA trigger word slipped out of the first chunk, or when a tag is in both the prompt and the negative prompt. Presets, quick tags and chips never add a tag twice: the stronger weight wins. **🧹 Tidy prompts** cleans up duplicates you typed yourself.
+
 **Your session comes back:** prompt, negative prompt, model, VAE, LoRA slots and settings are restored the next time you start the app (the seed always starts random).
 
 Also:
@@ -142,7 +148,7 @@ Upscale images by 2×, 4×, or 8× using Lanczos (CPU), Real-ESRGAN ONNX (Direct
 
 ### 📄 PNG Info
 
-Drop any image made by this app, A1111/Forge or Civitai to see its prompt and settings. **🚀 Send to Generate** fills in prompt, negative, sampler, steps, CFG, size, seed and checkpoint, and puts its LoRAs into the three slots with their weights — both `<lora:name:0.8>` prompt tags and this app's `LoRAs:` field are understood; the tags are taken out of the prompt, and LoRAs you don't have locally are listed.
+Drop any image made by this app, A1111/Forge or Civitai to see its prompt and settings. **🚀 Send to Generate** fills in prompt, negative, sampler, steps, CFG, size, seed and checkpoint, and puts its VAE and LoRAs into the slots with their weights — both `<lora:name:0.8>` prompt tags and this app's `LoRAs:` field are understood; the tags are taken out of the prompt, and LoRAs you don't have locally are listed.
 
 ### 🗑️ Watermark Remover
 
@@ -279,7 +285,7 @@ ImageGenApp/
 ├── run_zluda.bat             # Run any script under the ZLUDA environment
 ├── install.bat               # One-time dependency installer
 ├── selftest_zluda.py         # GPU-vs-CPU correctness self-test
-├── run_tests.py              # Test suite (72 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
+├── run_tests.py              # Test suite (78 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
 ├── download_models.bat/.py   # Starter model downloader
 ├── backend/
 │   ├── sd_pipeline.py        # SD 1.x inference (txt2img, img2img, LoRA)
@@ -297,7 +303,10 @@ ImageGenApp/
 │   ├── model_manager.py      # Local model directory scanner
 │   ├── help_content.py       # Bilingual help tab content (EN/中文)
 │   ├── tag_fetcher.py        # Civitai tag/trigger word fetcher
-│   └── trigger_reader.py     # Sidecar .civitai.json trigger word reader
+│   ├── trigger_reader.py     # Sidecar .civitai.json trigger word reader
+│   ├── lora_keywords.py      # Keyword chips: trigger words, creator prompts, training-tag coverage
+│   ├── prompt_tools.py       # Tag merge (strongest weight wins), token counter, tag-aligned 75-token chunks
+│   └── model_hash.py         # Background SHA-256 cache → A1111 "Model hash", finds renamed models
 ├── onnx_cache/               # Cached ONNX exports per model (auto-generated)
 │   └── <model_stem>/         # sdxl_te1.onnx, sdxl_te2.onnx + external data
 ├── models/

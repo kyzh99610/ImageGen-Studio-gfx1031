@@ -145,6 +145,46 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
     if m_loras:
         result["loras"] = m_loras.group(1).strip()
 
+    # Older ImageGen Studio files wrote "Width: 512, Height: 768" instead of "Size:"
+    if not m_size:
+        mw = re.search(r"\bWidth:\s*(\d+)", param_text)
+        mh = re.search(r"\bHeight:\s*(\d+)", param_text)
+        if mw and mh:
+            result["width"], result["height"] = int(mw.group(1)), int(mh.group(1))
+    m_vae = re.search(r"\bVAE:\s*([^,\n]+)", param_text)
+    if m_vae:
+        result["vae"] = m_vae.group(1).strip()
+    m_den = re.search(r"\bDenoising strength:\s*([0-9.]+)", param_text)
+    if m_den:
+        try:
+            result["strength"] = float(m_den.group(1))
+        except ValueError:
+            pass
+    m_hash = re.search(r"\bModel hash:\s*([0-9a-fA-F]{8,})", param_text)
+    if m_hash:
+        result["model_hash"] = m_hash.group(1).lower()
+
+    # ImageGen Studio's own record: exact model / VAE / LoRA files and weights
+    rec = _parse_json(info.get("imagegen")) if "imagegen" in info else None
+    if isinstance(rec, dict):
+        result["imagegen"] = rec
+        for k in ("prompt", "negative_prompt", "steps", "seed", "width", "height", "strength"):
+            if rec.get(k) not in (None, ""):
+                result[k] = rec[k]
+        if rec.get("cfg_scale") is not None:
+            result["cfg_scale"] = rec["cfg_scale"]
+        if rec.get("scheduler"):
+            result["sampler"] = rec["scheduler"]
+        if (rec.get("model") or {}).get("file"):
+            result["model"] = rec["model"]["file"]
+            if rec["model"].get("sha256_10"):
+                result["model_hash"] = rec["model"]["sha256_10"]
+        if rec.get("loras"):
+            result["loras"] = ", ".join(f"{Path(l['file']).stem}:{l.get('weight', 0.8):g}"
+                                        for l in rec["loras"] if isinstance(l, dict) and l.get("file"))
+        if rec.get("vae"):
+            result["vae"] = (rec["vae"] or {}).get("file")
+
     return result
 
 
@@ -241,6 +281,12 @@ def format_png_info_html(meta: dict[str, Any]) -> str:
     if meta.get("loras"):
         badges.append(f'<span style="background:#313244;color:#f38ba8;padding:3px 8px;border-radius:4px;font-size:13px;">🧬 LoRAs: <b>{meta["loras"]}</b></span>')
 
+    if meta.get("vae"):
+        badges.append(f'<span style="background:#313244;color:#94e2d5;padding:3px 8px;border-radius:4px;font-size:13px;">🎨 VAE: <b>{meta["vae"]}</b></span>')
+    if meta.get("strength") is not None:
+        badges.append(f'<span style="background:#313244;color:#fab387;padding:3px 8px;border-radius:4px;font-size:13px;">🖼 img2img strength: <b>{meta["strength"]}</b></span>')
+    if meta.get("model_hash"):
+        badges.append(f'<span style="background:#313244;color:#a6adc8;padding:3px 8px;border-radius:4px;font-size:13px;">#️⃣ Model hash: <b>{meta["model_hash"]}</b></span>')
     badge_html = " ".join(badges)
 
     html = f"""

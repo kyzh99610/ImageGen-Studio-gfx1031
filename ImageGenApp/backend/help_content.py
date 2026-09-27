@@ -151,40 +151,52 @@ def prompt_syntax_html() -> str:
     h += _note("⚠️ Weights above 1.5 or below 0.3 often cause artifacts. Keep it between 0.5–1.4 for clean results. &nbsp;"
                + _cn("权重超过 1.5 或低于 0.3 容易产生图像异常，建议控制在 0.5–1.4 之间。"))
 
-    h += '<div class="hg-h3">Special Keywords &nbsp;<span class="cn">特殊关键词</span></div>'
+    h += '<div class="hg-h3">Long Prompts, BREAK & Tokens &nbsp;<span class="cn">长提示词、BREAK 与 token</span></div>'
     h += _table(
-        ["Keyword / 关键词", "Effect / 效果", _cn("中文说明")],
+        ["Keyword / 功能", "Effect / 效果", _cn("中文说明")],
         [
             [_code("BREAK"),
-             "Resets attention context. Use between unrelated concepts.",
-             _cn("重置注意力上下文，用于分隔不相关的概念段落（SDXL常用）。")],
-            [_code("AND"),
-             "Combines two equal-weight sub-prompts (for compositional generation).",
-             _cn("将两段提示词以同等权重并联，适合多主体构图。")],
-            [_code("ADDBASE"),  "SDXL: apply base model prompt.", _cn("SDXL专用：应用基础模型的提示词段落。")],
-            [_code("ADDCOMM"),  "SDXL: apply refiner common prompt.", _cn("SDXL专用：应用精化模型的公共提示词。")],
+             "Starts a new 75-token chunk: the tags after it are encoded separately.",
+             _cn("开始新的75-token段：其后的标签单独编码。")],
+            ["📏 token counter",
+             "Under the prompts: tokens used, how many chunks, and where each chunk starts. "
+             "Nothing is cut off — every 75 tokens become one more chunk — but tags in the "
+             "<b>first</b> chunk steer the image most. A tag is never split between chunks.",
+             _cn("提示词下方显示 token 数、分段数及每段起点。不会截断，但第一段影响最大；标签不会被拆开。")],
+            ["⚠ warnings",
+             "A LoRA trigger word past the first 75 tokens, or a tag in both the prompt and the negative prompt.",
+             _cn("LoRA 触发词不在第一段，或同一标签同时出现在正负提示词中时提示。")],
+            ["🧹 Tidy prompts",
+             "Merges duplicate tags (masterpiece / (masterpiece:1.3) / masterpiece++) and keeps the strongest weight.",
+             _cn("合并重复标签，保留最高权重。")],
+            ["Presets & tag chips",
+             "Adding a preset or quick tag never duplicates a tag: an existing one keeps its place and the stronger weight wins.",
+             _cn("叠加预设或快捷标签时不会重复，同名标签保留更高权重。")],
+            [_code("AND"), _code("[a:b:0.5]"), _cn("不支持：A1111 的 AND、ADDBASE/ADDCOMM、[a:b:0.5] 调度和 [a|b] 轮换在本程序中会被当作普通文字或降权处理。")],
         ]
     )
+    h += _note("Not supported here (they are A1111 WebUI features): <b>AND</b>, <b>ADDBASE / ADDCOMM</b>, "
+               "prompt scheduling <code>[a:b:0.5]</code> and alternation <code>[a|b]</code> — square brackets "
+               "only mean \"weaker\" (×0.91). "
+               + _cn("本程序不支持 AND、ADDBASE/ADDCOMM、[a:b:0.5] 调度与 [a|b] 轮换；方括号只表示降低权重（×0.91）。"))
 
-    h += '<div class="hg-h3">Scheduled / Alternating &nbsp;<span class="cn">调度与轮换语法</span></div>'
-    h += _table(
-        ["Syntax / 语法", "Behavior / 行为", _cn("中文说明")],
-        [
-            [_code("[tag_A:tag_B:0.5]"),
-             "Use tag_A for the first 50% of steps, tag_B for the rest.",
-             _cn("前50%步用A，后50%步用B。适合过渡效果。")],
-            [_code("[tag_A|tag_B]"),
-             "Alternate between A and B every step.",
-             _cn("每步交替使用A和B，创造混合风格。")],
-            [_code("[tag_A:0.3]"),
-             "Start using tag_A only after 30% of steps.",
-             _cn("步数超过30%后才引入该标签，延迟添加效果。")],
-        ]
-    )
-    h += _tip("Scheduled syntax is most useful for style blending, e.g. "
-              + _code("[anime:photorealistic:0.6]")
-              + " gives an anime-started but photorealistic-finished result. "
-              + _cn("调度语法最适合风格渐变，例如先动漫再写实。"))
+    h += '<div class="hg-h3">LoRA Keywords &nbsp;<span class="cn">LoRA 关键词</span></div>'
+    h += _tip("Pick a LoRA and its keywords appear as chips under the LoRA slots — click one to add it. "
+              "🔑 = trigger word from Civitai, 🗝 = likely trigger (a name-like tag in ≥90 % of its training images — "
+              "sometimes the real spelling differs from Civitai's), 📋 = the creator's full prompt (e.g. one outfit), "
+              "% = share of training images with that tag: the higher, the more the LoRA ties it to its subject. "
+              "<b>✨ Add character tags</b> adds the triggers plus every tag in at least half of the training images, "
+              "right after your quality tags. "
+              + _cn("选择 LoRA 后，关键词以按钮形式出现，点击即可加入提示词。🔑 触发词，🗝 可能的触发词，📋 作者的完整提示词，"
+                    "% 为训练图片中含该标签的比例。✨ 一键加入触发词及出现率≥50%的标签。"))
+
+    h += '<div class="hg-h3">Reproducing an Image &nbsp;<span class="cn">复现图片</span></div>'
+    h += _tip("Every saved PNG records the checkpoint, VAE, LoRAs and their weights, prompts, sampler, steps, CFG, "
+              "size and seed (A1111-compatible text + an exact ImageGen Studio record). Drop it into "
+              "<b>Image-to-Image</b> and everything comes back; untick “Use img2img mode” and Generate to make the "
+              "same image again (the GPU isn't bit-exact, so expect differences under ~2/255 per pixel). "
+              + _cn("每张图片都记录了模型、VAE、LoRA 及权重、提示词、采样器、步数、CFG、尺寸和种子。拖入图生图即可全部恢复；"
+                    "取消勾选图生图模式再生成即可复现原图（GPU 非逐位一致，像素差约 2/255 以内）。"))
     return _wrap(h)
 
 
@@ -680,7 +692,7 @@ def hardware_html() -> str:
 <li>Subsequent runs use the integrated GPU via DirectML (the app finds it by name — DML device order differs per PC).
     On a 780M: ~115ms total vs ~6.4s CPU = <b>56× speedup</b>.</li>
 <li>Quality is identical: cosine similarity >0.9998 vs CPU baseline.</li>
-<li>Supports long prompts (>77 tokens) via automatic chunking.</li>
+<li>Supports long prompts (>77 tokens): 75-token chunks cut at tag boundaries; BREAK starts a new one.</li>
 <li>Under ZLUDA this is rarely needed — the text encoders already run on the dGPU.</li>
 </ol>
 <div class="hg-note">""" + _cn(

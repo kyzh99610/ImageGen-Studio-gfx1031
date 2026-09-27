@@ -491,13 +491,15 @@ def _build_embeds(pipe, prompt: str, neg_prompt: str, device: str) -> dict:
             text_encoder=pipe.text_encoder,
             truncate_long_prompts=False,
         )
-        from backend.prompt_syntax import a1111_to_compel   # (x:1.2) → (x)1.2
-        pos = c(a1111_to_compel(prompt))
-        neg = c(a1111_to_compel(neg_prompt))
-        [pos, neg] = c.pad_conditioning_tensors_to_same_length([pos, neg])
+        # 75-token chunks cut at tag boundaries (BREAK = new chunk), each encoded with
+        # Compel and concatenated — a tag is never split across two chunks.
+        from backend.prompt_tools import encode_chunked, pad_to_same_chunks
+        pos = encode_chunked(c, prompt, pipe.tokenizer)
+        neg = encode_chunked(c, neg_prompt, pipe.tokenizer)
+        pos, neg = pad_to_same_chunks(c, pos, neg)
         seq_len = pos.shape[1]
         if seq_len > 77:
-            print(f"[Compel] Long prompt encoded: {seq_len} tokens across {seq_len // 77} chunks ✓")
+            print(f"[Compel] Long prompt encoded in {seq_len // 77} chunks of 77 tokens ✓")
         return dict(prompt_embeds=pos, negative_prompt_embeds=neg)
     except Exception as e:
         print(f"[Compel] Encoding failed ({e}), falling back to raw 77-token strings")
