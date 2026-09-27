@@ -26,7 +26,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── run_zluda.bat <script.py>  ← run any script under the launch.bat ZLUDA environment
 │   ├── install.bat / requirements.txt
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
-│   ├── run_tests.py               ← 81-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 82-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -41,6 +41,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │       ├── prompt_tools.py        ← tag parse/merge (strongest weight wins), CLIP token count, 75-token chunks
 │       │                             at tag boundaries (BREAK = new chunk), encode_chunked(), prompt warnings
 │       ├── lora_keywords.py       ← trigger words / creator prompts / training-tag coverage → keyword chips
+│       ├── detail_tools.py        ← inpaint_region (only-masked), detect_faces, face_detail (ADetailer-style)
 │       ├── model_hash.py          ← background SHA-256 cache (settings/_hash_cache.json) → A1111 "Model hash"
 │       ├── civitai_client.py, model_manager.py, tag_fetcher.py, trigger_reader.py
 │       ├── npu_bridge.py, vram_estimator.py, rocm_env.py (runtime + rocBLAS kernels per GPU arch)
@@ -61,7 +62,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 76 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 77 pass + 5 skip on machines without a Ryzen AI NPU
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
 
@@ -170,6 +171,22 @@ stem → cached hash (renamed files). Used by PNG Info → Send to Generate and 
 (**upload, not change** — the gallery's "Send to img2img" must not overwrite a prompt the user edited since).
 Same seed + settings on this GPU differ by ~1–1.7/255 run to run (native convs aren't bit-exact); a restored
 regeneration measured 0.63/255.
+
+### Inpaint, face detail, checkpoint grid axis (`backend/detail_tools.py`)
+- `inpaint_region()`: "only masked" inpainting — crop = mask bbox + padding (≥ native/2 unless `min_context=0`),
+  scaled so the long side is 512 (SD 1.5) / 1024 (SDXL), the concrete `StableDiffusion(XL)InpaintPipeline.from_pipe`
+  (cached as `sdp._inpaint_pipe`, shares the LoRA-fused UNet; `torch_dtype` passed), prompt embeds from the same
+  builders as txt2img (Compel, chunks, CLIP skip / SDXL pooled), feathered paste-back. Measured: pixels outside the
+  mask identical (Δ 0.00).
+- `detect_faces()`: nagadomi lbpcascade_animeface (MIT, downloaded once to models/detectors/, SHA-256 pinned) +
+  OpenCV's bundled Haar frontal-face cascade; overlapping boxes → bigger one; boxes < 45 % of the main face's width
+  are dropped (windows/buttons were detected as faces on an SDXL ship scene). Turned heads are often missed.
+- `face_detail()`: per face an elliptical mask (face + 15–20 % margin), crop ≈ 2× the face, denoise 0.4 →
+  small faces redrawn at ~native/2 px. SD 1.5 full-body 512×768: 1 face in 5.9 s, 1.8 % of pixels changed.
+- Generate tab: "✨ Face detail" runs after hires fix on txt2img *and* img2img results; "🖌 Inpaint" accordion
+  (gr.ImageEditor, `app._editor_parts()`), record mode "inpaint" + `inpaint_padding` (not recreatable without the
+  source + mask). X/Y grid "Checkpoint" axis: values matched to local file names; each switch goes through
+  `_ensure_model` and re-syncs LoRAs.
 
 ### Hires fix, variations, CLIP skip, X/Y grid, batch folders
 - **Hires fix** (`app._hires_pass`): txt2img at the entered size → `_upscale_to()` (Lanczos, or Real-ESRGAN ×2/×4 then

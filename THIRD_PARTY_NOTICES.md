@@ -16,6 +16,7 @@ transformers, Gradio, ONNX Runtime DirectML, EasyOCR, …) from PyPI and downloa
 
 You install the **AMD HIP SDK** yourself, under AMD's license terms.
 
-At runtime the app may download models on request: Stable Diffusion checkpoints from Hugging Face or Civitai,
+At runtime the app may download models on request: the anime face detector
+[lbpcascade_animeface](https://github.com/nagadomi/lbpcascade_animeface) (MIT, SHA-256 checked) for Face detail; Stable Diffusion checkpoints from Hugging Face or Civitai,
 the Real-ESRGAN and LaMa ONNX models, and BLIP for auto-captioning. Each model has its own license. Check it
 before using the outputs commercially.
