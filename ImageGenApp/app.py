@@ -595,11 +595,15 @@ def _clean_extra(extra: dict | None) -> dict:
         "hires_denoise": min(0.9, max(0.05, _num(e.get("hires_denoise"), 0.45))),
         "hires_steps": int(min(150, max(1, round(_num(e.get("hires_steps"), 15))))),
         "hires_upscaler": method,
+        "fd_on": bool(e.get("fd_on")),
+        "fd_denoise": min(0.8, max(0.1, _num(e.get("fd_denoise"), 0.4))),
+        "fd_mode": e.get("fd_mode") if e.get("fd_mode") in ("auto", "anime", "photo") else "auto",
+        "fd_prompt": str(e.get("fd_prompt") or "")[:500],
     }
 
 
 _XY_AXES = ["none", "CFG", "Steps", "Sampler", "Seed", "LoRA 1 weight", "CLIP skip", "Hires denoise",
-            "Prompt S/R"]
+            "Prompt S/R", "Checkpoint"]
 
 
 def _xy_values(axis: str, text: str) -> tuple[list, str]:
@@ -612,6 +616,16 @@ def _xy_values(axis: str, text: str) -> tuple[list, str]:
         return [], f"Enter values for {axis}, separated by commas."
     if axis == "Prompt S/R":
         return raw, ""
+    if axis == "Checkpoint":
+        out = []
+        for v in raw:
+            key = v.lower().removesuffix(".safetensors")
+            hits = [p for n, p in list_checkpoints() if key in n.lower()]
+            exact = [p for p in hits if Path(p).stem.lower() == key]
+            if not hits:
+                return [], f"No checkpoint matches “{html.escape(v)}”."
+            out.append((exact or hits)[0])
+        return out, ""
     if axis == "Sampler":
         out = []
         for v in raw:
@@ -681,6 +695,21 @@ def _carry_params(src_img, note: str | None):
     if src.get("imagegen"):
         info.add_itxt("imagegen", str(src["imagegen"]))
     return info
+
+
+def _editor_parts(val):
+    """(background image, mask of everything painted) from a gr.ImageEditor value."""
+    import numpy as _np
+    if not isinstance(val, dict) or val.get("background") is None:
+        return None, None
+    bg = val["background"]
+    W, H = bg.size
+    m = _np.zeros((H, W), dtype=_np.uint8)
+    for layer in val.get("layers") or []:
+        if layer is not None:
+            a = _np.array(layer.convert("RGBA").resize((W, H)))[:, :, 3]
+            m = _np.maximum(m, (a > 10).astype(_np.uint8) * 255)
+    return bg.convert("RGB"), (Image.fromarray(m, "L") if m.any() else None)
 
 
 def _upscale_to(img, width: int, height: int, method: str = "Lanczos"):
@@ -982,6 +1011,24 @@ def _build_generate_tab():
                                 _hires_ups, label="Hires upscaler",
                                 value=_ls.get("hires_upscaler") if _ls.get("hires_upscaler") in _hires_ups else "Lanczos",
                                 info="Lanczos is instant; Real-ESRGAN gives sharper line art (a few seconds more).")
+                        with gr.Accordion("✨ Face detail — re-draw faces at full resolution (ADetailer-style)",
+                                          open=bool(_ls.get("fd_on"))):
+                            fd_cb = gr.Checkbox(
+                                label="Enable face detail", value=bool(_ls.get("fd_on", False)),
+                                info="Finds faces and re-draws each one at the model's native size — small faces "
+                                     "in full-body or group shots get proper eyes and mouths. ~5–15 s per face.")
+                            with gr.Row():
+                                fd_denoise_sl = gr.Slider(0.1, 0.8, value=_ls.get("fd_denoise", 0.4), step=0.05,
+                                                          label="Face denoise",
+                                                          info="0.3 = touch-up · 0.4 = fix details · 0.6 = new face")
+                                fd_mode_rb = gr.Radio(["auto", "anime", "photo"],
+                                                      value=_ls.get("fd_mode") if _ls.get("fd_mode") in
+                                                      ("auto", "anime", "photo") else "auto",
+                                                      label="Face detector")
+                            fd_prompt_txt = gr.Textbox(label="Extra face prompt (optional)",
+                                                       value=_ls.get("fd_prompt", ""),
+                                                       placeholder="e.g. detailed eyes, beautiful face",
+                                                       info="Added to your prompt for the face pass only.")
                         last_seed_state = gr.State([])      # seed of each image in the gallery
                         selected_idx_state = gr.State(0)    # gallery image the user clicked
 
@@ -1008,6 +1055,24 @@ def _build_generate_tab():
                             i2i_restore_html = gr.HTML("")
                             recreate_btn = gr.Button("🔁 Recreate it exactly (img2img off → Generate)",
                                                      variant="primary", size="sm", visible=False)
+                        with gr.Accordion("🖌 Inpaint — paint what to change", open=False):
+                            inp_editor = gr.ImageEditor(
+                                label="Image — paint over the part to redraw", type="pil",
+                                sources=["upload", "clipboard"], transforms=[],
+                                brush=gr.Brush(default_size=40, colors=["#ffffff"], default_color="#ffffff",
+                                               color_mode="fixed"),
+                                eraser=gr.Eraser(default_size=40))
+                            with gr.Row():
+                                inp_denoise_sl = gr.Slider(0.1, 1.0, value=0.75, step=0.05, label="Inpaint denoise",
+                                                           info="0.4 = adjust · 0.75 = redraw · 1.0 = ignore what's there")
+                                inp_pad_sl = gr.Slider(0, 256, value=48, step=8, label="Context padding (px)",
+                                                       info="Surroundings the model sees around the painted area.")
+                            gr.HTML('<p style="color:#a6adc8;font-size:13px;margin:2px 0;">Uses the prompt, '
+                                    'model, LoRAs, sampler, steps, CFG and seed above. Only the painted area '
+                                    'changes; it is redrawn at the model\'s native resolution, so small areas '
+                                    '(hands, faces) get full detail. Describe what should be there.</p>')
+                            inp_btn = gr.Button("🖌 Inpaint", variant="primary", size="sm")
+
 
                             gr.Markdown("---")
                             gr.HTML(
@@ -1358,6 +1423,37 @@ def _build_generate_tab():
         return ('<p style="color:#fab387;">⏹ Stopped. (If a model was loading, it finishes loading '
                 'and stays ready; a running generation ends after its current step.)</p>')
 
+    def _face_pass(imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress):
+        """Face detail on every image (same seed per image, low denoise)."""
+        import math
+        from backend.detail_tools import face_detail
+        t0, out, found = time.time(), [], []
+        fsteps = min(150, math.ceil(max(12, int(steps) * 0.8) / ex["fd_denoise"]))
+        for i, im in enumerate(imgs):
+            progress(0, desc=f"Face detail {i + 1}/{len(imgs)}: finding faces…")
+
+            def cb(step, total, i=i):
+                if _generation_abort.is_set():
+                    raise _GenerationAborted()
+                progress(step / total, desc=f"Face detail {i + 1}/{len(imgs)}: step {step}/{total}")
+            try:
+                res, n = face_detail(sd, im, prompt, neg_prompt, denoise=ex["fd_denoise"], steps=fsteps, cfg=cfg,
+                                     seed=seeds[i] if i < len(seeds) else seeds[-1], scheduler=scheduler,
+                                     clip_skip=ex["clip_skip"], mode=ex["fd_mode"], face_prompt=ex["fd_prompt"],
+                                     step_callback=cb)
+            except _GenerationAborted:
+                raise
+            except Exception as e:
+                print(f"[FaceDetail] {e}")
+                res, n = im, 0
+            if hasattr(im, "info"):
+                res.info = dict(im.info)
+            out.append(res); found.append(n)
+        note = (f'<br>✨ Face detail: {sum(found)} face(s) re-drawn '
+                f'({", ".join(str(n) for n in found)}) · denoise {ex["fd_denoise"]:g} · {time.time() - t0:.1f}s'
+                if sum(found) else '<br>✨ Face detail: no faces found')
+        return out, note
+
     def _hires_pass(imgs, seeds, prompt, neg_prompt, cfg, scheduler, ex, progress):
         """Hires fix: upscale each first-pass image and re-draw it with img2img at that size
         (same seed). SD 1.5 is capped at 1536 px and SDXL at 2048 px on the long side."""
@@ -1483,7 +1579,11 @@ def _build_generate_tab():
             if ex["hires_on"] and imgs and not (use_i2i and init_img is not None):
                 imgs, hires_note = _hires_pass(imgs, seeds, prompt, neg_prompt, cfg, scheduler, ex, progress)
                 sd.last_seeds = seeds            # the hires img2img passes overwrote them
-            info_html = f'<p style="color:#a6adc8;font-size:13px;">{info}{hires_note}{tags_note}</p>' 
+            fd_note = ""
+            if ex["fd_on"] and imgs:
+                imgs, fd_note = _face_pass(imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress)
+                sd.last_seeds = seeds
+            info_html = f'<p style="color:#a6adc8;font-size:13px;">{info}{hires_note}{fd_note}{tags_note}</p>' 
             if use_i2i and init_img is not None and imgs:
                 width, height = imgs[0].size   # img2img keeps the input's size
             i2i = bool(use_i2i and init_img is not None)
@@ -1498,6 +1598,8 @@ def _build_generate_tab():
                 **({"hires": {"scale": ex["hires_scale"], "denoise": ex["hires_denoise"],
                               "steps": ex["hires_steps"], "upscaler": ex["hires_upscaler"]}}
                    if hires_note else {}),
+                **({"face_detail": {"denoise": ex["fd_denoise"], "detector": ex["fd_mode"],
+                                    "prompt": ex["fd_prompt"]}} if fd_note else {}),
                 **({"strength": strength, "source_image": Path(src).name if src else None} if i2i else {}),
             ), pipe=sd)
             if saved:
@@ -1540,10 +1642,12 @@ def _build_generate_tab():
         seed_input, init_img, strength, use_i2i, max_batches, delay,
         clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
         hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
+        fd_on=False, fd_denoise=0.4, fd_mode="auto", fd_prompt="",
     ):
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
                                   hires_on=hires_on, hires_scale=hires_scale, hires_denoise=hires_denoise,
-                                  hires_steps=hires_steps, hires_upscaler=hires_upscaler))
+                                  hires_steps=hires_steps, hires_upscaler=hires_upscaler, fd_on=fd_on,
+                                  fd_denoise=fd_denoise, fd_mode=fd_mode, fd_prompt=fd_prompt))
         import random
         # Guard against double-start
         if _autoloop_active.is_set():
@@ -2112,11 +2216,13 @@ def _build_generate_tab():
                        steps, cfg, width, height, batch, seed, init_img, strength, use_i2i,
                        clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
                        hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
+                       fd_on=False, fd_denoise=0.4, fd_mode="auto", fd_prompt="",
                        progress=gr.Progress()):
         _generation_abort.clear()          # a new run starts; Stop from here on counts
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
                                   hires_on=hires_on, hires_scale=hires_scale, hires_denoise=hires_denoise,
-                                  hires_steps=hires_steps, hires_upscaler=hires_upscaler))
+                                  hires_steps=hires_steps, hires_upscaler=hires_upscaler, fd_on=fd_on,
+                                  fd_denoise=fd_denoise, fd_mode=fd_mode, fd_prompt=fd_prompt))
         w1, w2, w3 = (_num(w, 0.8) for w in (w1, w2, w3))
         ok, status = _ensure_model(model_path, vae_path, progress)
         if _generation_abort.is_set():
@@ -2142,7 +2248,8 @@ def _build_generate_tab():
             loras=[[lora1 or "none", float(w1)], [lora2 or "none", float(w2)], [lora3 or "none", float(w3)]],
             clip_skip=extra["clip_skip"], hires_on=extra["hires_on"], hires_scale=extra["hires_scale"],
             hires_denoise=extra["hires_denoise"], hires_steps=extra["hires_steps"],
-            hires_upscaler=extra["hires_upscaler"],
+            hires_upscaler=extra["hires_upscaler"], fd_on=extra["fd_on"], fd_denoise=extra["fd_denoise"],
+            fd_mode=extra["fd_mode"], fd_prompt=extra["fd_prompt"],
         ))
         seeds = getattr(sd, "last_seeds", None) or []
         return (imgs, info_html, last, status, (list(seeds) if imgs else gr.update()),
@@ -2155,7 +2262,7 @@ def _build_generate_tab():
         width_sl, height_sl, batch_sl, seed_num,
         init_image, strength_sl, use_i2i_cb,
         clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
-        hires_steps_sl, hires_up_dd,
+        hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
     ]
     gen_event = generate_btn.click(
         lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
@@ -2169,7 +2276,8 @@ def _build_generate_tab():
     def do_xy_grid(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, auto_quality, prompt, neg_prompt,
                    scheduler, steps, cfg, width, height, batch, seed, init_img, strength, use_i2i,
                    clip_skip, var_seed, var_strength, hires_on, hires_scale, hires_denoise, hires_steps,
-                   hires_upscaler, x_axis, x_text, y_axis, y_text, progress=gr.Progress()):
+                   hires_upscaler, fd_on, fd_denoise, fd_mode, fd_prompt, x_axis, x_text, y_axis, y_text,
+                   progress=gr.Progress()):
         import random
         _generation_abort.clear()
         err_html = lambda m: ([], f'<p style="color:#f38ba8;">❌ {m}</p>', gr.update(), gr.update())
@@ -2191,8 +2299,9 @@ def _build_generate_tab():
         seed = random.randint(0, 2**32 - 1) if seed < 0 else seed
         base_extra = dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength, hires_on=hires_on,
                           hires_scale=hires_scale, hires_denoise=hires_denoise, hires_steps=hires_steps,
-                          hires_upscaler=hires_upscaler)
-        cells, t0, lora_w_now = [], time.time(), None
+                          hires_upscaler=hires_upscaler, fd_on=fd_on, fd_denoise=fd_denoise, fd_mode=fd_mode,
+                          fd_prompt=fd_prompt)
+        cells, t0, lora_w_now, model_now = [], time.time(), None, model_path
         total = len(xs) * len(ys)
         try:
             for yi, yv in enumerate(ys):
@@ -2200,7 +2309,7 @@ def _build_generate_tab():
                     if _generation_abort.is_set():
                         raise _GenerationAborted()
                     p = dict(prompt=prompt or "", scheduler=scheduler, steps=steps, cfg=cfg, seed=seed,
-                             extra=dict(base_extra), lw=w1)
+                             extra=dict(base_extra), lw=w1, model=model_path)
                     for axis, v, vals in ((x_axis, xv, xs), (y_axis, yv, ys)):
                         if axis == "CFG": p["cfg"] = v
                         elif axis == "Steps": p["steps"] = v
@@ -2210,6 +2319,13 @@ def _build_generate_tab():
                         elif axis == "CLIP skip": p["extra"]["clip_skip"] = v
                         elif axis == "Hires denoise": p["extra"].update(hires_on=True, hires_denoise=v)
                         elif axis == "Prompt S/R": p["prompt"] = p["prompt"].replace(vals[0], v)
+                        elif axis == "Checkpoint": p["model"] = v
+                    if p["model"] != model_now:           # Checkpoint axis: switch models
+                        progress((len(cells)) / total, desc=f"Loading {Path(str(p['model'])).stem}…")
+                        ok_m, st_m = _ensure_model(p["model"], vae_path, progress)
+                        if not ok_m:
+                            return err_html(f"Could not load {html.escape(Path(str(p['model'])).stem)}")
+                        model_now, lora_w_now = p["model"], None
                     if p["lw"] != lora_w_now:
                         err = _sync_loras([(lora1, p["lw"]), (lora2, w2), (lora3, w3)], progress)
                         if err:
@@ -2229,8 +2345,8 @@ def _build_generate_tab():
         finally:
             if lora_w_now is not None and lora_w_now != w1:
                 _sync_loras([(lora1, w1), (lora2, w2), (lora3, w3)])
-        fmt = lambda a, v: "" if a in (None, "none") else f"{a} {v:g}" if isinstance(v, float) else f"{v}" if a in (
-            "Sampler", "Prompt S/R") else f"{a} {v}"
+        fmt = lambda a, v: "" if a in (None, "none") else Path(str(v)).stem[:24] if a == "Checkpoint" else \
+            f"{a} {v:g}" if isinstance(v, float) else f"{v}" if a in ("Sampler", "Prompt S/R") else f"{a} {v}"
         xl = [fmt(x_axis, v) for v in xs]
         yl = [fmt(y_axis, v) for v in ys]
         cols = len(xs)
@@ -2250,6 +2366,64 @@ def _build_generate_tab():
         msg = (f'<p style="color:#a6e3a1;font-size:13px;">📊 Grid of {len(cells)} images in '
                f'{_fmt_elapsed(time.time() - t0)} — saved as {gpath.name} (each cell is saved too).</p>')
         return [grid] + cells, msg, status, _active_loras_html()
+
+    def do_inpaint_ui(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, prompt, neg_prompt, scheduler,
+                      steps, cfg, seed, clip_skip, editor, denoise, padding, progress=gr.Progress()):
+        from backend.detail_tools import inpaint_region
+        _generation_abort.clear()
+        image, mask = _editor_parts(editor)
+        if image is None:
+            return [], '<p style="color:#f38ba8;">❌ Upload an image in the Inpaint box first.</p>', \
+                gr.update(), gr.update(), gr.update()
+        if mask is None:
+            return [], '<p style="color:#f38ba8;">❌ Paint over the part you want redrawn.</p>', \
+                gr.update(), gr.update(), gr.update()
+        image, fixed = _fit_init_image(image, max_side=2048)
+        if fixed:
+            mask = mask.resize(image.size, Image.NEAREST)
+        steps, cfg, _w, _h, _b, seed, denoise, fixes = _clean_gen_args(steps, cfg, 512, 512, 1, seed, denoise,
+                                                                      img2img=True)
+        ok, status = _ensure_model(model_path, vae_path, progress)
+        if not ok:
+            return [], (status if isinstance(status, str) else ""), status, gr.update(), gr.update()
+        err = _sync_loras([(lora1, _num(w1, 0.8)), (lora2, _num(w2, 0.7)), (lora3, _num(w3, 0.7))], progress)
+        if err:
+            return [], f'<p style="color:#f38ba8;">❌ LoRA problem: {err}</p>', status, gr.update(), gr.update()
+        cs = 2 if int(_num(clip_skip, 1)) >= 2 else 1
+
+        def cb(step, total):
+            if _generation_abort.is_set():
+                raise _GenerationAborted()
+            progress(step / total, desc=f"Inpainting: step {step}/{total}")
+        t0 = time.time()
+        try:
+            out, used = inpaint_region(sd, image, mask, prompt or "", neg_prompt or "", steps=steps, cfg=cfg,
+                                       denoise=denoise, seed=seed, scheduler=scheduler, clip_skip=cs,
+                                       padding=int(_num(padding, 48)), step_callback=cb)
+        except _GenerationAborted:
+            return [], '<p style="color:#fab387;">⏹ Inpaint stopped.</p>', status, gr.update(), gr.update()
+        except Exception as e:
+            return [], f'<p style="color:#f38ba8;">❌ Inpaint failed: {html.escape(str(e)[:300])}</p>', \
+                status, gr.update(), gr.update()
+        saved = _save_outputs([out], dict(mode="inpaint", prompt=prompt or "", negative_prompt=neg_prompt or "",
+                                          steps=steps, cfg_scale=cfg, seeds=[used], scheduler=scheduler,
+                                          width=out.width, height=out.height, strength=denoise,
+                                          inpaint_padding=int(_num(padding, 48)),
+                                          clip_skip=cs if cs > 1 else None), pipe=sd)
+        msg = (f'<p style="color:#a6adc8;font-size:13px;">🖌 Inpainted (denoise {denoise:g}, seed {used}) in '
+               f'{time.time() - t0:.1f}s · Saved: {saved[0].name if saved else "-"}'
+               + (f'<br><span style="color:#f9e2af;">Adjusted: {"; ".join(fixes)}</span>' if fixes else "")
+               + "</p>")
+        return [out], msg, status, [out], [used]
+
+    inp_event = inp_btn.click(
+        do_inpaint_ui,
+        [model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3, prompt_txt,
+         neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl, seed_num, clip_skip_rb, inp_editor, inp_denoise_sl,
+         inp_pad_sl],
+        [output_gallery, gen_info, model_status, last_generated_images, last_seed_state],
+    )
+    stop_btn.click(do_stop, [], [gen_info], cancels=[inp_event])
 
     xy_event = xy_btn.click(
         do_xy_grid, _gen_inputs + [xy_x_axis, xy_x_vals, xy_y_axis, xy_y_vals],
@@ -2301,11 +2475,12 @@ def _build_generate_tab():
                         batch_sl, seed_num, model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2,
                         lora_dd3, lora_weight3, strength_sl, use_i2i_cb, i2i_restore_html,
                         clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl,
-                        hires_denoise_sl, hires_steps_sl, hires_up_dd, recreate_btn]
+                        hires_denoise_sl, hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb,
+                        fd_prompt_txt, recreate_btn]
 
     def on_i2i_drop(img, restore):
         keep = [gr.update()] * 18
-        tail = [gr.update()] * 8 + [gr.update(visible=False)]
+        tail = [gr.update()] * 12 + [gr.update(visible=False)]
         if img is None:
             return (*keep, gr.update(), "", *tail)
         if not restore:
@@ -2417,7 +2592,7 @@ def _build_generate_tab():
             init_image, strength_sl, use_i2i_cb,
             loop_max_batches, loop_delay,
             clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
-            hires_steps_sl, hires_up_dd,
+            hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
         ],
         [output_gallery, gen_info, loop_status, last_generated_images, last_seed_state],
     )
@@ -2442,7 +2617,8 @@ def _build_generate_tab():
         "model": model_dd,
         "vae": vae_dd,
         "extra": [clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl,
-                  hires_denoise_sl, hires_steps_sl, hires_up_dd],
+                  hires_denoise_sl, hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb,
+                  fd_prompt_txt],
         "lora_dd1": lora_dd,
         "lora_w1": lora_weight,
         "lora_w2": lora_weight2,
@@ -2997,7 +3173,7 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
             if img is None:
                 return (*[gr.update()] * 16,
                         '<p style="color:#f38ba8;font-size:13px;">⚠ No image loaded in PNG Info.</p>',
-                        *[gr.update()] * 8)
+                        *[gr.update()] * 12)
             plan = _restore_plan(read_png_info(img))
             u = lambda v: gr.update() if v is None else v
             lora_ups = [gr.update()] * 6
@@ -4910,6 +5086,7 @@ def _restore_plan(meta: dict) -> dict:
     plan["var_seed"] = meta.get("var_seed") if meta.get("var_strength") else -1
     plan["var_strength"] = float(_num(meta.get("var_strength"), 0.0)) if meta.get("var_seed") is not None else 0.0
     plan["hires"] = meta.get("hires") if isinstance(meta.get("hires"), dict) else None
+    plan["face_detail"] = meta.get("face_detail") if isinstance(meta.get("face_detail"), dict) else None
     plan["mode"] = rec.get("mode") or ("img2img" if meta.get("strength") is not None else "txt2img")
     plan["exact"] = bool(rec)
     return plan
@@ -4924,9 +5101,14 @@ def _plan_extra_updates(plan: dict) -> list:
                            hires_scale=h.get("scale"), hires_denoise=h.get("denoise"),
                            hires_steps=h.get("steps"), hires_upscaler=h.get("upscaler")))
     keep = gr.update()
+    fd = plan.get("face_detail") or {}
+    fdx = _clean_extra(dict(fd_on=bool(fd), fd_denoise=fd.get("denoise"), fd_mode=fd.get("detector"),
+                            fd_prompt=fd.get("prompt")))
     return [ex["clip_skip"], ex["var_seed"], ex["var_strength"], bool(h),
             ex["hires_scale"] if h else keep, ex["hires_denoise"] if h else keep,
-            ex["hires_steps"] if h else keep, ex["hires_upscaler"] if h else keep]
+            ex["hires_steps"] if h else keep, ex["hires_upscaler"] if h else keep,
+            bool(fd), fdx["fd_denoise"] if fd else keep, fdx["fd_mode"] if fd else keep,
+            fdx["fd_prompt"] if fd else keep]
 
 
 def _plan_summary(plan: dict) -> str:
@@ -4947,6 +5129,8 @@ def _plan_summary(plan: dict) -> str:
     if plan.get("hires"):
         h = plan["hires"]
         bits.append(f"hires fix ×{h.get('scale')} (denoise {h.get('denoise')})")
+    if plan.get("face_detail"):
+        bits.append(f"face detail (denoise {plan['face_detail'].get('denoise')})")
     if plan.get("scheduler"):
         bits.append(plan["scheduler"])
     out = ", ".join(bits)
@@ -5060,6 +5244,11 @@ def _params_text(rec: dict) -> str:
     if hires:
         parts.append(f"Hires upscale: {hires['scale']:g}, Hires steps: {hires['steps']}, "
                      f"Hires upscaler: {hires['upscaler']}, Denoising strength: {hires['denoise']:g}")
+    fd = rec.get("face_detail") or {}
+    if fd:
+        parts.append(f"Face detail: denoise {fd['denoise']:g} ({fd['detector']})")
+    if rec.get("mode") == "inpaint":
+        parts.append(f"Inpaint: denoise {rec.get('strength')}, padding {rec.get('inpaint_padding')}")
     model = rec.get("model") or {}
     if model.get("sha256_10"):
         parts.append(f"Model hash: {model['sha256_10']}")

@@ -106,6 +106,8 @@ window, shows a loading screen while it starts, and frees the GPU when you close
 - **Hires fix** (small pass → upscale → re-draw details: SDXL 832×1216 → 1248×1824 fits in 12 GB), **variation
   seeds** ("more like this"), **CLIP skip 2** for SD 1.5 anime models, and an **X/Y grid** to compare CFG / steps /
   sampler / LoRA weight / prompt words side by side.
+- **✨ Face detail** (ADetailer-style: faces redrawn at full resolution) and **🖌 Inpaint** (paint an area,
+  redraw only that part with your model and LoRAs).
 - **Batch folders** for the upscaler and the watermark remover (auto-detect + LaMa), e.g. to clean a LoRA training set.
 - **Reproducible images:** every PNG records the checkpoint, VAE, LoRAs + weights and all settings (A1111-compatible,
   incl. model hash). Drop one into img2img and everything comes back.
@@ -173,7 +175,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 81 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
+That runs 82 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
 
 ## Credits and licenses
 

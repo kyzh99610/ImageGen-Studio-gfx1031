@@ -122,9 +122,13 @@ Generate images from text prompts using Stable Diffusion checkpoints. The output
 
 **Hires fix:** generate at the model's native size (good composition), then upscale ×1.5–2 and let the model re-draw details at the big size. SD 1.5 512×768 → 768×1152 takes about 30 s; SDXL 832×1216 → 1248×1824 about 2 min, and fits in 12 GB. Choose Lanczos, or Real-ESRGAN for sharper line art.
 
+**✨ Face detail (ADetailer-style):** finds faces (anime and photo detectors) and redraws each one at the model's full resolution with low denoise. Small faces in full-body or group shots get proper eyes and mouths, at about 5–15 s per face. You can add an extra face-only prompt.
+
+**🖌 Inpaint:** paint over any part of an image and describe what should be there. Only the painted area changes, and it's redrawn at native resolution, so hands and faces get full detail. It uses your current model, LoRAs, sampler and seed.
+
 **Variations & CLIP skip:** keep a seed you like and add a *variation seed* at 0.05–0.2 strength for the same picture with small changes. **🔀 More like this** under the gallery sets that up for the image you picked. **CLIP skip 2** is what most SD 1.5 anime checkpoints expect.
 
-**📊 X/Y grid:** compare two settings side by side with one seed. Axes: CFG, steps, sampler, seed, LoRA 1 weight, CLIP skip, hires denoise, or *Prompt S/R* (e.g. `red hair, blue hair, green hair`). You get one labelled grid, and every cell is also saved as a normal image.
+**📊 X/Y grid:** compare two settings side by side with one seed. Axes: CFG, steps, sampler, seed, LoRA 1 weight, CLIP skip, hires denoise, checkpoint, or *Prompt S/R* (e.g. `red hair, blue hair, green hair`). You get one labelled grid, and every cell is also saved as a normal image.
 
 **LoRA keywords you can click:** pick a LoRA and its keywords appear as chips under the slots. They include Civitai trigger words (🔑) and the creator's full prompts, e.g. one per outfit (📋). There are also the tags from its training captions with how many training images had them (%); the higher the share, the more strongly the LoRA ties that tag to its character. Likely triggers are marked 🗝: name-like tags in almost every training image, even when Civitai lists another spelling. **✨ Add character tags** adds the triggers plus every tag in at least half of the training images, right after your quality tags.
 
@@ -292,7 +296,7 @@ ImageGenApp/
 ├── run_zluda.bat             # Run any script under the ZLUDA environment
 ├── install.bat               # One-time dependency installer
 ├── selftest_zluda.py         # GPU-vs-CPU correctness self-test
-├── run_tests.py              # Test suite (81 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
+├── run_tests.py              # Test suite (82 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
 ├── download_models.bat/.py   # Starter model downloader
 ├── backend/
 │   ├── sd_pipeline.py        # SD 1.x inference (txt2img, img2img, LoRA)
@@ -313,6 +317,7 @@ ImageGenApp/
 │   ├── trigger_reader.py     # Sidecar .civitai.json trigger word reader
 │   ├── lora_keywords.py      # Keyword chips: trigger words, creator prompts, training-tag coverage
 │   ├── prompt_tools.py       # Tag merge (strongest weight wins), token counter, tag-aligned 75-token chunks
+│   ├── detail_tools.py       # Inpaint (only masked), face detection, face-detail pass
 │   └── model_hash.py         # Background SHA-256 cache → A1111 "Model hash", finds renamed models
 ├── onnx_cache/               # Cached ONNX exports per model (auto-generated)
 │   └── <model_stem>/         # sdxl_te1.onnx, sdxl_te2.onnx + external data
