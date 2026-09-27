@@ -26,7 +26,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── run_zluda.bat <script.py>  ← run any script under the launch.bat ZLUDA environment
 │   ├── install.bat / requirements.txt
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
-│   ├── run_tests.py               ← 72-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 78-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -38,6 +38,10 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │       ├── lora_trainer.py, dataset_manager.py, auto_tagger.py
 │       ├── lycoris.py             ← LoHa/LoKr fusion (diffusers can't load them)
 │       ├── prompt_syntax.py       ← A1111 (x:1.2)/((x))/[x] → Compel weights (Compel ignores A1111 syntax)
+│       ├── prompt_tools.py        ← tag parse/merge (strongest weight wins), CLIP token count, 75-token chunks
+│       │                             at tag boundaries (BREAK = new chunk), encode_chunked(), prompt warnings
+│       ├── lora_keywords.py       ← trigger words / creator prompts / training-tag coverage → keyword chips
+│       ├── model_hash.py          ← background SHA-256 cache (settings/_hash_cache.json) → A1111 "Model hash"
 │       ├── civitai_client.py, model_manager.py, tag_fetcher.py, trigger_reader.py
 │       ├── npu_bridge.py, vram_estimator.py, rocm_env.py (runtime + rocBLAS kernels per GPU arch)
 │       └── help_content.py        ← bilingual (EN/中文) in-app Help tab — keep in sync with behaviour
@@ -57,7 +61,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 67 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 73 pass + 5 skip on machines without a Ryzen AI NPU
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
 
@@ -153,6 +157,30 @@ Something in the Compel call path captures the call stack under Gradio's worker 
 `_build_embeds`' frame — and through its `pipe` local, the whole pipeline — alive after `_unload()`. Both encoders
 clear their locals in a `finally` (`pipe = c = None`). If VRAM doesn't drop after an unload, look for a frame or
 closure holding `pipe` (`gc.get_referrers(weakref_to_pipe())` inside the app — a plain script won't reproduce it).
+
+### Reproducible outputs & restore
+`app._save_outputs(images, meta, pipe=…)` writes A1111 `parameters` text (Steps, Sampler, CFG scale, Seed,
+`Size: WxH`, Model hash (AutoV2, once `model_hash` has it — hashing runs in the background, so the first image
+of a new model may lack it), Model, VAE, Denoising strength, `LoRAs:` last) **and** an `imagegen` iTXt JSON
+record: mode, prompts, scheduler, steps, cfg_scale, seed, width, height, strength, model {file, family,
+sha256_10}, vae {file}|null, loras [{file, weight, sha256_10}]. Built by `_gen_record()` from the pipeline that
+made the image. The Bridge saves stage 1 (txt2img, SD 1.5) and stage 2 (img2img, SDXL) with separate records.
+`_restore_plan(read_png_info(img))` maps a record (or plain A1111 text) back to local files: exact file name →
+stem → cached hash (renamed files). Used by PNG Info → Send to Generate and by `init_image.upload`
+(**upload, not change** — the gallery's "Send to img2img" must not overwrite a prompt the user edited since).
+Same seed + settings on this GPU differ by ~1–1.7/255 run to run (native convs aren't bit-exact); a restored
+regeneration measured 0.63/255.
+
+### Prompts: merge, chunks, keywords
+`prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
+auto-quality tags: each tag once (key = lower-case, `_`→space, weight syntax removed), strongest weight wins,
+first position kept. Long prompts: `encode_chunked()` encodes ≤75-token chunks cut at tag boundaries (Compel alone
+cut mid-tag every 75 tokens and BREAK became a comma) and concatenates them; SDXL pooled = first chunk;
+`pad_to_same_chunks()` pads the shorter side with empty-prompt chunks. Keyword chips (`gr.Dataset`, `type="index"`,
+tags in a `gr.State` as `[tag, goes_up_front]`): triggers / 📋 creator prompts go after the leading quality tags
+(`insert_after_quality`), other tags merge at the end. Coverage = caption tag count / training images
+(`ss_dataset_dirs` img_count). Civitai trainedWords that are whole prompts: the tags all of them share become the
+trigger. Name-like tags in ≥90 % of images are 🗝 likely triggers (e.g. a caption typo of the name).
 
 ### LoRA
 The Generate tab applies whatever the three slot dropdowns show on every Generate/Auto-Loop (`_sync_loras`, one

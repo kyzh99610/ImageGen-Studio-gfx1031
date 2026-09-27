@@ -1171,6 +1171,184 @@ def _():
 
 
 # ══════════════════════════════════════════════════════════════════════════
+print("\n[features] Reproducible outputs, keyword chips, long prompts")
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@test("Prompt merge: every tag once at its strongest weight, syntax-aware")
+def _():
+    from backend.prompt_tools import parse_tag, merge_prompts, tidy_prompt, split_tags, insert_after_quality
+    assert parse_tag("((masterpiece))")[0:2] == ("masterpiece", 1.1 * 1.1)
+    assert parse_tag("[blurry]")[1] < 1 and parse_tag("word++")[1] > 1.2
+    assert parse_tag("Long_Hair")[0] == parse_tag("long hair")[0]
+    assert parse_tag("(x)1.3")[:2] == ("x", 1.3)
+    assert split_tags("a, (b, c:1.2), d BREAK e") == ["a", "(b, c:1.2)", "d", "BREAK", "e"]
+    assert merge_prompts("masterpiece, best quality, 1girl",
+                         "(masterpiece:1.3), [1girl], red eyes") == "(masterpiece:1.3), best quality, 1girl, red eyes"
+    assert merge_prompts("a, b BREAK c", "b, d") == "a, b BREAK c, d"
+    assert tidy_prompt("a, a, (a:1.4), b")[0] == "(a:1.4), b"
+    assert insert_after_quality("score_9, score_8_up, 1girl, (x:0.8)", "x, y") == "score_9, score_8_up, x, y, 1girl"
+
+
+@test("Long prompts: 75-token chunks at tag boundaries, BREAK starts a chunk")
+def _():
+    from backend.prompt_tools import chunk_prompt, count_tokens, token_report_html, prompt_warnings
+    long = ", ".join(f"very detailed tag number {i}" for i in range(30))
+    chunks = chunk_prompt(long)
+    assert len(chunks) >= 3 and all(count_tokens(", ".join(c)) <= 75 for c in chunks)
+    assert sum(len(c) for c in chunks) == 30                          # nothing dropped or split
+    assert chunk_prompt("a BREAK b, c") == [["a"], ["b", "c"]]
+    assert chunk_prompt("x, <lora:foo:0.5>") == [["x"]]              # LoRA tags aren't text
+    html = token_report_html(long, "bad")
+    assert "chunks" in html and "starts at" in html
+    assert prompt_warnings(long + ", mytrigger", "", ["mytrigger"])    # trigger pushed past chunk 1
+    assert prompt_warnings("cat, blurry", "Blurry")                     # same tag in both prompts
+
+
+@test("Chunked encoding concatenates per-chunk embeddings and pads to equal length")
+def _():
+    import torch
+    from backend.prompt_tools import encode_chunked, pad_to_same_chunks
+
+    class FakeCompel:
+        def __init__(self, sdxl):
+            self.sdxl, self.calls = sdxl, []
+        def __call__(self, text):
+            self.calls.append(text)
+            e = torch.full((1, 77, 8), float(len(self.calls)))
+            return (e, torch.ones(1, 4) * len(self.calls)) if self.sdxl else e
+    long = ", ".join(f"very detailed tag number {i}" for i in range(30)) + " BREAK sky"
+    c = FakeCompel(False)
+    e = encode_chunked(c, long)
+    assert e.shape == (1, 77 * len(c.calls), 8) and len(c.calls) >= 4 and "BREAK" not in " ".join(c.calls)
+    n = encode_chunked(c, "bad")
+    a, b = pad_to_same_chunks(c, e, n)
+    assert a.shape == b.shape
+    cx = FakeCompel(True)
+    ex, pooled = encode_chunked(cx, long, sdxl=True)
+    assert float(pooled[0, 0]) == 1.0                                    # pooled from the first chunk
+
+
+@test("LoRA keywords: Civitai prompts, shared trigger, coverage from training captions")
+def _():
+    import struct
+    from backend.lora_keywords import lora_keywords, chips_for
+    tmp = Path(_tf.mkdtemp())
+    meta = {"ss_tag_frequency": json.dumps({"10_x": {"charname": 20, "1girl": 20, "white hair": 19,
+                                                     "red eyes": 18, "dress": 9, "highres": 20, "smile": 3}}),
+            "ss_dataset_dirs": json.dumps({"10_x": {"n_repeats": 10, "img_count": 20}})}
+    hdr = json.dumps({"__metadata__": meta, "w": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}}).encode()
+    p = tmp / "char.safetensors"
+    p.write_bytes(struct.pack("<Q", len(hdr)) + hdr + b"\0\0")
+    kw = lora_keywords(str(p))
+    assert kw.triggers == ["charname"] and kw.inferred and kw.n_images == 20, kw
+    assert ("white hair", 0.95) in kw.tags and not any(t == "highres" for t, _ in kw.tags)   # meta tag hidden
+    assert kw.core()[:3] == ["charname", "1girl", "white hair"]
+    Path(str(p) + ".civitai.json").write_text(json.dumps({"trainedWords": [
+        "charname, white hair, red eyes, dress", "charname, white hair, red eyes, swimsuit"]}), encoding="utf-8")
+    kw = lora_keywords(str(p))
+    assert kw.triggers == ["charname", "white hair", "red eyes"] and len(kw.phrases) == 2, kw
+    samples, tags, note = chips_for([("S1", str(p))])
+    assert any("📋" in s[0] for s in samples) and tags[0][1] is True and "S1" in note
+    assert any(t == ["dress", False] for t in tags)
+
+
+@test("Saved images carry model/VAE/LoRA files and restore exactly (incl. renamed files)")
+def _():
+    import app as _app
+    from PIL import Image
+    from backend.png_info import read_image_metadata as rd
+    from backend import model_hash
+    tmp = Path(_tf.mkdtemp())
+    for sub in ("ck", "vae", "lora", "out"):
+        (tmp / sub).mkdir()
+    ck = tmp / "ck" / "myModel.safetensors"; ck.write_bytes(b"ckpt-bytes")
+    vae = tmp / "vae" / "myVae.safetensors"; vae.write_bytes(b"vae")
+    lo = tmp / "lora" / "charLora.safetensors"; lo.write_bytes(b"lora")
+
+    class P:            # stands in for a loaded pipeline
+        current_model, _last_vae_path, model_family = str(ck), str(vae), "sd15"
+        _lora_adapters = {0: ("charLora.safetensors", str(lo), 0.75)}
+    orig_hash = (model_hash._CACHE_FILE, model_hash._cache)
+    model_hash._CACHE_FILE, model_hash._cache = tmp / "hashes.json", {}     # keep the real cache clean
+    model_hash.compute(str(ck))
+    orig = (_app.OUTPUTS_DIR, _app.list_checkpoints, _app.list_loras, _app.list_vaes)
+    try:
+        _app.OUTPUTS_DIR = tmp / "out"
+        [path] = _app._save_outputs([Image.new("RGB", (64, 80))], dict(
+            mode="txt2img", prompt="(cat:1.2), <lora:charLora:0.75>", negative_prompt="bad", steps=12,
+            cfg_scale=6.5, seeds=[99], scheduler="Euler a", width=64, height=80), pipe=P())
+        with Image.open(path) as im:
+            params = im.info["parameters"]
+        assert "Size: 64x80" in params and "VAE: myVae.safetensors" in params and "LoRAs: charLora:0.75" in params
+        assert f"Model hash: {model_hash.cached(str(ck))[:10]}" in params, params
+        meta = rd(path)
+        assert meta["imagegen"]["loras"][0]["weight"] == 0.75 and meta["vae"] == "myVae.safetensors"
+        _app.list_checkpoints = lambda: [(ck.name, str(ck))]
+        _app.list_vaes = lambda: [(vae.name, str(vae))]
+        _app.list_loras = lambda: [(lo.name, str(lo))]
+        plan = _app._restore_plan(meta)
+        assert (plan["model"], plan["vae"], plan["loras"]) == (str(ck), str(vae), [(str(lo), 0.75)]), plan
+        assert (plan["seed"], plan["steps"], plan["cfg_scale"], plan["scheduler"], plan["width"]) == \
+            (99, 12, 6.5, "Euler a", 64) and plan["exact"] and plan["prompt"] == "(cat:1.2)"
+        # the checkpoint was renamed since: found again by its hash
+        ck2 = ck.with_name("renamed.safetensors"); ck.rename(ck2)
+        model_hash.compute(str(ck2))
+        _app.list_checkpoints = lambda: [(ck2.name, str(ck2))]
+        assert _app._restore_plan(meta)["model"] == str(ck2)
+        # an A1111 image (no record) still restores prompt + settings + LoRA tags
+        a1 = tmp / "a1111.png"
+        from PIL.PngImagePlugin import PngInfo
+        info = PngInfo(); info.add_text("parameters", "a dog, <lora:charLora:0.6>\nNegative prompt: bad\n"
+                                        "Steps: 20, Sampler: DPM++ 2M Karras, CFG scale: 7, Seed: 5, Size: 512x768, Model: renamed")
+        Image.new("RGB", (8, 8)).save(a1, pnginfo=info)
+        plan = _app._restore_plan(rd(a1))
+        assert plan["loras"] == [(str(lo), 0.6)] and plan["model"] == str(ck2) and not plan["exact"], plan
+        assert plan["prompt"] == "a dog" and plan["scheduler"] == "DPM++ 2M Karras"
+    finally:
+        _app.OUTPUTS_DIR, _app.list_checkpoints, _app.list_loras, _app.list_vaes = orig
+        model_hash._CACHE_FILE, model_hash._cache = orig_hash
+
+
+@test("Bug-check: merge keeps formatting, HF repo IDs restore, malformed records don't crash")
+def _():
+    import app as _app
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    from backend.prompt_tools import merge_prompts, count_tokens
+    from backend.png_info import read_image_metadata as rd
+    base = "masterpiece,\nbest quality,\n1girl"
+    assert merge_prompts(base, "red eyes") == base + ", red eyes"          # line breaks survive
+    assert merge_prompts(base, "1girl") == base
+    assert merge_prompts("a", "x, (x:1.3)") == "a, (x:1.3)"
+    assert count_tokens("a b c", "estimate") > 0
+    tmp = Path(_tf.mkdtemp())
+
+    class HF:
+        current_model, _last_vae_path, model_family = "stabilityai/stable-diffusion-xl-base-1.0", None, "sdxl"
+        _lora_adapters = {}
+    orig = _app.OUTPUTS_DIR
+    try:
+        _app.OUTPUTS_DIR = tmp
+        [p] = _app._save_outputs([Image.new("RGB", (32, 32))], dict(mode="txt2img", prompt="cat", steps=5,
+                                  cfg_scale=5, seeds=[1], scheduler="Euler", width=32, height=32), pipe=HF())
+        plan = _app._restore_plan(rd(p))
+        assert plan["model"] == "stabilityai/stable-diffusion-xl-base-1.0" and not plan["missing"], plan
+        assert plan["loras"] == [] and plan["vae"] == "none"                # exact: no LoRAs, no VAE
+    finally:
+        _app.OUTPUTS_DIR = orig
+    g = tmp / "g.png"; info = PngInfo()
+    info.add_itxt("imagegen", json.dumps({"loras": [{"file": None}, "x", {"weight": "abc", "file": "q"}],
+                                         "model": None, "vae": {"file": None}, "steps": "12"}))
+    Image.new("RGB", (8, 8)).save(g, pnginfo=info)
+    _app._restore_plan(rd(g))
+    g2 = tmp / "g2.png"; info = PngInfo(); info.add_itxt("imagegen", "{not json"); info.add_text("parameters", "y")
+    Image.new("RGB", (8, 8)).save(g2, pnginfo=info)
+    plan = _app._restore_plan(rd(g2))
+    assert plan["prompt"] == "y" and not plan["exact"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Summary
 # ══════════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 70)
