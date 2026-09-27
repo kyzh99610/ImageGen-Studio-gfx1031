@@ -103,6 +103,10 @@ window, shows a loading screen while it starts, and frees the GPU when you close
 
 - **Generate:** SD 1.x / SD 2.x / SDXL / Pony / Illustrious / NoobAI, 9 samplers, batches, reusable
   per-image seeds, Auto-Loop, A1111 prompt weighting (`(tag:1.2)`, `[tag]`, `BREAK`, `<lora:name:0.8>`)
+- **Hires fix** (small pass → upscale → re-draw details: SDXL 832×1216 → 1248×1824 fits in 12 GB), **variation
+  seeds** ("more like this"), **CLIP skip 2** for SD 1.5 anime models, and an **X/Y grid** to compare CFG / steps /
+  sampler / LoRA weight / prompt words side by side.
+- **Batch folders** for the upscaler and the watermark remover (auto-detect + LaMa), e.g. to clean a LoRA training set.
 - **Reproducible images:** every PNG records the checkpoint, VAE, LoRAs + weights and all settings (A1111-compatible,
   incl. model hash). Drop one into img2img and everything comes back.
 - **Clickable LoRA keywords:** trigger words, the creator's ready-made prompts, and the LoRA's training tags ranked by
@@ -169,7 +173,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 78 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
+That runs 81 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
 
 ## Credits and licenses
 

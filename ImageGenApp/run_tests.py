@@ -1348,6 +1348,102 @@ def _():
     assert plan["prompt"] == "y" and not plan["exact"]
 
 
+@test("Hires fix / variations / CLIP skip / X-Y grid settings: parsing, records, restore")
+def _():
+    import app as _app
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    from backend.png_info import read_image_metadata as rd
+    ex = _app._clean_extra(dict(clip_skip="3", var_seed=-5, var_strength=7, hires_on=1, hires_scale=9,
+                                hires_denoise=None, hires_steps=0, hires_upscaler="Nope"))
+    assert ex == {"clip_skip": 2, "var_seed": -1, "var_strength": 1.0, "hires_on": True, "hires_scale": 2.5,
+                  "hires_denoise": 0.45, "hires_steps": 1, "hires_upscaler": "Lanczos"}, ex
+    assert _app._xy_values("CFG", "4-10:2") == ([4.0, 6.0, 8.0, 10.0], "")
+    assert _app._xy_values("Steps", "10-12") == ([10, 11, 12], "")
+    assert _app._xy_values("Sampler", "euler a")[0] == ["Euler a"]
+    assert _app._xy_values("Seed", "1, x")[1] and _app._xy_values("CFG", "")[1]
+    assert _app._xy_values("none", "")[0] == [None]
+    g = _app._xy_grid([Image.new("RGB", (512, 768))] * 4, ["CFG 5", "CFG 8"], ["a", "b"], "t")
+    assert g.size[0] > 600 and g.size[1] > 1000
+    tmp = Path(_tf.mkdtemp())
+
+    class P:
+        current_model, _last_vae_path, model_family = "", None, "sd15"
+        _lora_adapters = {}
+    orig = _app.OUTPUTS_DIR
+    try:
+        _app.OUTPUTS_DIR = tmp
+        paths = _app._save_outputs([Image.new("RGB", (768, 1152))] * 2, dict(
+            mode="txt2img", prompt="cat", steps=20, cfg_scale=7, seeds=[5, 6], scheduler="Euler a",
+            width=512, height=768, clip_skip=2, var_seeds=[40, 41], var_strength=0.15,
+            hires={"scale": 1.5, "denoise": 0.45, "steps": 12, "upscaler": "Lanczos"}), pipe=P())
+        m = rd(paths[1])
+        assert (m["var_seed"], m["var_strength"], m["clip_skip"], m["hires"]["scale"]) == (41, 0.15, 2, 1.5), m
+        with Image.open(paths[1]) as im:
+            t = im.info["parameters"]
+        assert "Size: 512x768" in t and "Clip skip: 2" in t and "Hires upscale: 1.5" in t and "Variation seed: 41" in t
+        plan = _app._restore_plan(m)
+        assert (plan["clip_skip"], plan["var_seed"], plan["var_strength"], plan["hires"]["denoise"],
+                plan["width"]) == (2, 41, 0.15, 0.45, 512), plan
+        assert _app._plan_extra_updates(plan)[:4] == [2, 41, 0.15, True]
+    finally:
+        _app.OUTPUTS_DIR = orig
+    # an A1111 hires image: Denoising strength is the hires denoise, not an img2img strength
+    a = tmp / "a.png"; info = PngInfo()
+    info.add_text("parameters", "x\nSteps: 20, Sampler: Euler a, CFG scale: 7, Seed: 3, Size: 512x768, Clip skip: 2, "
+                  "Denoising strength: 0.4, Hires upscale: 2, Hires steps: 10, Hires upscaler: R-ESRGAN 4x+")
+    Image.new("RGB", (8, 8)).save(a, pnginfo=info)
+    m = rd(a)
+    assert m["hires"] == {"scale": 2.0, "steps": 10, "upscaler": "R-ESRGAN 4x+", "denoise": 0.4} and "strength" not in m, m
+    plan = _app._restore_plan(m)
+    assert plan["mode"] == "txt2img" and _app._plan_extra_updates(plan)[7] == "Lanczos"   # unknown upscaler → Lanczos
+
+
+@test("Variation latents: strength 0 = the seed's own noise; blend keeps unit variance")
+def _():
+    import torch
+    from backend.sd_pipeline import variation_latents, _slerp
+
+    class U:
+        dtype = torch.float32
+        class config:
+            in_channels = 4
+
+    class Pipe:
+        unet = U(); vae_scale_factor = 8
+    lat, vs = variation_latents(Pipe(), [torch.Generator().manual_seed(1)], 7, 0.0, 1, 512, 512, "cpu")
+    assert lat is None and vs == []
+    lat, vs = variation_latents(Pipe(), [torch.Generator().manual_seed(1), torch.Generator().manual_seed(2)],
+                                7, 0.3, 2, 512, 768, "cpu")
+    assert lat.shape == (2, 4, 96, 64) and vs == [7, 8]
+    assert 0.9 < float(lat.std()) < 1.1                                  # slerp, not a variance-shrinking mix
+    a = torch.randn(1, 4, 8, 8); b = torch.randn(1, 4, 8, 8)
+    assert torch.allclose(_slerp(0.0, a, b), a, atol=1e-5) and torch.allclose(_slerp(1.0, a, b), b, atol=1e-4)
+
+
+@test("LaMa watermark removal: separate regions, edge captions, nothing outside the mask changes")
+def _():
+    import numpy as np
+    from PIL import Image, ImageDraw
+    from backend.watermark_remover import inpaint_lama, is_lama_available, _LAMA_PATH
+    if not _LAMA_PATH.exists():
+        raise Skip("LaMa model not downloaded yet")
+    rng = np.random.default_rng(0)
+    base = (rng.random((600, 400, 3)) * 40 + 100).astype(np.uint8)       # textured grey
+    img = Image.fromarray(base)
+    marked = img.copy(); d = ImageDraw.Draw(marked)
+    d.rectangle([10, 560, 390, 598], fill=(255, 255, 255))               # caption on the bottom edge
+    d.rectangle([330, 10, 390, 30], fill=(255, 255, 255))                # corner tag
+    mask = Image.new("L", img.size, 0); dm = ImageDraw.Draw(mask)
+    dm.rectangle([8, 558, 392, 599], fill=255); dm.rectangle([328, 8, 392, 32], fill=255)
+    out = np.asarray(inpaint_lama(marked, mask)).astype(np.float32)
+    # the white boxes are gone (filled close to the grey texture, not a white/grey smear)
+    assert abs(out[570:595, 20:380].mean() - base[570:595, 20:380].mean()) < 25, out[570:595, 20:380].mean()
+    assert abs(out[12:28, 335:385].mean() - base[12:28, 335:385].mean()) < 25
+    # far from both regions nothing changed
+    assert np.array_equal(out[100:500, 0:300].astype(np.uint8), base[100:500, 0:300])
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Summary
 # ══════════════════════════════════════════════════════════════════════════
