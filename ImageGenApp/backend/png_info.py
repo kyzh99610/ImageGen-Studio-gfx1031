@@ -164,6 +164,23 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
     if m_hash:
         result["model_hash"] = m_hash.group(1).lower()
 
+    # CLIP skip, variation seed and hires fix (A1111 names)
+    m = re.search(r"\bClip skip:\s*(\d+)", param_text)
+    if m:
+        result["clip_skip"] = int(m.group(1))
+    m = re.search(r"\bVariation seed:\s*(\d+)", param_text)
+    m2 = re.search(r"\bVariation seed strength:\s*([0-9.]+)", param_text)
+    if m and m2:
+        result["var_seed"], result["var_strength"] = int(m.group(1)), float(m2.group(1))
+    m = re.search(r"\bHires upscale:\s*([0-9.]+)", param_text)
+    if m:
+        hs = re.search(r"\bHires steps:\s*(\d+)", param_text)
+        hu = re.search(r"\bHires upscaler:\s*([^,\n]+)", param_text)
+        result["hires"] = {"scale": float(m.group(1)),
+                           "steps": int(hs.group(1)) if hs else None,
+                           "upscaler": hu.group(1).strip() if hu else "Lanczos",
+                           "denoise": result.pop("strength", None)}   # A1111: "Denoising strength" = hires denoise
+
     # ImageGen Studio's own record: exact model / VAE / LoRA files and weights
     rec = _parse_json(info.get("imagegen")) if "imagegen" in info else None
     if isinstance(rec, dict):
@@ -184,6 +201,11 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
                                         for l in rec["loras"] if isinstance(l, dict) and l.get("file"))
         if rec.get("vae"):
             result["vae"] = (rec["vae"] or {}).get("file")
+        for k in ("clip_skip", "var_seed", "var_strength", "hires"):
+            if rec.get(k) is not None:
+                result[k] = rec[k]
+        if rec.get("hires") and rec.get("mode") != "img2img":
+            result.pop("strength", None)
 
     return result
 
@@ -285,6 +307,13 @@ def format_png_info_html(meta: dict[str, Any]) -> str:
         badges.append(f'<span style="background:#313244;color:#94e2d5;padding:3px 8px;border-radius:4px;font-size:13px;">🎨 VAE: <b>{meta["vae"]}</b></span>')
     if meta.get("strength") is not None:
         badges.append(f'<span style="background:#313244;color:#fab387;padding:3px 8px;border-radius:4px;font-size:13px;">🖼 img2img strength: <b>{meta["strength"]}</b></span>')
+    if meta.get("clip_skip") and int(meta["clip_skip"]) > 1:
+        badges.append(f'<span style="background:#313244;color:#b4befe;padding:3px 8px;border-radius:4px;font-size:13px;">✂️ CLIP skip: <b>{meta["clip_skip"]}</b></span>')
+    if meta.get("var_strength"):
+        badges.append(f'<span style="background:#313244;color:#f5c2e7;padding:3px 8px;border-radius:4px;font-size:13px;">🔀 Variation: <b>{meta.get("var_seed")} ×{meta["var_strength"]}</b></span>')
+    if isinstance(meta.get("hires"), dict):
+        h = meta["hires"]
+        badges.append(f'<span style="background:#313244;color:#89dceb;padding:3px 8px;border-radius:4px;font-size:13px;">🔍 Hires fix: <b>×{h.get("scale")} · denoise {h.get("denoise")} · {h.get("steps")} steps</b></span>')
     if meta.get("model_hash"):
         badges.append(f'<span style="background:#313244;color:#a6adc8;padding:3px 8px;border-radius:4px;font-size:13px;">#️⃣ Model hash: <b>{meta["model_hash"]}</b></span>')
     badge_html = " ".join(badges)

@@ -577,6 +577,127 @@ def _clean_gen_args(steps, cfg, width, height, batch, seed, strength=0.75, img2i
     return steps_c, cfg_c, size[0], size[1], batch_c, seed_i, strength_c, fixes
 
 
+def _clean_extra(extra: dict | None) -> dict:
+    """CLIP skip / variation / hires-fix settings made safe (UI values, saved sessions and
+    restored images can all hold junk)."""
+    e = dict(extra or {})
+    cs = int(round(_num(e.get("clip_skip"), 1)))
+    vs = _num(e.get("var_seed"), -1)
+    method = str(e.get("hires_upscaler") or "Lanczos")
+    if method != "Lanczos" and method not in upscaler.available_methods():
+        method = "Lanczos"
+    return {
+        "clip_skip": 2 if cs >= 2 else 1,
+        "var_seed": -1 if vs < 0 else int(vs) % 2**32,
+        "var_strength": min(1.0, max(0.0, _num(e.get("var_strength"), 0.0))),
+        "hires_on": bool(e.get("hires_on")),
+        "hires_scale": min(2.5, max(1.05, _num(e.get("hires_scale"), 1.5))),
+        "hires_denoise": min(0.9, max(0.05, _num(e.get("hires_denoise"), 0.45))),
+        "hires_steps": int(min(150, max(1, round(_num(e.get("hires_steps"), 15))))),
+        "hires_upscaler": method,
+    }
+
+
+_XY_AXES = ["none", "CFG", "Steps", "Sampler", "Seed", "LoRA 1 weight", "CLIP skip", "Hires denoise",
+            "Prompt S/R"]
+
+
+def _xy_values(axis: str, text: str) -> tuple[list, str]:
+    """Values for one X/Y axis from "a, b, c" (numbers also as ranges "4-10:2" / "1-5").
+    Returns (values, error message)."""
+    if not axis or axis == "none":
+        return [None], ""
+    raw = [v.strip() for v in str(text or "").split(",") if v.strip()]
+    if not raw:
+        return [], f"Enter values for {axis}, separated by commas."
+    if axis == "Prompt S/R":
+        return raw, ""
+    if axis == "Sampler":
+        out = []
+        for v in raw:
+            m = next((n for n in SCHEDULER_MAP if n.lower() == v.lower()), None) or \
+                next((n for n in SCHEDULER_MAP if v.lower() in n.lower()), None)
+            if not m:
+                return [], f"Unknown sampler “{html.escape(v)}” — choose from: {', '.join(SCHEDULER_MAP)}"
+            out.append(m)
+        return out, ""
+    vals = []
+    for v in raw:
+        m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)(?:\s*:\s*(\d+(?:\.\d+)?))?", v)
+        try:
+            if m:
+                a, b, st = float(m.group(1)), float(m.group(2)), float(m.group(3) or 1)
+                x = a
+                while x <= b + 1e-9 and len(vals) < 64:
+                    vals.append(x); x += st
+            else:
+                vals.append(float(v))
+        except ValueError:
+            return [], f"“{html.escape(v)}” isn't a number ({axis})."
+    if axis in ("Steps", "Seed", "CLIP skip"):
+        vals = [int(round(v)) for v in vals]
+    return vals, ""
+
+
+def _xy_grid(cells: list, xlabels: list, ylabels: list, title: str):
+    """Labelled grid image (rows = Y values, columns = X values) on a dark background."""
+    from PIL import Image as _Image, ImageDraw, ImageFont
+    w0, h0 = cells[0].size
+    f = min(1.0, 512 / max(w0, h0))
+    cw, ch = int(w0 * f), int(h0 * f)
+    try:
+        font = ImageFont.truetype("arial.ttf", 20)
+        small = ImageFont.truetype("arial.ttf", 16)
+    except Exception:
+        font = small = ImageFont.load_default()
+    left = 170 if any(ylabels) else 10
+    top = 70
+    cols, rows = len(xlabels), len(ylabels)
+    grid = _Image.new("RGB", (left + cols * (cw + 6) + 4, top + rows * (ch + 6) + 4), (30, 30, 46))
+    d = ImageDraw.Draw(grid)
+    d.text((10, 8), title[:160], fill=(205, 214, 244), font=small)
+    for c, lab in enumerate(xlabels):
+        d.text((left + c * (cw + 6) + 6, 36), str(lab)[:40], fill=(137, 180, 250), font=font)
+    for r, lab in enumerate(ylabels):
+        if lab:
+            d.text((10, top + r * (ch + 6) + ch // 2 - 10), str(lab)[:18], fill=(166, 227, 161), font=font)
+    for i, im in enumerate(cells):
+        r, c = divmod(i, cols)
+        grid.paste(im.convert("RGB").resize((cw, ch), _Image.LANCZOS), (left + c * (cw + 6), top + r * (ch + 6)))
+    return grid
+
+
+def _carry_params(src_img, note: str | None):
+    """PngInfo that keeps a source image's generation settings (A1111 text + our record) and
+    appends what was done to it."""
+    from PIL.PngImagePlugin import PngInfo
+    info = PngInfo()
+    src = getattr(src_img, "info", None) or {}
+    params = src.get("parameters")
+    if isinstance(params, bytes):
+        params = params.decode("utf-8", "replace")
+    if params:
+        info.add_text("parameters", f"{params}\n{note}" if note else params)
+    if src.get("imagegen"):
+        info.add_itxt("imagegen", str(src["imagegen"]))
+    return info
+
+
+def _upscale_to(img, width: int, height: int, method: str = "Lanczos"):
+    """img resized to exactly width×height: Lanczos, or Real-ESRGAN ×2/×4 then Lanczos to size
+    (falls back to Lanczos if the model can't run)."""
+    from PIL import Image as _Image
+    img = img.convert("RGB")
+    if method and method != "Lanczos":
+        try:
+            factor = 2 if max(width / img.width, height / img.height) <= 2 else 4
+            big, _ = upscaler.upscale(img, factor, method)
+            return big.resize((width, height), _Image.LANCZOS)
+        except Exception as e:
+            print(f"[Hires] {method} failed ({e}) — using Lanczos")
+    return img.resize((width, height), _Image.LANCZOS)
+
+
 def _fit_init_image(img, max_side: int = 2048, min_side: int = 64):
     """An img2img input scaled into a size the pipelines can handle: a 4000 px photo would
     need far more VRAM than any consumer card has (WDDM then pages to system RAM and the
@@ -830,6 +951,37 @@ def _build_generate_tab():
                             with gr.Column(scale=1, min_width=130):
                                 seed_reuse_btn  = gr.Button("♻️ Last seed", size="sm")
                                 seed_random_btn = gr.Button("🎲 Random", size="sm")
+                        with gr.Row():
+                            clip_skip_rb = gr.Radio(
+                                [1, 2], value=_ls.get("clip_skip") if _ls.get("clip_skip") in (1, 2) else 1,
+                                label="CLIP skip",
+                                info="2 = what most SD 1.5 anime checkpoints expect (A1111 “Clip skip: 2”). SDXL ignores it.")
+                        with gr.Accordion("🔀 Variations — small changes to an image you like", open=False):
+                            with gr.Row():
+                                var_seed_num = gr.Number(value=-1, precision=0, label="Variation seed (-1 = random)")
+                                var_strength_sl = gr.Slider(
+                                    0, 1, value=0, step=0.01, label="Variation strength",
+                                    info="0 = off · 0.05–0.2 = same composition, small changes · 1 = the variation "
+                                         "seed's own image. Keep the main seed fixed.")
+                        with gr.Accordion("🔍 Hires fix — generate small, then refine at a higher resolution",
+                                          open=bool(_ls.get("hires_on"))):
+                            hires_cb = gr.Checkbox(
+                                label="Enable hires fix", value=bool(_ls.get("hires_on", False)),
+                                info="Composes at the model's native size (no doubled bodies), upscales, then "
+                                     "re-draws details at the big size. About 2–3× the time. txt2img only.")
+                            with gr.Row():
+                                hires_scale_sl = gr.Slider(1.1, 2.5, value=_ls.get("hires_scale", 1.5), step=0.05,
+                                                           label="Upscale by", info="1.5× is the sweet spot on 12 GB.")
+                                hires_denoise_sl = gr.Slider(0.1, 0.8, value=_ls.get("hires_denoise", 0.45), step=0.05,
+                                                             label="Hires denoise",
+                                                             info="0.3 keeps it · 0.45 adds detail · 0.6+ changes it.")
+                                hires_steps_sl = gr.Slider(4, 60, value=_ls.get("hires_steps", 15), step=1,
+                                                           label="Hires steps")
+                            _hires_ups = ["Lanczos"] + [m for m in upscaler.available_methods() if m != "Lanczos"]
+                            hires_up_dd = gr.Dropdown(
+                                _hires_ups, label="Hires upscaler",
+                                value=_ls.get("hires_upscaler") if _ls.get("hires_upscaler") in _hires_ups else "Lanczos",
+                                info="Lanczos is instant; Real-ESRGAN gives sharper line art (a few seconds more).")
                         last_seed_state = gr.State([])      # seed of each image in the gallery
                         selected_idx_state = gr.State(0)    # gallery image the user clicked
 
@@ -854,6 +1006,8 @@ def _build_generate_tab():
                                 info="An image made by this app (or A1111 / Forge / Civitai) brings back its "
                                      "checkpoint, VAE, LoRAs + weights, prompts, sampler, steps, CFG, size and seed.")
                             i2i_restore_html = gr.HTML("")
+                            recreate_btn = gr.Button("🔁 Recreate it exactly (img2img off → Generate)",
+                                                     variant="primary", size="sm", visible=False)
 
                             gr.Markdown("---")
                             gr.HTML(
@@ -912,6 +1066,22 @@ def _build_generate_tab():
                                 loop_start_btn = gr.Button("▶ Start Loop", variant="primary", size="sm")
                                 loop_stop_btn  = gr.Button("⏹ Stop Loop", variant="stop", size="sm")
                             loop_status = gr.HTML("")
+
+                        # ── X/Y comparison grid ───────────────────────────────────
+                        with gr.Accordion("📊 X/Y grid — compare settings side by side", open=False):
+                            gr.HTML('<p style="color:#a6adc8;font-size:13px;margin:0 0 6px;">One fixed seed, '
+                                    'every combination of the values below (current settings for everything '
+                                    'else). Numbers: <code>5, 7, 9</code> or ranges <code>4-10:2</code>. '
+                                    '<b>Prompt S/R</b>: the first value is a word in your prompt, the others '
+                                    'replace it (<code>red hair, blue hair, green hair</code>). Each cell is '
+                                    'saved like a normal image; the grid is saved too.</p>')
+                            with gr.Row():
+                                xy_x_axis = gr.Dropdown(_XY_AXES, value="CFG", label="X axis")
+                                xy_x_vals = gr.Textbox(value="5, 7, 9", label="X values")
+                            with gr.Row():
+                                xy_y_axis = gr.Dropdown(_XY_AXES, value="none", label="Y axis")
+                                xy_y_vals = gr.Textbox(value="", label="Y values")
+                            xy_btn = gr.Button("📊 Generate grid", variant="primary", size="sm")
 
                         # ── Quick Reference Guide ──────────────────────────────────
                         with gr.Accordion("📖 Settings Guide — How to Get Good Images", open=False):
@@ -1062,6 +1232,7 @@ def _build_generate_tab():
                             gal_send_i2i_btn = gr.Button("🖼 Send to img2img", size="sm")
                             gal_send_up_btn  = gr.Button("🔍 Send to Upscale", size="sm")
                             open_outputs_btn = gr.Button("📂 Show in folder", size="sm")
+                            gal_more_btn = gr.Button("🔀 More like this", size="sm")
                         gal_status = gr.HTML("")
 
     # ── Event wiring ──────────────────────────────────────────────────────────
@@ -1187,9 +1358,42 @@ def _build_generate_tab():
         return ('<p style="color:#fab387;">⏹ Stopped. (If a model was loading, it finishes loading '
                 'and stays ready; a running generation ends after its current step.)</p>')
 
+    def _hires_pass(imgs, seeds, prompt, neg_prompt, cfg, scheduler, ex, progress):
+        """Hires fix: upscale each first-pass image and re-draw it with img2img at that size
+        (same seed). SD 1.5 is capped at 1536 px and SDXL at 2048 px on the long side."""
+        import math
+        t0 = time.time()
+        xl = sd.model_family in ("sdxl", "pony", "illustrious")
+        cap = 2048 if xl else 1536
+        steps2 = min(150, math.ceil(ex["hires_steps"] / ex["hires_denoise"]))   # img2img runs steps × denoise
+        out, size = [], None
+        for i, im in enumerate(imgs):
+            w, h = im.size
+            tw, th = w * ex["hires_scale"], h * ex["hires_scale"]
+            f = min(1.0, cap / max(tw, th))
+            tw, th = int(round(tw * f / 8)) * 8, int(round(th * f / 8)) * 8
+            size = (w, h, tw, th)
+            progress(0, desc=f"Hires fix {i + 1}/{len(imgs)}: upscaling to {tw}×{th}…")
+            up = _upscale_to(im, tw, th, ex["hires_upscaler"])
+
+            def cb(step, total, i=i):
+                if _generation_abort.is_set():
+                    raise _GenerationAborted()
+                done = max(1, int(round(total * ex["hires_denoise"])))
+                k = step - (total - done)
+                progress(max(0, k) / done, desc=f"Hires fix {i + 1}/{len(imgs)}: step {max(0, k)}/{done}")
+            r, _ = sd.img2img(up, prompt, neg_prompt, ex["hires_denoise"], steps2, cfg,
+                              seeds[i] if i < len(seeds) else seeds[-1], scheduler,
+                              step_callback=cb, clip_skip=ex["clip_skip"])
+            out.append(r[0] if r else up)
+        w, h, tw, th = size
+        note = (f'<br>🔍 Hires fix: {w}×{h} → {tw}×{th} · denoise {ex["hires_denoise"]:g} · '
+                f'{ex["hires_steps"]} steps · {html.escape(ex["hires_upscaler"])} · {time.time() - t0:.1f}s')
+        return out, note
+
     def do_generate(
         prompt, neg_prompt, scheduler, steps, cfg, width, height, batch,
-        seed, init_img, strength, use_i2i, auto_quality=True, progress=gr.Progress(),
+        seed, init_img, strength, use_i2i, auto_quality=True, extra=None, progress=gr.Progress(),
     ):
         global _smartsplit_pipe, _smartsplit_cfg
         # (the abort flag is cleared by the caller when the run starts — clearing it
@@ -1199,6 +1403,7 @@ def _build_generate_tab():
         steps, cfg, width, height, batch, seed, strength, fixes = _clean_gen_args(
             steps, cfg, width, height, batch, seed, strength, img2img=bool(use_i2i and init_img is not None))
         prompt, neg_prompt = prompt or "", neg_prompt or ""
+        ex = _clean_extra(extra)
         if use_i2i and init_img is not None:
             # SD 1.5 attention at 2048 px needs ~4 GB per head slice and makes nothing better
             xl = sd.model_family in ("sdxl", "pony", "illustrious")
@@ -1264,15 +1469,21 @@ def _build_generate_tab():
             if use_i2i and init_img is not None:
                 imgs, info = sd.img2img(
                     init_img, prompt, neg_prompt, strength, steps, cfg, seed, scheduler,
-                    step_callback=_std_progress,
+                    step_callback=_std_progress, clip_skip=ex["clip_skip"],
                 )
             else:
                 imgs, info = sd.txt2img(
                     prompt, neg_prompt, width, height, steps, cfg, seed, scheduler, batch,
-                    step_callback=_std_progress,
+                    step_callback=_std_progress, clip_skip=ex["clip_skip"],
+                    var_seed=ex["var_seed"], var_strength=ex["var_strength"],
                 )
-            info_html = f'<p style="color:#a6adc8;font-size:13px;">{info}{tags_note}</p>'
             seeds = list(getattr(sd, "last_seeds", None) or [seed])
+            var_seeds = list(getattr(sd, "last_var_seeds", None) or []) if ex["var_strength"] > 0 else []
+            hires_note = ""
+            if ex["hires_on"] and imgs and not (use_i2i and init_img is not None):
+                imgs, hires_note = _hires_pass(imgs, seeds, prompt, neg_prompt, cfg, scheduler, ex, progress)
+                sd.last_seeds = seeds            # the hires img2img passes overwrote them
+            info_html = f'<p style="color:#a6adc8;font-size:13px;">{info}{hires_note}{tags_note}</p>' 
             if use_i2i and init_img is not None and imgs:
                 width, height = imgs[0].size   # img2img keeps the input's size
             i2i = bool(use_i2i and init_img is not None)
@@ -1282,6 +1493,11 @@ def _build_generate_tab():
                 prompt=prompt, negative_prompt=neg_prompt,
                 steps=steps, cfg_scale=cfg, seeds=seeds, scheduler=scheduler,
                 width=width, height=height,
+                clip_skip=ex["clip_skip"] if ex["clip_skip"] > 1 else None,
+                **({"var_seeds": var_seeds, "var_strength": ex["var_strength"]} if var_seeds else {}),
+                **({"hires": {"scale": ex["hires_scale"], "denoise": ex["hires_denoise"],
+                              "steps": ex["hires_steps"], "upscaler": ex["hires_upscaler"]}}
+                   if hires_note else {}),
                 **({"strength": strength, "source_image": Path(src).name if src else None} if i2i else {}),
             ), pipe=sd)
             if saved:
@@ -1322,7 +1538,12 @@ def _build_generate_tab():
         model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, auto_quality,
         prompt, neg_prompt, scheduler, steps, cfg, width, height, batch,
         seed_input, init_img, strength, use_i2i, max_batches, delay,
+        clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
+        hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
     ):
+        extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
+                                  hires_on=hires_on, hires_scale=hires_scale, hires_denoise=hires_denoise,
+                                  hires_steps=hires_steps, hires_upscaler=hires_upscaler))
         import random
         # Guard against double-start
         if _autoloop_active.is_set():
@@ -1379,7 +1600,7 @@ def _build_generate_tab():
                     imgs, info_html, _ = do_generate(
                         prompt, neg_prompt, scheduler, steps, cfg,
                         width, height, batch, seed,
-                        init_img, strength, use_i2i, auto_quality=auto_quality,
+                        init_img, strength, use_i2i, auto_quality=auto_quality, extra=extra,
                     )
                     total_images += len(imgs)
                 except _GenerationAborted:
@@ -1889,8 +2110,13 @@ def _build_generate_tab():
     def do_generate_ui(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3,
                        auto_quality, prompt, neg_prompt, scheduler,
                        steps, cfg, width, height, batch, seed, init_img, strength, use_i2i,
+                       clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
+                       hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
                        progress=gr.Progress()):
         _generation_abort.clear()          # a new run starts; Stop from here on counts
+        extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
+                                  hires_on=hires_on, hires_scale=hires_scale, hires_denoise=hires_denoise,
+                                  hires_steps=hires_steps, hires_upscaler=hires_upscaler))
         w1, w2, w3 = (_num(w, 0.8) for w in (w1, w2, w3))
         ok, status = _ensure_model(model_path, vae_path, progress)
         if _generation_abort.is_set():
@@ -1905,7 +2131,7 @@ def _build_generate_tab():
             return [], msg, [], status, gr.update(), _active_loras_html()
         imgs, info_html, last = do_generate(
             prompt, neg_prompt, scheduler, steps, cfg, width, height, batch, seed,
-            init_img, strength, use_i2i, auto_quality=auto_quality, progress=progress)
+            init_img, strength, use_i2i, auto_quality=auto_quality, extra=extra, progress=progress)
         steps, cfg, width, height, batch, seed, _, _ = _clean_gen_args(
             steps, cfg, width, height, batch, seed)
         _write_last_session(dict(
@@ -1914,6 +2140,9 @@ def _build_generate_tab():
             height=height, batch_size=batch, seed=seed,
             auto_quality=bool(auto_quality),
             loras=[[lora1 or "none", float(w1)], [lora2 or "none", float(w2)], [lora3 or "none", float(w3)]],
+            clip_skip=extra["clip_skip"], hires_on=extra["hires_on"], hires_scale=extra["hires_scale"],
+            hires_denoise=extra["hires_denoise"], hires_steps=extra["hires_steps"],
+            hires_upscaler=extra["hires_upscaler"],
         ))
         seeds = getattr(sd, "last_seeds", None) or []
         return (imgs, info_html, last, status, (list(seeds) if imgs else gr.update()),
@@ -1925,6 +2154,8 @@ def _build_generate_tab():
         prompt_txt, neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl,
         width_sl, height_sl, batch_sl, seed_num,
         init_image, strength_sl, use_i2i_cb,
+        clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
+        hires_steps_sl, hires_up_dd,
     ]
     gen_event = generate_btn.click(
         lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
@@ -1934,6 +2165,106 @@ def _build_generate_tab():
          active_loras_html],
     )
     stop_btn.click(do_stop, [], [gen_info], cancels=[gen_event])
+
+    def do_xy_grid(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, auto_quality, prompt, neg_prompt,
+                   scheduler, steps, cfg, width, height, batch, seed, init_img, strength, use_i2i,
+                   clip_skip, var_seed, var_strength, hires_on, hires_scale, hires_denoise, hires_steps,
+                   hires_upscaler, x_axis, x_text, y_axis, y_text, progress=gr.Progress()):
+        import random
+        _generation_abort.clear()
+        err_html = lambda m: ([], f'<p style="color:#f38ba8;">❌ {m}</p>', gr.update(), gr.update())
+        xs, e1 = _xy_values(x_axis, x_text)
+        ys, e2 = _xy_values(y_axis, y_text)
+        if e1 or e2 or x_axis in (None, "none"):
+            return err_html(e1 or e2 or "Pick an X axis.")
+        if len(xs) * len(ys) > 48:
+            return err_html(f"{len(xs)} × {len(ys)} = {len(xs) * len(ys)} images — keep it at 48 or fewer.")
+        for axis, vals in ((x_axis, xs), (y_axis, ys)):
+            if axis == "Prompt S/R" and vals[0] not in (prompt or ""):
+                return err_html(f"Prompt S/R: “{html.escape(vals[0])}” isn't in the prompt.")
+            if axis == "LoRA 1 weight" and (not lora1 or lora1 == "none"):
+                return err_html("LoRA 1 weight: pick a LoRA in slot 1 first.")
+        ok, status = _ensure_model(model_path, vae_path, progress)
+        if not ok:
+            return [], (status if isinstance(status, str) else ""), status, gr.update()
+        seed = int(_num(seed, -1))
+        seed = random.randint(0, 2**32 - 1) if seed < 0 else seed
+        base_extra = dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength, hires_on=hires_on,
+                          hires_scale=hires_scale, hires_denoise=hires_denoise, hires_steps=hires_steps,
+                          hires_upscaler=hires_upscaler)
+        cells, t0, lora_w_now = [], time.time(), None
+        total = len(xs) * len(ys)
+        try:
+            for yi, yv in enumerate(ys):
+                for xi, xv in enumerate(xs):
+                    if _generation_abort.is_set():
+                        raise _GenerationAborted()
+                    p = dict(prompt=prompt or "", scheduler=scheduler, steps=steps, cfg=cfg, seed=seed,
+                             extra=dict(base_extra), lw=w1)
+                    for axis, v, vals in ((x_axis, xv, xs), (y_axis, yv, ys)):
+                        if axis == "CFG": p["cfg"] = v
+                        elif axis == "Steps": p["steps"] = v
+                        elif axis == "Sampler": p["scheduler"] = v
+                        elif axis == "Seed": p["seed"] = v
+                        elif axis == "LoRA 1 weight": p["lw"] = v
+                        elif axis == "CLIP skip": p["extra"]["clip_skip"] = v
+                        elif axis == "Hires denoise": p["extra"].update(hires_on=True, hires_denoise=v)
+                        elif axis == "Prompt S/R": p["prompt"] = p["prompt"].replace(vals[0], v)
+                    if p["lw"] != lora_w_now:
+                        err = _sync_loras([(lora1, p["lw"]), (lora2, w2), (lora3, w3)], progress)
+                        if err:
+                            return err_html(f"LoRA problem: {err}")
+                        lora_w_now = p["lw"]
+                    n = len(cells) + 1
+                    progress((n - 1) / total, desc=f"Grid {n}/{total}")
+                    imgs, info, _ = do_generate(p["prompt"], neg_prompt, p["scheduler"], p["steps"], p["cfg"],
+                                                width, height, 1, p["seed"], init_img, strength, use_i2i,
+                                                auto_quality=auto_quality, extra=p["extra"])
+                    if not imgs:
+                        return [], info, gr.update(), gr.update()
+                    cells.append(imgs[0])
+        except _GenerationAborted:
+            if not cells:
+                return [], '<p style="color:#fab387;">⏹ Grid stopped.</p>', gr.update(), gr.update()
+        finally:
+            if lora_w_now is not None and lora_w_now != w1:
+                _sync_loras([(lora1, w1), (lora2, w2), (lora3, w3)])
+        fmt = lambda a, v: "" if a in (None, "none") else f"{a} {v:g}" if isinstance(v, float) else f"{v}" if a in (
+            "Sampler", "Prompt S/R") else f"{a} {v}"
+        xl = [fmt(x_axis, v) for v in xs]
+        yl = [fmt(y_axis, v) for v in ys]
+        cols = len(xs)
+        while len(cells) % cols:                  # stopped mid-row: pad with blanks
+            from PIL import Image as _I
+            cells.append(_I.new("RGB", cells[0].size, (30, 30, 46)))
+        title = f"seed {seed} · {Path(str(sd.current_model)).stem} · X: {x_axis}" + (
+            f" · Y: {y_axis}" if y_axis not in (None, "none") else "")
+        grid = _xy_grid(cells, xl, yl[: len(cells) // cols], title)
+        from PIL.PngImagePlugin import PngInfo
+        info = PngInfo()
+        info.add_text("parameters", f"{prompt}\nNegative prompt: {neg_prompt}\nX/Y grid: {title}; "
+                      f"X values: {', '.join(xl)}" + (f"; Y values: {', '.join(yl)}" if any(yl) else ""))
+        gpath = _unique_output(f"grid_{int(time.time())}")
+        grid.save(gpath, pnginfo=info)
+        grid.info["saved_path"] = str(gpath)
+        msg = (f'<p style="color:#a6e3a1;font-size:13px;">📊 Grid of {len(cells)} images in '
+               f'{_fmt_elapsed(time.time() - t0)} — saved as {gpath.name} (each cell is saved too).</p>')
+        return [grid] + cells, msg, status, _active_loras_html()
+
+    xy_event = xy_btn.click(
+        do_xy_grid, _gen_inputs + [xy_x_axis, xy_x_vals, xy_y_axis, xy_y_vals],
+        [output_gallery, gen_info, model_status, active_loras_html],
+    )
+    stop_btn.click(do_stop, [], [gen_info], cancels=[xy_event])
+    # Recreate a dropped image: the same run as Generate, with img2img switched off
+    rec_event = recreate_btn.click(
+        lambda: (False, None, 0), None, [use_i2i_cb, selected_gallery_image, selected_idx_state],
+    ).then(
+        do_generate_ui, _gen_inputs,
+        [output_gallery, gen_info, last_generated_images, model_status, last_seed_state,
+         active_loras_html],
+    )
+    stop_btn.click(do_stop, [], [gen_info], cancels=[rec_event])
 
     # ── Seed / size helpers ──────────────────────────────────────────────
     seed_random_btn.click(lambda: -1, None, seed_num)
@@ -1945,6 +2276,19 @@ def _build_generate_tab():
         return seeds[i], (f'<p style="color:#a6e3a1;font-size:13px;">♻️ Seed {seeds[i]} '
                           f'(image {i + 1} of {len(seeds)}) — the first image of your next run will match it.</p>')
     seed_reuse_btn.click(do_reuse_seed, [last_seed_state, selected_idx_state], [seed_num, gal_status])
+
+    def do_more_like(seeds, idx, cur_strength):
+        """Same seed + a random variation seed: the next run keeps the picked image's
+        composition and changes details (raise Variation strength for bigger changes)."""
+        if not seeds:
+            return (gr.update(),) * 4 + ('<p style="color:#f5c6a0;font-size:13px;">Generate something first.</p>',)
+        i = idx if isinstance(idx, int) and 0 <= idx < len(seeds) else 0
+        st = cur_strength if cur_strength and 0 < float(cur_strength) <= 0.5 else 0.15
+        return (seeds[i], -1, st, False,
+                f'<p style="color:#a6e3a1;font-size:13px;">🔀 Seed {seeds[i]} + variation strength {st:g} — '
+                f'press Generate (a batch gives several variations at once).</p>')
+    gal_more_btn.click(do_more_like, [last_seed_state, selected_idx_state, var_strength_sl],
+                       [seed_num, var_seed_num, var_strength_sl, use_i2i_cb, gal_status])
     swap_size_btn.click(lambda w, h: (h, w), [width_sl, height_sl], [width_sl, height_sl])
 
     def on_size_preset(label):
@@ -1955,21 +2299,24 @@ def _build_generate_tab():
     # ── Dropping an image into img2img brings back how it was made ───────────
     _restore_outputs = [prompt_txt, neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl, width_sl, height_sl,
                         batch_sl, seed_num, model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2,
-                        lora_dd3, lora_weight3, strength_sl, use_i2i_cb, i2i_restore_html]
+                        lora_dd3, lora_weight3, strength_sl, use_i2i_cb, i2i_restore_html,
+                        clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl,
+                        hires_denoise_sl, hires_steps_sl, hires_up_dd, recreate_btn]
 
     def on_i2i_drop(img, restore):
-        keep = [gr.update()] * (len(_restore_outputs) - 2)
+        keep = [gr.update()] * 18
+        tail = [gr.update()] * 8 + [gr.update(visible=False)]
         if img is None:
-            return (*keep, gr.update(), "")
+            return (*keep, gr.update(), "", *tail)
         if not restore:
-            return (*keep, True, "")
+            return (*keep, True, "", *tail)
         try:
             meta = read_png_info(img)
         except Exception:
             meta = {}
         if not (meta.get("prompt") or meta.get("imagegen")):
             return (*keep, True, '<p style="font-size:13px;color:#a6adc8;">No generation settings in this image '
-                                  '— img2img mode is on; write a prompt for it.</p>')
+                                  '— img2img mode is on; write a prompt for it.</p>', *tail)
         plan = _restore_plan(meta)
         u = lambda v: gr.update() if v is None else v
         lora_ups = [gr.update()] * 6
@@ -1993,7 +2340,8 @@ def _build_generate_tab():
             strength = min(1.0, max(0.1, float(plan["strength"])))
         return (u(plan["prompt"]), u(plan["negative_prompt"]), u(plan["scheduler"]), u(plan["steps"]),
                 u(plan["cfg_scale"]), u(plan["width"]), u(plan["height"]), 1, u(plan["seed"]),
-                u(plan["model"]), u(plan["vae"]), *lora_ups, strength, True, note)
+                u(plan["model"]), u(plan["vae"]), *lora_ups, strength, True, note,
+                *_plan_extra_updates(plan), gr.update(visible=plan["mode"] != "img2img"))
 
     init_image.upload(on_i2i_drop, [init_image, restore_cb], _restore_outputs)
 
@@ -2068,6 +2416,8 @@ def _build_generate_tab():
             width_sl, height_sl, batch_sl, seed_num,
             init_image, strength_sl, use_i2i_cb,
             loop_max_batches, loop_delay,
+            clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
+            hires_steps_sl, hires_up_dd,
         ],
         [output_gallery, gen_info, loop_status, last_generated_images, last_seed_state],
     )
@@ -2091,6 +2441,8 @@ def _build_generate_tab():
     gen_controls = {
         "model": model_dd,
         "vae": vae_dd,
+        "extra": [clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl,
+                  hires_denoise_sl, hires_steps_sl, hires_up_dd],
         "lora_dd1": lora_dd,
         "lora_w1": lora_weight,
         "lora_w2": lora_weight2,
@@ -2501,6 +2853,13 @@ def _build_upscale_tab():
                 )
                 upscale_btn = gr.Button("🔍 Upscale", variant="primary")
                 up_info     = gr.HTML("")
+                with gr.Accordion("📁 Batch — upscale a whole folder", open=False):
+                    up_folder = gr.Textbox(label="Folder with images",
+                                           placeholder=r"e.g. D:\pictures\to_upscale  (PNG / JPG / WebP)",
+                                           info="Uses the scale and method above. Results go to "
+                                                "outputs/upscaled_<folder>/ with the originals' settings kept.")
+                    up_batch_btn = gr.Button("📁 Upscale folder", variant="secondary")
+                    up_batch_info = gr.HTML("")
 
             with gr.Column():
                 up_output = gr.Image(label="Upscaled Output", type="pil", show_download_button=True)
@@ -2545,6 +2904,50 @@ def _build_upscale_tab():
                      f'Saved: outputs/{path.name}</p>')
 
     upscale_btn.click(do_upscale, [up_input, up_scale, up_method], [up_output, up_info])
+
+    def do_upscale_folder(folder, scale, method, progress=gr.Progress()):
+        from PIL import Image as _Image
+        from PIL.PngImagePlugin import PngInfo
+        src = Path(str(folder or "").strip().strip('"'))
+        if not str(folder or "").strip() or not src.is_dir():
+            return '<p style="color:#f38ba8;">❌ Enter an existing folder.</p>'
+        files = sorted(p for p in src.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
+        if not files:
+            return '<p style="color:#f38ba8;">❌ No PNG / JPG / WebP images in that folder.</p>'
+        scale = max(1, int(_num(scale, 2)))
+        dest = OUTPUTS_DIR / f"upscaled_{_safe_name(src.name) or 'folder'}"
+        dest.mkdir(parents=True, exist_ok=True)
+        done, skipped, t0 = 0, [], time.time()
+        for i, f in enumerate(files):
+            progress(i / len(files), desc=f"{i + 1}/{len(files)}: {f.name}")
+            try:
+                with _Image.open(f) as im:
+                    im.load()
+                    params = im.info.get("parameters")
+                    img = im.convert("RGB")
+                if img.width * img.height * scale * scale > 64_000_000:
+                    skipped.append(f"{f.name} (too large)")
+                    continue
+                out, _ = upscaler.upscale(img, scale, method)
+                meta = PngInfo()
+                if params:
+                    meta.add_text("parameters", f"{params}\nUpscaled: {scale}× {method}")
+                target = dest / f"{f.stem}_{scale}x.png"
+                n = 1
+                while target.exists():
+                    target = dest / f"{f.stem}_{scale}x_{n}.png"; n += 1
+                out.save(target, pnginfo=meta)
+                done += 1
+            except Exception as e:
+                skipped.append(f"{f.name} ({html.escape(str(e)[:60])})")
+        msg = (f'<p style="color:#a6e3a1;font-size:13px;">✅ Upscaled {done} of {len(files)} images in '
+               f'{_fmt_elapsed(time.time() - t0)} → <code>outputs/{dest.name}/</code></p>')
+        if skipped:
+            msg += ('<p style="color:#f9e2af;font-size:13px;">Skipped: ' + ", ".join(skipped[:10])
+                    + (" …" if len(skipped) > 10 else "") + "</p>")
+        return msg
+
+    up_batch_btn.click(do_upscale_folder, [up_folder, up_scale, up_method], [up_batch_info])
 
     def _update_up_vram(image, scale, method):
         w, h = (image.size if image is not None else (512, 512))
@@ -2593,7 +2996,8 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
         def do_send_to_gen(img):
             if img is None:
                 return (*[gr.update()] * 16,
-                        '<p style="color:#f38ba8;font-size:13px;">⚠ No image loaded in PNG Info.</p>')
+                        '<p style="color:#f38ba8;font-size:13px;">⚠ No image loaded in PNG Info.</p>',
+                        *[gr.update()] * 8)
             plan = _restore_plan(read_png_info(img))
             u = lambda v: gr.update() if v is None else v
             lora_ups = [gr.update()] * 6
@@ -2604,7 +3008,7 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
                           + (_plan_summary(plan) or "prompt only (no settings in this image)") + "</p>")
             return (u(plan["prompt"]), u(plan["negative_prompt"]), u(plan["scheduler"]), u(plan["steps"]),
                     u(plan["cfg_scale"]), u(plan["width"]), u(plan["height"]), u(plan["seed"]),
-                    u(plan["model"]), u(plan["vae"]), *lora_ups, status_msg)
+                    u(plan["model"]), u(plan["vae"]), *lora_ups, status_msg, *_plan_extra_updates(plan))
 
         send_gen_btn.click(
             do_send_to_gen,
@@ -2624,6 +3028,7 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
                 gen_controls["lora_dd2"], gen_controls["lora_w2"],
                 gen_controls["lora_dd3"], gen_controls["lora_w3"],
                 png_action_status,
+                *gen_controls["extra"],
             ],
         )
 
@@ -2799,6 +3204,15 @@ def _build_watermark_tab():
 
                 remove_btn = gr.Button("🗑️ Remove Watermark", variant="primary")
                 wm_info    = gr.HTML("")
+                with gr.Accordion("📁 Batch — clean a whole folder (auto-detect)", open=False):
+                    wm_folder = gr.Textbox(
+                        label="Folder with images",
+                        placeholder=r"e.g. D:\datasets\my_character\raw",
+                        info="Every PNG / JPG / WebP: auto-detect with the settings above, then remove with the "
+                             "method above (LaMa recommended). Images where nothing is found are copied "
+                             "unchanged. Results go to outputs/cleaned_<folder>/ — handy for LoRA training sets.")
+                    wm_batch_btn = gr.Button("📁 Clean folder", variant="secondary")
+                    wm_batch_info = gr.HTML("")
 
             # ── Right column: previews ────────────────────────────────────────
             with gr.Column(scale=1):
@@ -2956,12 +3370,68 @@ def _build_watermark_tab():
         # Auto-save (named after the source image when it came from this app)
         src = (getattr(image, "info", {}) or {}).get("saved_path")
         path = _unique_output(f"{Path(src).stem}_clean" if src else f"dewatermark_{int(time.time())}")
-        out.save(path)
+        out.save(path, pnginfo=_carry_params(image, f"Watermark removed: {method}"))
 
         return out, (
             f'<p style="color:#a6e3a1;">✅ Watermark removed using {method}. '
             f'Saved to outputs/{path.name}</p>'
         )
+
+    def do_remove_folder(folder, conf, corner_pct, langs_str, use_ocr, use_corner, dilation, method,
+                         sd_prompt, progress=gr.Progress()):
+        from PIL import Image as _Image
+        src = Path(str(folder or "").strip().strip('"'))
+        if not str(folder or "").strip() or not src.is_dir():
+            return '<p style="color:#f38ba8;">❌ Enter an existing folder.</p>'
+        files = sorted(p for p in src.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
+        if not files:
+            return '<p style="color:#f38ba8;">❌ No PNG / JPG / WebP images in that folder.</p>'
+        if not (use_ocr or use_corner):
+            return '<p style="color:#f38ba8;">❌ Turn on OCR and/or the corner heuristic — batch mode can only auto-detect.</p>'
+        langs = [l.strip() for l in (langs_str or "en").replace("+", " ").split() if l.strip()]
+        dest = OUTPUTS_DIR / f"cleaned_{_safe_name(src.name) or 'folder'}"
+        dest.mkdir(parents=True, exist_ok=True)
+        cleaned, untouched, failed, t0 = 0, 0, [], time.time()
+        m = (method or "").lower()
+        for i, f in enumerate(files):
+            progress(i / len(files), desc=f"{i + 1}/{len(files)}: {f.name}")
+            try:
+                with _Image.open(f) as im:
+                    im.load()
+                    img = im.convert("RGB")
+                    img.info = dict(im.info)
+                regions = detect_all(img, min_confidence=float(conf), corner_pct=float(corner_pct),
+                                     languages=langs if use_ocr else None, use_ocr=bool(use_ocr),
+                                     use_corner=bool(use_corner))
+                target = dest / f"{f.stem}.png"
+                if not regions:
+                    img.save(target, pnginfo=_carry_params(img, None))
+                    untouched += 1
+                    continue
+                mask = build_mask(img, regions, dilation=int(dilation))
+                if "lama" in m:
+                    out = inpaint_lama(img, mask)
+                elif "sd" in m:
+                    out = inpaint_sd(img, mask, sd, prompt=sd_prompt)
+                elif "ns" in m:
+                    out = inpaint_opencv(img, mask, method="ns")
+                else:
+                    out = inpaint_opencv(img, mask, method="telea")
+                out.save(target, pnginfo=_carry_params(img, f"Watermark removed: {method}"))
+                cleaned += 1
+            except Exception as e:
+                failed.append(f"{f.name} ({html.escape(str(e)[:60])})")
+        msg = (f'<p style="color:#a6e3a1;font-size:13px;">✅ {cleaned} cleaned, {untouched} had nothing to remove '
+               f'(copied as-is) — {_fmt_elapsed(time.time() - t0)} → <code>outputs/{dest.name}/</code></p>')
+        if failed:
+            msg += '<p style="color:#f38ba8;font-size:13px;">Failed: ' + ", ".join(failed[:10]) + "</p>"
+        return msg
+
+    wm_batch_btn.click(
+        do_remove_folder,
+        [wm_folder, wm_conf, wm_corner, wm_langs, wm_use_ocr, wm_use_corner, wm_dilation, wm_method, wm_sd_prompt],
+        [wm_batch_info],
+    )
 
     remove_btn.click(
         do_remove,
@@ -4435,9 +4905,28 @@ def _restore_plan(meta: dict) -> dict:
     if len(loras) > 3:
         plan["notes"].append("only 3 LoRA slots — skipped " + ", ".join(Path(p).stem for p, _ in loras[3:]))
     plan["loras"] = loras[:3] if (wanted or rec) else None      # None = leave the slots alone
+    # CLIP skip / variation / hires: part of reproducing the image, so always set (defaults = off)
+    plan["clip_skip"] = 2 if int(_num(meta.get("clip_skip"), 1)) >= 2 else 1
+    plan["var_seed"] = meta.get("var_seed") if meta.get("var_strength") else -1
+    plan["var_strength"] = float(_num(meta.get("var_strength"), 0.0)) if meta.get("var_seed") is not None else 0.0
+    plan["hires"] = meta.get("hires") if isinstance(meta.get("hires"), dict) else None
     plan["mode"] = rec.get("mode") or ("img2img" if meta.get("strength") is not None else "txt2img")
     plan["exact"] = bool(rec)
     return plan
+
+
+def _plan_extra_updates(plan: dict) -> list:
+    """CLIP skip, variation seed/strength and hires-fix controls for a restore plan
+    (hires sliders keep their values when the image didn't use hires fix)."""
+    h = plan.get("hires") or {}
+    ex = _clean_extra(dict(clip_skip=plan.get("clip_skip"), var_seed=plan.get("var_seed"),
+                           var_strength=plan.get("var_strength"), hires_on=bool(h),
+                           hires_scale=h.get("scale"), hires_denoise=h.get("denoise"),
+                           hires_steps=h.get("steps"), hires_upscaler=h.get("upscaler")))
+    keep = gr.update()
+    return [ex["clip_skip"], ex["var_seed"], ex["var_strength"], bool(h),
+            ex["hires_scale"] if h else keep, ex["hires_denoise"] if h else keep,
+            ex["hires_steps"] if h else keep, ex["hires_upscaler"] if h else keep]
 
 
 def _plan_summary(plan: dict) -> str:
@@ -4451,6 +4940,13 @@ def _plan_summary(plan: dict) -> str:
     for k, lbl in (("seed", "seed"), ("steps", "steps"), ("cfg_scale", "CFG")):
         if plan.get(k) is not None:
             bits.append(f"{lbl} {plan[k]}")
+    if plan.get("clip_skip", 1) > 1:
+        bits.append(f"CLIP skip {plan['clip_skip']}")
+    if plan.get("var_strength"):
+        bits.append(f"variation {plan['var_seed']} ×{plan['var_strength']:g}")
+    if plan.get("hires"):
+        h = plan["hires"]
+        bits.append(f"hires fix ×{h.get('scale')} (denoise {h.get('denoise')})")
     if plan.get("scheduler"):
         bits.append(plan["scheduler"])
     out = ", ".join(bits)
@@ -4556,6 +5052,14 @@ def _params_text(rec: dict) -> str:
             parts.append(f"{label}: {rec[key]}")
     if rec.get("width") and rec.get("height"):
         parts.append(f"Size: {rec['width']}x{rec['height']}")
+    if rec.get("var_seed") is not None and rec.get("var_strength"):
+        parts.append(f"Variation seed: {rec['var_seed']}, Variation seed strength: {rec['var_strength']:g}")
+    if rec.get("clip_skip"):
+        parts.append(f"Clip skip: {rec['clip_skip']}")
+    hires = rec.get("hires") or {}
+    if hires:
+        parts.append(f"Hires upscale: {hires['scale']:g}, Hires steps: {hires['steps']}, "
+                     f"Hires upscaler: {hires['upscaler']}, Denoising strength: {hires['denoise']:g}")
     model = rec.get("model") or {}
     if model.get("sha256_10"):
         parts.append(f"Model hash: {model['sha256_10']}")
@@ -4582,6 +5086,7 @@ def _save_outputs(images: list, meta: dict | None = None, pipe=None) -> list[Pat
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     meta = dict(meta or {})
     seeds = list(meta.pop("seeds", None) or [meta.pop("seed", -1)])
+    var_seeds = list(meta.pop("var_seeds", None) or [])
     if "img2img_strength" in meta:
         meta["strength"] = meta.pop("img2img_strength")
     legacy_model, legacy_loras = meta.pop("model", None), meta.pop("loras", None)
@@ -4589,7 +5094,8 @@ def _save_outputs(images: list, meta: dict | None = None, pipe=None) -> list[Pat
     saved = []
     for i, img in enumerate(images):
         seed_i = seeds[i] if i < len(seeds) else seeds[-1]
-        rec = _gen_record(pipe, **dict(meta, seed=seed_i))
+        extra_i = {"var_seed": var_seeds[i] if i < len(var_seeds) else var_seeds[-1]} if var_seeds else {}
+        rec = _gen_record(pipe, **dict(meta, seed=seed_i, **extra_i))
         if pipe is None and legacy_model:
             rec["model"] = {"file": legacy_model}
         if pipe is None and legacy_loras:

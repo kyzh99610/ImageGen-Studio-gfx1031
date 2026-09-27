@@ -120,6 +120,12 @@ Generate images from text prompts using Stable Diffusion checkpoints. The output
 
 **Every image can be made again:** each PNG records the checkpoint, VAE, LoRAs with their weights, prompts, sampler, steps, CFG, size and seed (A1111-compatible text that Civitai/Forge read, plus an exact record for this app, including the A1111 model hash). **Drop it into Image-to-Image** and all of that comes back (models are found by file name, or by hash if you renamed them). Untick "Use img2img mode" and Generate to recreate it, or keep it ticked to make variations. The GPU isn't bit-exact, so a recreated image differs by under ~2/255 per pixel.
 
+**Hires fix:** generate at the model's native size (good composition), then upscale ×1.5–2 and let the model re-draw details at the big size. SD 1.5 512×768 → 768×1152 takes about 30 s; SDXL 832×1216 → 1248×1824 about 2 min, and fits in 12 GB. Choose Lanczos, or Real-ESRGAN for sharper line art.
+
+**Variations & CLIP skip:** keep a seed you like and add a *variation seed* at 0.05–0.2 strength for the same picture with small changes. **🔀 More like this** under the gallery sets that up for the image you picked. **CLIP skip 2** is what most SD 1.5 anime checkpoints expect.
+
+**📊 X/Y grid:** compare two settings side by side with one seed. Axes: CFG, steps, sampler, seed, LoRA 1 weight, CLIP skip, hires denoise, or *Prompt S/R* (e.g. `red hair, blue hair, green hair`). You get one labelled grid, and every cell is also saved as a normal image.
+
 **LoRA keywords you can click:** pick a LoRA and its keywords appear as chips under the slots. They include Civitai trigger words (🔑) and the creator's full prompts, e.g. one per outfit (📋). There are also the tags from its training captions with how many training images had them (%); the higher the share, the more strongly the LoRA ties that tag to its character. Likely triggers are marked 🗝: name-like tags in almost every training image, even when Civitai lists another spelling. **✨ Add character tags** adds the triggers plus every tag in at least half of the training images, right after your quality tags.
 
 **Long prompts and duplicates:** a counter under the prompts shows tokens and 75-token chunks, and where each chunk starts. Nothing is cut off, and a tag is never split between chunks. `BREAK` starts a new chunk. It warns when a LoRA trigger word slipped out of the first chunk, or when a tag is in both the prompt and the negative prompt. Presets, quick tags and chips never add a tag twice: the stronger weight wins. **🧹 Tidy prompts** cleans up duplicates you typed yourself.
@@ -144,7 +150,7 @@ Generate a base image with an **SD 1.5** model (and the SD 1.5 LoRAs you applied
 
 ### 🔍 Upscale
 
-Upscale images by 2×, 4×, or 8× using Lanczos (CPU), Real-ESRGAN ONNX (DirectML on the discrete GPU — ~2× faster than CPU), or Real-ESRGAN PyTorch. The GPU works in 256 px tiles so no single job trips Windows' ~2 s GPU watchdog; if the GPU ever returns a blank image the upscale is redone on the CPU automatically. The info line says which device was used. On the GPU the app makes a one-time fp16 copy of the model (~1.5× faster: 832×1216 → 2× in ~35 s instead of ~55 s, visually identical). Results are saved next to their source (`<source>_4x.png`, never overwriting) with the source's generation settings kept.
+Upscale images by 2×, 4×, or 8× using Lanczos (CPU), Real-ESRGAN ONNX (DirectML on the discrete GPU — ~2× faster than CPU), or Real-ESRGAN PyTorch. The GPU works in 256 px tiles so no single job trips Windows' ~2 s GPU watchdog; if the GPU ever returns a blank image the upscale is redone on the CPU automatically. The info line says which device was used. On the GPU the app makes a one-time fp16 copy of the model (~1.5× faster: 832×1216 → 2× in ~35 s instead of ~55 s, visually identical). Results are saved next to their source (`<source>_4x.png`, never overwriting) with the source's generation settings kept. **📁 Batch** upscales a whole folder into `outputs/upscaled_<folder>/`.
 
 ### 📄 PNG Info
 
@@ -163,6 +169,7 @@ Remove watermarks, logos, and overlaid text from images:
   - *OpenCV TELEA/NS* — instant, but only good for thin text; large areas get smeared
   - *SD Inpainting* — repaints a crop around the mask with the model loaded in Generate (SD 1.5 or SDXL, ~10 s) and blends it back; creative, so it can invent objects
 - **Poisson seamless blending** — Inpainted regions use `cv2.seamlessClone` for gradient-matched compositing; falls back to feathered Gaussian blend at image edges.
+- **📁 Batch** — clean a whole folder (auto-detect + the chosen method) into `outputs/cleaned_<folder>/`; images where nothing is found are copied unchanged. Handy for LoRA training sets.
 - **Saved automatically** — as `<source>_clean.png` when the image came from this app (else `dewatermark_<time>.png`); earlier results are never overwritten.
 
 ### 🌐 Civitai Hub
@@ -285,7 +292,7 @@ ImageGenApp/
 ├── run_zluda.bat             # Run any script under the ZLUDA environment
 ├── install.bat               # One-time dependency installer
 ├── selftest_zluda.py         # GPU-vs-CPU correctness self-test
-├── run_tests.py              # Test suite (78 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
+├── run_tests.py              # Test suite (81 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
 ├── download_models.bat/.py   # Starter model downloader
 ├── backend/
 │   ├── sd_pipeline.py        # SD 1.x inference (txt2img, img2img, LoRA)
