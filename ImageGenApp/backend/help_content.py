@@ -276,9 +276,17 @@ def parameters_html() -> str:
              "2 = use the text encoder's second-to-last layer — what most SD 1.5 anime checkpoints were trained "
              "with (A1111 “Clip skip: 2”). SDXL always does this already.",
              _cn("2 = 使用文本编码器倒数第二层，多数 SD1.5 动漫模型推荐。SDXL 不受影响。")],
+            ["✨ Face detail",
+             "Finds faces and re-draws each one at the model's native size with low denoise (0.3–0.45) — fixes "
+             "small or messy faces in full-body and group shots. Works after hires fix and in img2img too.",
+             _cn("检测人脸并以模型原生分辨率低降噪重绘，修复全身图/多人图中的小脸。")],
+            ["🖌 Inpaint",
+             "Paint over any area and describe what should be there; only that area is redrawn, at native "
+             "resolution, with your model, LoRAs and seed.",
+             _cn("涂抹要修改的区域并描述内容，仅重绘该区域。")],
             ["📊 X/Y grid",
              "Same seed, every combination of two settings (CFG, steps, sampler, seed, LoRA 1 weight, CLIP skip, "
-             "hires denoise, or Prompt S/R word swaps) in one labelled grid image.",
+             "hires denoise, checkpoint, or Prompt S/R word swaps) in one labelled grid image.",
              _cn("同一种子下对比两组参数的所有组合，生成带标签的网格图。")],
         ]
     )

@@ -181,6 +181,10 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
                            "upscaler": hu.group(1).strip() if hu else "Lanczos",
                            "denoise": result.pop("strength", None)}   # A1111: "Denoising strength" = hires denoise
 
+    m = re.search(r"\bFace detail: denoise ([0-9.]+) \((\w+)\)", param_text)
+    if m:
+        result["face_detail"] = {"denoise": float(m.group(1)), "detector": m.group(2), "prompt": ""}
+
     # ImageGen Studio's own record: exact model / VAE / LoRA files and weights
     rec = _parse_json(info.get("imagegen")) if "imagegen" in info else None
     if isinstance(rec, dict):
@@ -201,7 +205,7 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
                                         for l in rec["loras"] if isinstance(l, dict) and l.get("file"))
         if rec.get("vae"):
             result["vae"] = (rec["vae"] or {}).get("file")
-        for k in ("clip_skip", "var_seed", "var_strength", "hires"):
+        for k in ("clip_skip", "var_seed", "var_strength", "hires", "face_detail", "inpaint_padding"):
             if rec.get(k) is not None:
                 result[k] = rec[k]
         if rec.get("hires") and rec.get("mode") != "img2img":
@@ -314,6 +318,8 @@ def format_png_info_html(meta: dict[str, Any]) -> str:
     if isinstance(meta.get("hires"), dict):
         h = meta["hires"]
         badges.append(f'<span style="background:#313244;color:#89dceb;padding:3px 8px;border-radius:4px;font-size:13px;">🔍 Hires fix: <b>×{h.get("scale")} · denoise {h.get("denoise")} · {h.get("steps")} steps</b></span>')
+    if isinstance(meta.get("face_detail"), dict):
+        badges.append(f'<span style="background:#313244;color:#f9e2af;padding:3px 8px;border-radius:4px;font-size:13px;">✨ Face detail: <b>denoise {meta["face_detail"].get("denoise")}</b></span>')
     if meta.get("model_hash"):
         badges.append(f'<span style="background:#313244;color:#a6adc8;padding:3px 8px;border-radius:4px;font-size:13px;">#️⃣ Model hash: <b>{meta["model_hash"]}</b></span>')
     badge_html = " ".join(badges)

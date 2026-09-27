@@ -1356,8 +1356,9 @@ def _():
     from backend.png_info import read_image_metadata as rd
     ex = _app._clean_extra(dict(clip_skip="3", var_seed=-5, var_strength=7, hires_on=1, hires_scale=9,
                                 hires_denoise=None, hires_steps=0, hires_upscaler="Nope"))
-    assert ex == {"clip_skip": 2, "var_seed": -1, "var_strength": 1.0, "hires_on": True, "hires_scale": 2.5,
-                  "hires_denoise": 0.45, "hires_steps": 1, "hires_upscaler": "Lanczos"}, ex
+    assert {k: ex[k] for k in ("clip_skip", "var_seed", "var_strength", "hires_on", "hires_scale", "hires_denoise",
+                               "hires_steps", "hires_upscaler", "fd_on", "fd_mode")} ==         {"clip_skip": 2, "var_seed": -1, "var_strength": 1.0, "hires_on": True, "hires_scale": 2.5,
+         "hires_denoise": 0.45, "hires_steps": 1, "hires_upscaler": "Lanczos", "fd_on": False, "fd_mode": "auto"}, ex
     assert _app._xy_values("CFG", "4-10:2") == ([4.0, 6.0, 8.0, 10.0], "")
     assert _app._xy_values("Steps", "10-12") == ([10, 11, 12], "")
     assert _app._xy_values("Sampler", "euler a")[0] == ["Euler a"]
@@ -1442,6 +1443,81 @@ def _():
     assert abs(out[12:28, 335:385].mean() - base[12:28, 335:385].mean()) < 25
     # far from both regions nothing changed
     assert np.array_equal(out[100:500, 0:300].astype(np.uint8), base[100:500, 0:300])
+
+
+@test("Face detail / inpaint / checkpoint axis: detection filters, masks, records, restore")
+def _():
+    import app as _app
+    from PIL import Image, ImageDraw
+    from backend import detail_tools as dt
+    from backend.png_info import read_image_metadata as rd
+    # the relative-size filter drops tiny false hits next to a real face
+    boxes = [(100, 100, 300, 300), (10, 10, 40, 40), (400, 100, 560, 260)]
+    orig = dt._cascade
+    try:
+        class Fake:
+            def __init__(self, found): self.found = found
+            def detectMultiScale(self, *a, **k):
+                return [(x1, y1, x2 - x1, y2 - y1) for x1, y1, x2, y2 in self.found]
+        dt._cascade = lambda kind: Fake(boxes) if kind == "anime" else None
+        got = dt.detect_faces(Image.new("RGB", (640, 480)), "auto")
+        assert got == [(100, 100, 300, 300), (400, 100, 560, 260)], got
+        dt._cascade = lambda kind: None
+        assert dt.detect_faces(Image.new("RGB", (64, 64))) == []
+    finally:
+        dt._cascade = orig
+    # face_detail with no faces returns the image unchanged, without touching the model
+    img = Image.new("RGB", (64, 64), (10, 20, 30))
+    orig_df = dt.detect_faces
+    try:
+        dt.detect_faces = lambda *a, **k: []
+        out, n = dt.face_detail(None, img, "x")
+        assert out is img and n == 0
+    finally:
+        dt.detect_faces = orig_df
+    # crop box: padded, clamped to the image, at least min_side
+    m = np.zeros((600, 400), bool); m[590:600, 390:400] = True
+    x1, y1, x2, y2 = dt._crop_box(m, 400, 600, 20, 256)
+    assert (x2 - x1, y2 - y1) == (256, 256) and x2 <= 400 and y2 <= 600
+    # ImageEditor value → image + painted mask
+    bg = Image.new("RGB", (100, 80), (200, 0, 0))
+    layer = Image.new("RGBA", (100, 80), (0, 0, 0, 0)); ImageDraw.Draw(layer).rectangle([10, 10, 30, 30], fill=(255, 255, 255, 255))
+    im2, mask = _app._editor_parts({"background": bg, "layers": [layer], "composite": bg})
+    assert im2.size == (100, 80) and np.array(mask)[20, 20] == 255 and np.array(mask)[60, 60] == 0
+    assert _app._editor_parts({"background": bg, "layers": []})[1] is None and _app._editor_parts(None) == (None, None)
+    # Checkpoint axis matches local files by name
+    cks = _app.list_checkpoints()
+    if cks:
+        stem = Path(cks[0][1]).stem
+        vals, err = _app._xy_values("Checkpoint", stem.upper())
+        assert not err and vals == [cks[0][1]], (vals, err)
+    assert _app._xy_values("Checkpoint", "definitely-not-a-model-xyz")[1]
+    # face detail + inpaint are recorded and restored
+    tmp = Path(_tf.mkdtemp())
+
+    class P:
+        current_model, _last_vae_path, model_family = "", None, "sd15"
+        _lora_adapters = {}
+    o = _app.OUTPUTS_DIR
+    try:
+        _app.OUTPUTS_DIR = tmp
+        [p1] = _app._save_outputs([Image.new("RGB", (64, 64))], dict(
+            mode="txt2img", prompt="a", steps=20, cfg_scale=7, seeds=[1], scheduler="Euler a", width=64, height=64,
+            face_detail={"denoise": 0.35, "detector": "anime", "prompt": "detailed eyes"}), pipe=P())
+        [p2] = _app._save_outputs([Image.new("RGB", (64, 64))], dict(
+            mode="inpaint", prompt="b", steps=20, cfg_scale=7, seeds=[2], scheduler="Euler a", width=64, height=64,
+            strength=0.7, inpaint_padding=48), pipe=P())
+    finally:
+        _app.OUTPUTS_DIR = o
+    m1 = rd(p1)
+    assert m1["face_detail"]["detector"] == "anime"
+    with Image.open(p1) as im:
+        assert "Face detail: denoise 0.35 (anime)" in im.info["parameters"]
+    ups = _app._plan_extra_updates(_app._restore_plan(m1))
+    assert ups[8:12] == [True, 0.35, "anime", "detailed eyes"], ups
+    with Image.open(p2) as im:
+        assert "Inpaint: denoise 0.7, padding 48" in im.info["parameters"]
+    assert _app._restore_plan(rd(p2))["mode"] == "inpaint"
 
 
 # ══════════════════════════════════════════════════════════════════════════
