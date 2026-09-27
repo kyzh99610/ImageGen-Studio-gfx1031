@@ -1,0 +1,39 @@
+# Bundled runtimes / SDKs (multi-GB, not source)
+/python-3.10/
+/therock_sdk/
+/ZLUDA/
+/ZLUDA_v6/
+/_gfx1031_rocm624/
+*.tar.gz
+*.zip
+*.exe
+
+# Caches
+/.hf_cache/
+/.miopen_cache/
+/.miopen_userdb/
+__pycache__/
+*.pyc
+
+# Installer scratch
+/installer/tmp/
+/installer/ZLUDA_backup_v1/
+
+# App data (models, generated images, per-user settings/keys)
+/ImageGenApp/models/
+/ImageGenApp/outputs/
+/ImageGenApp/hd_raw/
+/ImageGenApp/onnx_cache/
+/ImageGenApp/olive_models/
+/ImageGenApp/settings/
+/ImageGenApp/training_datasets/*/
+/ImageGenApp/_gpu_index.txt
+/ImageGenApp/_backup_pre_audit_*/
+
+# Misc
+.Rhistory
+
+# Desktop (Electron) build output
+/desktop/node_modules/
+/desktop/dist/
+/ImageGenApp/logs/
