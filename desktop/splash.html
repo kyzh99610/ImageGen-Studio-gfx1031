@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>ImageGen Studio</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #1e1e2e; color: #cdd6f4;
+               font: 16px/1.5 "Segoe UI", system-ui, sans-serif; }
+  main { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 24px; box-sizing: border-box; }
+  img { width: 104px; height: 104px; }
+  h1 { margin: 0; font-size: 30px; font-weight: 700; }
+  #status { font-size: 18px; color: #cdd6f4; min-height: 27px; text-align: center; }
+  #detail { font-size: 14px; color: #bac2de; min-height: 21px; text-align: center; max-width: 900px; overflow-wrap: anywhere; }
+  .bar { width: 420px; max-width: 80vw; height: 6px; border-radius: 3px; background: #313244; overflow: hidden; }
+  .bar::after { content: ""; display: block; width: 35%; height: 100%; border-radius: 3px; background: #89b4fa;
+                animation: slide 1.4s ease-in-out infinite; }
+  @keyframes slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(310%); } }
+  @media (prefers-reduced-motion: reduce) { .bar::after { animation: none; width: 100%; opacity: .6; } }
+  #elapsed { font-size: 14px; color: #a6adc8; }
+  details { width: 900px; max-width: 92vw; }
+  summary { cursor: pointer; color: #a6adc8; font-size: 14px; }
+  summary:focus-visible, button:focus-visible { outline: 3px solid #89b4fa; outline-offset: 2px; }
+  pre { background: #181825; border: 1px solid #45475a; border-radius: 8px; padding: 10px 12px; font-size: 13px;
+        color: #bac2de; max-height: 34vh; overflow: auto; white-space: pre-wrap; }
+  .err { color: #f38ba8; }
+  .actions { display: none; gap: 12px; }
+  button { font: inherit; font-size: 15px; padding: 9px 18px; border-radius: 8px; border: 1px solid #45475a;
+           background: #313244; color: #cdd6f4; cursor: pointer; }
+  button.primary { background: #89b4fa; color: #1e1e2e; border-color: #89b4fa; font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <img src="assets/icon.png" alt="">
+  <h1>ImageGen Studio</h1>
+  <div id="status" role="status" aria-live="polite">Starting…</div>
+  <div id="detail"></div>
+  <div class="bar" id="bar" aria-hidden="true"></div>
+  <div id="elapsed"></div>
+  <div class="actions" id="actions">
+    <button class="primary" id="retry">Try again</button>
+    <button id="log">Open log</button>
+    <button id="quit">Quit</button>
+  </div>
+  <details id="det">
+    <summary>Show startup details</summary>
+    <pre id="lines"></pre>
+  </details>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const lines = [];
+  window.desktop.on('status', (s) => { $('status').textContent = s.text; $('detail').textContent = s.detail || ''; });
+  window.desktop.on('log', (l) => {
+    lines.push(l); if (lines.length > 300) lines.shift();
+    $('lines').textContent = lines.join('\n');
+    $('lines').scrollTop = $('lines').scrollHeight;
+  });
+  window.desktop.on('elapsed', (s) => { $('elapsed').textContent = s + ' s'; });
+  window.desktop.on('failed', (f) => {
+    $('status').innerHTML = '<span class="err">The backend could not start.</span>';
+    $('detail').textContent = f.code === 'timeout'
+      ? 'It did not become ready within 10 minutes.'
+      : (f.code !== null && f.code !== undefined ? 'It exited with code ' + f.code + '.' : '');
+    $('bar').style.display = 'none';
+    $('actions').style.display = 'flex';
+    $('det').open = true;
+    if (f.tail && f.tail.length) $('lines').textContent = f.tail.join('\n');
+    $('retry').focus();
+  });
+  $('retry').onclick = () => { $('actions').style.display = 'none'; $('bar').style.display = ''; $('status').textContent = 'Starting…'; window.desktop.action('retry'); };
+  $('log').onclick = () => window.desktop.action('log');
+  $('quit').onclick = () => window.desktop.action('quit');
+</script>
+</body>
+</html>

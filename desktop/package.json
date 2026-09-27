@@ -1,0 +1,16 @@
+{
+  "name": "imagegen-studio",
+  "productName": "ImageGen Studio",
+  "version": "1.0.0",
+  "description": "Desktop window for ImageGen Studio (local Stable Diffusion on AMD via ZLUDA)",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "package": "electron-packager . \"ImageGen Studio\" --platform=win32 --arch=x64 --icon=assets/icon.ico --out=dist --overwrite --prune=true --ignore=\"^/dist\" --ignore=\"^/make_shortcuts.ps1\""
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^44.4.5"
+  }
+}
