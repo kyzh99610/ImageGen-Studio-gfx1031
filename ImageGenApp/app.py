@@ -134,6 +134,10 @@ from backend.smartsplit_pipeline import (
 from backend.help_content import build_help_tab
 from backend.sdxl_pipeline import SDXLPipeline
 from backend.png_info import read_png_info, format_png_info_html
+from backend.prompt_tools import (merge_prompts, tidy_prompt, token_report_html, insert_after_quality,
+                                  preload_tokenizer, tokenizer_ready)
+preload_tokenizer()
+from backend.lora_keywords import chips_for, lora_keywords
 
 # ── Singleton service objects (created once at startup) ────────────────────────
 sd       = SDPipeline()       # active pipeline — swapped to SDXLPipeline when SDXL model loaded
@@ -726,7 +730,24 @@ def _build_generate_tab():
                 active_loras_html = gr.HTML("")
                 lora_status  = gr.HTML("")
                 compat_html  = gr.HTML("")   # compatibility warning
-                triggers_html = gr.HTML("")  # trigger words / top training tags
+                triggers_html = gr.HTML("")  # status of the Civitai trigger-word fetch
+                # keyword chips for what the last session had selected
+                _kw_slots = [(lbl, v) for lbl, v in (("Model", _init_ckpt), ("S1", _ls_lora(0, 0.8)[0]),
+                                                     ("S2", _ls_lora(1, 0.7)[0]), ("S3", _ls_lora(2, 0.7)[0]))
+                             if v and v != "none"]
+                try:
+                    _kw_s, _kw_t, _kw_n = chips_for(_kw_slots)
+                except Exception:
+                    _kw_s, _kw_t, _kw_n = [], [], ""
+                kw_note = gr.HTML(_kw_n)
+                kw_ds = gr.Dataset(
+                    label="🏷️ Keywords from the checkpoint and LoRA slots — click to add",
+                    components=["textbox"], samples=_kw_s or [["-"]], type="index", visible=bool(_kw_s),
+                    samples_per_page=40,
+                )
+                kw_tags_state = gr.State(_kw_t)
+                kw_core_btn = gr.Button("✨ Add character tags (trigger words + tags in ≥ 50 % of its training images)",
+                                        size="sm", visible=any(lbl != "Model" for lbl, _ in _kw_slots) and bool(_kw_s))
                 with gr.Row():
                     fetch_triggers_btn = gr.Button(
                         "🔍 Fetch trigger words from Civitai", size="sm",
@@ -760,6 +781,14 @@ def _build_generate_tab():
                             value=_ls.get("auto_quality", True),
                             info="Prepends 'masterpiece, best quality' (or score_9… for Pony) if your prompt has none.",
                         )
+                        with gr.Row():
+                            # an estimate until the tokenizer has loaded in the background
+                            token_html = gr.HTML(token_report_html(
+                                _ls.get("prompt", ""), _ls.get("negative_prompt", DEFAULT_NEGATIVE),
+                                None if tokenizer_ready() else "estimate"))
+                        with gr.Row():
+                            tidy_btn = gr.Button("🧹 Tidy prompts — merge duplicate tags (strongest weight wins)",
+                                                 size="sm", variant="secondary")
 
                         with gr.Row():
                             generate_btn = gr.Button("✨ Generate  (Ctrl+Enter)", variant="primary",
@@ -820,6 +849,11 @@ def _build_generate_tab():
                                                     info="How much to change the input: 0.3 subtle · 0.5 restyle · 0.8+ mostly new.")
                             use_i2i_cb  = gr.Checkbox(label="Use img2img mode", value=False,
                                                       info="Start from the image above instead of pure noise.")
+                            restore_cb  = gr.Checkbox(
+                                label="Restore settings from dropped images", value=True,
+                                info="An image made by this app (or A1111 / Forge / Civitai) brings back its "
+                                     "checkpoint, VAE, LoRAs + weights, prompts, sampler, steps, CFG, size and seed.")
+                            i2i_restore_html = gr.HTML("")
 
                             gr.Markdown("---")
                             gr.HTML(
@@ -1183,7 +1217,7 @@ def _build_generate_tab():
             elif family in ("sd15", "illustrious", "sdxl") and "masterpiece" not in _q:
                 added_tags = "masterpiece, best quality"
             if added_tags:
-                prompt = f"{added_tags}, {prompt}" if prompt.strip() else added_tags
+                prompt = merge_prompts(added_tags, prompt)
         tags_note = (f'<br><span style="color:#9399b2;">Auto-added quality tags: '
                      f'<code>{added_tags}</code></span>' if added_tags else "") + fixes_note
 
@@ -1208,12 +1242,10 @@ def _build_generate_tab():
                     progress_callback=prog_cb,
                 )
                 _save_outputs(imgs, dict(
-                    prompt=prompt, negative_prompt=neg_prompt,
+                    mode="txt2img", prompt=prompt, negative_prompt=neg_prompt,
                     steps=steps, cfg_scale=cfg, seeds=[seed], scheduler=scheduler,
                     width=width, height=height,
-                    model=Path(sd.current_model).stem if sd.current_model else "",
-                    loras=_loras_meta(sd),
-                ))
+                ), pipe=sd)
                 info_html = (
                     f'<p style="color:#a6adc8;font-size:13px;">'
                     f'SmartSplit | Seed:{seed} | Steps:{steps} | {width}×{height}<br>'
@@ -1243,14 +1275,15 @@ def _build_generate_tab():
             seeds = list(getattr(sd, "last_seeds", None) or [seed])
             if use_i2i and init_img is not None and imgs:
                 width, height = imgs[0].size   # img2img keeps the input's size
+            i2i = bool(use_i2i and init_img is not None)
+            src = (getattr(init_img, "info", None) or {}).get("saved_path") if i2i else None
             saved = _save_outputs(imgs, dict(
+                mode="img2img" if i2i else "txt2img",
                 prompt=prompt, negative_prompt=neg_prompt,
                 steps=steps, cfg_scale=cfg, seeds=seeds, scheduler=scheduler,
                 width=width, height=height,
-                model=Path(sd.current_model).stem if sd.current_model else "",
-                loras=_loras_meta(sd),
-                **({"img2img_strength": strength} if use_i2i and init_img is not None else {}),
-            ))
+                **({"strength": strength, "source_image": Path(src).name if src else None} if i2i else {}),
+            ), pipe=sd)
             if saved:
                 info_html += (f'<p style="color:#9399b2;font-size:13px;margin:2px 0;">'
                               f'Saved: {", ".join(p.name for p in saved)}</p>')
@@ -1543,14 +1576,73 @@ def _build_generate_tab():
     lora_dd3.change(get_model_info, [lora_dd3], [lora_info3])
 
     # ── Trigger words / top training tags ─────────────────────────────────
-    def do_read_triggers(model_val, lora_val):
-        try:
-            return render_triggers_html(model_val or "", lora_val or "")
-        except Exception:
-            return ""
+    # (Trigger words now appear as clickable keyword chips — see on_keywords below.)
 
-    model_dd.change(do_read_triggers, [model_dd, lora_dd], [triggers_html])
-    lora_dd.change(do_read_triggers,  [model_dd, lora_dd], [triggers_html])
+    # ── Token counter + tidy ──────────────────────────────────────────────
+    def _tokenizer():
+        return getattr(getattr(sd, "pipe", None), "tokenizer", None)
+
+    def _triggers_of(*loras):
+        out = []
+        for v in loras:
+            kw = lora_keywords(v) if v and v != "none" else None
+            if kw:
+                out += kw.triggers + kw.likely
+        return out
+
+    def on_prompt_tokens(pos, neg, l1=None, l2=None, l3=None):
+        return token_report_html(pos or "", neg or "", _tokenizer(), _triggers_of(l1, l2, l3))
+
+    _tok_in = [prompt_txt, neg_prompt_txt, lora_dd, lora_dd2, lora_dd3]
+    for _t in _tok_in:
+        _t.change(on_prompt_tokens, _tok_in, [token_html], queue=False, trigger_mode="always_last")
+
+    def do_tidy(pos, neg):
+        new_pos, d1 = tidy_prompt(pos or "")
+        new_neg, d2 = tidy_prompt(neg or "")
+        merged = d1 + [f"(neg) {d}" for d in d2]
+        note = ('<p style="font-size:13px;color:#a6e3a1;margin:2px 0;">🧹 Merged: '
+                + html.escape("; ".join(merged)) + "</p>") if merged else \
+            '<p style="font-size:13px;color:#a6adc8;margin:2px 0;">🧹 No duplicate tags.</p>'
+        return new_pos, new_neg, token_report_html(new_pos, new_neg, _tokenizer()) + note
+    tidy_btn.click(do_tidy, [prompt_txt, neg_prompt_txt], [prompt_txt, neg_prompt_txt, token_html],
+                   queue=False)
+
+    # ── Keyword chips (checkpoint + 3 LoRA slots) ─────────────────────────
+    def on_keywords(model_val, l1, l2, l3):
+        slots = [(lbl, v) for lbl, v in (("Model", model_val), ("S1", l1), ("S2", l2), ("S3", l3))
+                 if v and v != "none"]
+        try:
+            samples, tags, note = chips_for(slots)
+        except Exception as e:
+            print(f"[Keywords] {e}")
+            samples, tags, note = [], [], ""
+        has = bool(samples)
+        return (gr.update(samples=samples or [["-"]], visible=has), tags, note,
+                gr.update(visible=any(lora_keywords(v) and (lora_keywords(v).triggers or lora_keywords(v).tags)
+                                      for lbl, v in slots if lbl != "Model")))
+    _kw_in = [model_dd, lora_dd, lora_dd2, lora_dd3]
+    for _c in _kw_in:
+        _c.change(on_keywords, _kw_in, [kw_ds, kw_tags_state, kw_note, kw_core_btn])
+
+    def on_keyword_click(idx, tags, pos):
+        if idx is None or not tags or not 0 <= idx < len(tags):
+            return gr.update()
+        tag, front = tags[idx]
+        # trigger words / creator prompts go right after the quality tags (the first chunk
+        # steers the image most); ordinary tags are merged in at the end
+        return insert_after_quality(pos or "", tag) if front else merge_prompts(pos or "", tag)
+
+    kw_ds.click(on_keyword_click, [kw_ds, kw_tags_state, prompt_txt], [prompt_txt])
+
+    def do_core_tags(pos, l1, l2, l3):
+        add = []
+        for v in (l1, l2, l3):
+            kw = lora_keywords(v) if v and v != "none" else None
+            if kw:
+                add += kw.core()
+        return insert_after_quality(pos or "", ", ".join(add)) if add else gr.update()
+    kw_core_btn.click(do_core_tags, [prompt_txt, lora_dd, lora_dd2, lora_dd3], [prompt_txt])
 
     # ── Fetch trigger words from Civitai (hash lookup, no re-download) ────
     def do_fetch_triggers(model_val, lora_val, progress=gr.Progress()):
@@ -1578,14 +1670,14 @@ def _build_generate_tab():
             f'<p style="color:#a6e3a1;">✅ Fetched {ok} sidecar(s) | '
             f'⚠️ {nf} not on Civitai | ❌ {err} errors</p>'
         )
-        triggers = render_triggers_html(model_val or "", lora_val or "")
-        return status, triggers
+        return status, ""
 
     fetch_triggers_btn.click(
         do_fetch_triggers,
         [model_dd, lora_dd],
         [fetch_triggers_status, triggers_html],
-    )
+    ).then(on_keywords, [model_dd, lora_dd, lora_dd2, lora_dd3],
+           [kw_ds, kw_tags_state, kw_note, kw_core_btn])
 
     # ── Prompt presets ─────────────────────────────────────────────────────
     def do_replace_preset(preset_name):
@@ -1600,49 +1692,12 @@ def _build_generate_tab():
         out.append(gr.update(value=p["height"]) if "height" in p else gr.update())
         return out
 
-    def _dedup_tags(existing: str, to_add: str) -> str:
-        """Append new tags, dedup by base name, keep highest weight."""
-        import re
-
-        def _parse_tag(raw: str) -> tuple[str, float, str]:
-            """Return (base_name_lower, weight, original_string)."""
-            raw = raw.strip()
-            # Match (tag:weight) pattern
-            m = re.match(r'^\((.+?)(?::(\d+\.?\d*))?\)$', raw)
-            if m:
-                return m.group(1).strip().lower(), float(m.group(2) or 1.0), raw
-            return raw.lower(), 1.0, raw
-
-        # Build map: base_name → (weight, original_string)
-        tag_map: dict[str, tuple[float, str]] = {}
-        order: list[str] = []  # preserve insertion order by base name
-        for t in existing.split(","):
-            t = t.strip()
-            if not t:
-                continue
-            base, weight, orig = _parse_tag(t)
-            if base not in tag_map or weight > tag_map[base][0]:
-                if base not in tag_map:
-                    order.append(base)
-                tag_map[base] = (weight, orig)
-
-        for t in to_add.split(","):
-            t = t.strip()
-            if not t:
-                continue
-            base, weight, orig = _parse_tag(t)
-            if base not in tag_map or weight > tag_map[base][0]:
-                if base not in tag_map:
-                    order.append(base)
-                tag_map[base] = (weight, orig)
-
-        return ", ".join(tag_map[b][1] for b in order)
-
     def do_append_preset(preset_name, cur_pos, cur_neg):
         p = _PROMPT_PRESETS.get(preset_name, {})
         add_pos = p.get("pos", "")
         add_neg = p.get("neg", "")
-        return _dedup_tags(cur_pos, add_pos), _dedup_tags(cur_neg, add_neg)
+        # every tag once, at its strongest weight — presets that share tags don't stack them
+        return merge_prompts(cur_pos, add_pos), merge_prompts(cur_neg, add_neg)
 
     preset_replace_btn.click(do_replace_preset, [preset_dd],
                              [prompt_txt, neg_prompt_txt, steps_sl, cfg_sl, width_sl, height_sl])
@@ -1718,14 +1773,10 @@ def _build_generate_tab():
     # ── Quick tag chips ────────────────────────────────────────────────────
     def _make_tag_appender(tag: str):
         def _append(target: str, pos: str, neg: str):
-            def _sep(s: str) -> str:
-                s = s.strip()
-                if not s:
-                    return ""
-                return "" if s.endswith(",") else ", "
+            # merged, not appended: a tag already there keeps its place (and the stronger weight)
             if "Positive" in target:
-                return pos + _sep(pos) + tag, neg
-            return pos, neg + _sep(neg) + tag
+                return merge_prompts(pos, tag), neg
+            return pos, merge_prompts(neg, tag)
         return _append
 
     for _btn, _tag in _tag_btn_list:
@@ -1737,8 +1788,7 @@ def _build_generate_tab():
 
     # i2i enhancer tags always append to positive prompt
     def _i2i_append(tag, pos):
-        sep = ", " if pos.strip() and not pos.strip().endswith(",") else ""
-        return pos.strip() + sep + tag
+        return merge_prompts(pos, tag)
 
     for _btn, _tag in _i2i_btn_list:
         _btn.click(
@@ -1902,6 +1952,51 @@ def _build_generate_tab():
         return (wh[0], wh[1]) if wh else (gr.update(), gr.update())
     size_preset_dd.change(on_size_preset, [size_preset_dd], [width_sl, height_sl])
 
+    # ── Dropping an image into img2img brings back how it was made ───────────
+    _restore_outputs = [prompt_txt, neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl, width_sl, height_sl,
+                        batch_sl, seed_num, model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2,
+                        lora_dd3, lora_weight3, strength_sl, use_i2i_cb, i2i_restore_html]
+
+    def on_i2i_drop(img, restore):
+        keep = [gr.update()] * (len(_restore_outputs) - 2)
+        if img is None:
+            return (*keep, gr.update(), "")
+        if not restore:
+            return (*keep, True, "")
+        try:
+            meta = read_png_info(img)
+        except Exception:
+            meta = {}
+        if not (meta.get("prompt") or meta.get("imagegen")):
+            return (*keep, True, '<p style="font-size:13px;color:#a6adc8;">No generation settings in this image '
+                                  '— img2img mode is on; write a prompt for it.</p>')
+        plan = _restore_plan(meta)
+        u = lambda v: gr.update() if v is None else v
+        lora_ups = [gr.update()] * 6
+        if plan["loras"] is not None:
+            slots = (plan["loras"] + [("none", None)] * 3)[:3]
+            lora_ups = [v for path, w in slots for v in (path, gr.update() if w is None else w)]
+        if plan["mode"] == "img2img":
+            how = ("It was itself an img2img result, so to recreate it exactly you need its source image "
+                   "(and strength " + str(plan.get("strength")) + "); ")
+        else:
+            how = ("<b>To recreate it exactly:</b> untick “Use img2img mode” and press Generate. "
+                   "Keep it ticked to make variations of it (strength 0.3–0.5 keeps the composition); ")
+        note = ('<p style="font-size:13px;color:#a6e3a1;margin:4px 0;">📋 Restored '
+                + ("exactly (ImageGen Studio record)" if plan["exact"] else "from its A1111-style parameters")
+                + ": " + _plan_summary(plan) + '</p><p style="font-size:13px;color:#a6adc8;margin:2px 0;">'
+                + how + "batch size was set to 1 so the seed matches.</p>")
+        strength = gr.update()
+        if plan["mode"] != "img2img":
+            strength = gr.update()                      # keep the user's variation strength
+        elif plan.get("strength") is not None:
+            strength = min(1.0, max(0.1, float(plan["strength"])))
+        return (u(plan["prompt"]), u(plan["negative_prompt"]), u(plan["scheduler"]), u(plan["steps"]),
+                u(plan["cfg_scale"]), u(plan["width"]), u(plan["height"]), 1, u(plan["seed"]),
+                u(plan["model"]), u(plan["vae"]), *lora_ups, strength, True, note)
+
+    init_image.upload(on_i2i_drop, [init_image, restore_cb], _restore_outputs)
+
     def on_model_pick(model_path, w, h):
         """Switching between SD 1.5 and SDXL-class models: move the size to that
         family's native resolution if the current one clearly belongs to the other."""
@@ -1995,6 +2090,7 @@ def _build_generate_tab():
 
     gen_controls = {
         "model": model_dd,
+        "vae": vae_dd,
         "lora_dd1": lora_dd,
         "lora_w1": lora_weight,
         "lora_w2": lora_weight2,
@@ -2260,8 +2356,13 @@ def _build_bridge_tab():
             base_image = s1_imgs[0]
             # Carry the seed actually used into stage 2 and the saved metadata
             seed_val = (_sd15.last_seeds or [seed_val])[0]
-            sd15_name = Path(str(_sd15.current_model)).stem
-            sd15_loras = [_loras_meta(_sd15)] if _sd15.loaded_loras else []
+            # Stage 1 is saved now, while its model and LoRAs are still loaded (the record
+            # reads them from the pipeline; on small cards SD 1.5 is freed below)
+            s1_saved = _save_outputs([base_image], dict(
+                mode="txt2img", prompt=prompt, negative_prompt=neg, steps=sd15_steps,
+                cfg_scale=sd15_cfg, seeds=[seed_val], scheduler=sd15_sched,
+                width=sd15_w, height=sd15_h, bridge_stage=1,
+            ), pipe=_sd15)
 
             # SD 1.5 + SDXL + SDXL's working memory don't fit in 12 GB: Windows would
             # spill to system RAM (stage 2 went from ~6 s to ~60 s). Free SD 1.5 on
@@ -2329,17 +2430,15 @@ def _build_bridge_tab():
 
             refined = s2_imgs[0] if s2_imgs else None
 
-            # Save outputs
+            # Save stage 2 as the img2img it is (stage 1 was saved above)
             all_imgs = [base_image] + (s2_imgs or [])
-            _save_outputs(all_imgs, dict(
-                prompt=prompt, negative_prompt=neg,
-                steps=f"SD1.5:{sd15_steps} SDXL:{sdxl_steps}",
-                cfg_scale=f"SD1.5:{sd15_cfg} SDXL:{sdxl_cfg}",
-                seeds=[seed_val] * len(all_imgs),
-                width=f"{sd15_w}→{sdxl_w}", height=f"{sd15_h}→{sdxl_h}",
-                model=f"{sd15_name} → {Path(str(_sdxl.current_model)).stem}",
-                loras=", ".join(sd15_loras),
-            ))
+            if s2_imgs:
+                _save_outputs(s2_imgs, dict(
+                    mode="img2img", prompt=xl_prompt, negative_prompt=neg, steps=sdxl_steps,
+                    cfg_scale=sdxl_cfg, seeds=[seed_val], scheduler=sdxl_sched,
+                    width=sdxl_w, height=sdxl_h, strength=denoise, bridge_stage=2,
+                    source_image=s1_saved[0].name if s1_saved else None,
+                ), pipe=_sdxl)
 
             progress(1.0, desc="✅ Bridge complete!")
             status = (
@@ -2493,75 +2592,19 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
 
         def do_send_to_gen(img):
             if img is None:
-                return (
-                    gr.update(), gr.update(), gr.update(), gr.update(),
-                    gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-                    *[gr.update()] * 6,
-                    '<p style="color:#f38ba8;font-size:13px;">⚠ No image loaded in PNG Info.</p>'
-                )
-            meta = read_png_info(img)
-
-            sched_val = gr.update()
-            if meta.get("sampler"):
-                s_lower = meta["sampler"].lower()
-                for name in SCHEDULER_MAP.keys():
-                    if name.lower() == s_lower or s_lower in name.lower() or name.lower() in s_lower:
-                        sched_val = name
-                        break
-
-            lora_found, clean_prompt = _loras_from_meta(meta.get("prompt") or "", meta.get("loras"))
-            if lora_found and meta.get("prompt"):
-                meta["prompt"] = clean_prompt
-            p_up = meta["prompt"] if meta.get("prompt") else gr.update()
-            np_up = meta["negative_prompt"] if meta.get("negative_prompt") else gr.update()
-            st_up = meta["steps"] if meta.get("steps") is not None else gr.update()
-            cfg_up = meta["cfg_scale"] if meta.get("cfg_scale") is not None else gr.update()
-            w_up = meta["width"] if meta.get("width") is not None else gr.update()
-            h_up = meta["height"] if meta.get("height") is not None else gr.update()
-            seed_up = meta["seed"] if meta.get("seed") is not None else gr.update()
-            model_up, model_note = gr.update(), ""
-            if meta.get("model"):
-                want = str(meta["model"]).lower()
-                match = next((p for n, p in list_checkpoints()
-                              if Path(n).stem.lower() == want), None)
-                if match:
-                    model_up, model_note = match, f", Model: {Path(match).stem}"
-                else:
-                    model_note = f', Model <b>{meta["model"]}</b> not found locally — pick one manually'
-
-            # LoRAs → the three slots (matched to local files by name)
+                return (*[gr.update()] * 16,
+                        '<p style="color:#f38ba8;font-size:13px;">⚠ No image loaded in PNG Info.</p>')
+            plan = _restore_plan(read_png_info(img))
+            u = lambda v: gr.update() if v is None else v
             lora_ups = [gr.update()] * 6
-            lora_note = ""
-            if lora_found:
-                local = {Path(n).stem.lower(): p for n, p in list_loras()}
-                hits = [(local[n.lower().removesuffix(".safetensors")], w) for n, w in lora_found
-                        if n.lower().removesuffix(".safetensors") in local]
-                missing = [n for n, _ in lora_found if n.lower().removesuffix(".safetensors") not in local]
-                slots = (hits + [("none", None)] * 3)[:3]
-                lora_ups = [v for path, w in slots
-                            for v in (path, gr.update() if w is None else min(1.5, max(0.1, w)))]
-                if hits:
-                    lora_note += ", LoRAs: " + ", ".join(
-                        f"{Path(p).stem} ×{min(1.5, max(0.1, w)):g}" for p, w in hits[:3])
-                if len(hits) > 3:
-                    lora_note += f" (only 3 slots — skipped {', '.join(Path(p).stem for p, _ in hits[3:])})"
-                if missing:
-                    lora_note += (f', LoRA{"s" if len(missing) > 1 else ""} not found locally: '
-                                  f'<b>{", ".join(html.escape(m) for m in missing)}</b>')
-
-            status_msg = (
-                f'<p style="color:#a6e3a1;font-size:13px;">✅ Transferred parameters to Generate tab '
-                f'(Steps: {meta.get("steps") or "default"}, CFG: {meta.get("cfg_scale") or "default"}, '
-                f'Size: {meta.get("width")}×{meta.get("height")}, Seed: {meta.get("seed")}{model_note}'
-                f'{lora_note})</p>'
-            )
-
-            return (
-                p_up, np_up, sched_val, st_up,
-                cfg_up, w_up, h_up, seed_up, model_up,
-                *lora_ups,
-                status_msg
-            )
+            if plan["loras"] is not None:
+                slots = (plan["loras"] + [("none", None)] * 3)[:3]
+                lora_ups = [v for path, w in slots for v in (path, gr.update() if w is None else w)]
+            status_msg = ('<p style="color:#a6e3a1;font-size:13px;">✅ Sent to Generate: '
+                          + (_plan_summary(plan) or "prompt only (no settings in this image)") + "</p>")
+            return (u(plan["prompt"]), u(plan["negative_prompt"]), u(plan["scheduler"]), u(plan["steps"]),
+                    u(plan["cfg_scale"]), u(plan["width"]), u(plan["height"]), u(plan["seed"]),
+                    u(plan["model"]), u(plan["vae"]), *lora_ups, status_msg)
 
         send_gen_btn.click(
             do_send_to_gen,
@@ -2576,6 +2619,7 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
                 gen_controls["height"],
                 gen_controls["seed"],
                 gen_controls["model"],
+                gen_controls["vae"],
                 gen_controls["lora_dd1"], gen_controls["lora_w1"],
                 gen_controls["lora_dd2"], gen_controls["lora_w2"],
                 gen_controls["lora_dd3"], gen_controls["lora_w3"],
@@ -4301,13 +4345,6 @@ def _smartsplit_vae_choices(cap: SmartSplitCapability) -> list[str]:
     return choices
 
 
-def _loras_meta(pipe) -> str:
-    """'name:weight, …' for the PNG metadata — the same shape A1111's <lora:name:weight> uses,
-    so PNG Info → Generate can put them back into the slots."""
-    return ", ".join(f"{Path(name).stem}:{w:g}"
-                     for _, (name, _path, w) in sorted(pipe._lora_adapters.items()))
-
-
 _LORA_TAG = re.compile(r"<lora:([^:>]+)(?::([-\d.]+))?[^>]*>", re.I)
 
 
@@ -4328,6 +4365,101 @@ def _loras_from_meta(prompt: str, loras_field: str | None):
             name, w = m.group(1).strip(), m.group(2) or m.group(3)
             found.append((name, _num(w, 0.8) if w else 0.8))
     return found, clean
+
+
+def _match_local(name: str | None, items: list, hash10: str | None = None) -> str | None:
+    """A local file for a recorded model/VAE/LoRA name: exact file name, then stem (case-
+    insensitive), then — if the file was renamed — its cached SHA-256 prefix."""
+    if not name and not hash10:
+        return None
+    paths = [p for _, p in items]
+    if name:
+        n = Path(str(name)).name.lower()
+        stem = Path(n).stem if Path(n).suffix in (".safetensors", ".ckpt", ".pt", ".bin") else n
+        for label, path in items:
+            if Path(path).name.lower() == n:
+                return path
+        for label, path in items:
+            if Path(path).stem.lower() == stem:
+                return path
+    if hash10:
+        from backend.model_hash import find_by_hash
+        return find_by_hash(hash10, paths)
+    return None
+
+
+def _restore_plan(meta: dict) -> dict:
+    """What to put in the Generate controls to make an image again, from read_png_info():
+    exact files and weights from our 'imagegen' record when present, else A1111 text."""
+    rec = meta.get("imagegen") or {}
+    plan: dict = {"notes": [], "missing": []}
+    lora_found, clean = _loras_from_meta(meta.get("prompt") or "", None if rec else meta.get("loras"))
+    plan["prompt"] = clean if lora_found else (meta.get("prompt") or None)
+    plan["negative_prompt"] = meta.get("negative_prompt") or None
+    sampler = (meta.get("sampler") or "").lower()
+    plan["scheduler"] = next((n for n in SCHEDULER_MAP if n.lower() == sampler), None) or next(
+        (n for n in SCHEDULER_MAP if sampler and (sampler in n.lower() or n.lower() in sampler)), None)
+    for k in ("steps", "cfg_scale", "seed", "width", "height", "strength"):
+        plan[k] = meta.get(k)
+    # checkpoint
+    mfile = (rec.get("model") or {}).get("file") or meta.get("model")
+    mhash = (rec.get("model") or {}).get("sha256_10") or meta.get("model_hash")
+    plan["model"] = _match_local(mfile, list_checkpoints(), mhash)
+    if mfile and not plan["model"]:
+        if re.fullmatch(r"[\w.-]+/[\w.-]+", str(mfile)):             # a Hugging Face repo ID
+            plan["model"] = str(mfile)
+        else:
+            plan["missing"].append(f"checkpoint {mfile}")
+    # VAE
+    vfile = (rec.get("vae") or {}).get("file") if rec else meta.get("vae")
+    if rec and rec.get("vae") is None and "vae" in rec:
+        plan["vae"] = "none"
+    elif vfile:
+        plan["vae"] = _match_local(vfile, list_vaes(), (rec.get("vae") or {}).get("sha256_10"))
+        if not plan["vae"]:
+            plan["missing"].append(f"VAE {vfile}")
+    else:
+        plan["vae"] = None
+    # LoRAs: exact files + weights from our record, else prompt tags / "LoRAs:" field
+    wanted = ([(l.get("file"), l.get("weight", 0.8), l.get("sha256_10")) for l in rec.get("loras") or []
+               if isinstance(l, dict)] if rec.get("loras") is not None else
+              [(n, w, None) for n, w in lora_found])
+    loras = []
+    for name, w, h in wanted:
+        path = _match_local(name if Path(str(name)).suffix else f"{name}.safetensors", list_loras(), h) \
+            or _match_local(name, list_loras(), h)
+        if path:
+            loras.append((path, min(1.5, max(0.1, float(_num(w, 0.8))))))
+        else:
+            plan["missing"].append(f"LoRA {name}")
+    if len(loras) > 3:
+        plan["notes"].append("only 3 LoRA slots — skipped " + ", ".join(Path(p).stem for p, _ in loras[3:]))
+    plan["loras"] = loras[:3] if (wanted or rec) else None      # None = leave the slots alone
+    plan["mode"] = rec.get("mode") or ("img2img" if meta.get("strength") is not None else "txt2img")
+    plan["exact"] = bool(rec)
+    return plan
+
+
+def _plan_summary(plan: dict) -> str:
+    bits = []
+    if plan.get("model"):
+        bits.append(f"model <b>{html.escape(Path(str(plan['model'])).stem)}</b>")
+    if plan.get("vae") and plan["vae"] != "none":
+        bits.append(f"VAE {html.escape(Path(plan['vae']).stem)}")
+    if plan.get("loras"):
+        bits.append("LoRAs " + ", ".join(f"{html.escape(Path(p).stem)} ×{w:g}" for p, w in plan["loras"]))
+    for k, lbl in (("seed", "seed"), ("steps", "steps"), ("cfg_scale", "CFG")):
+        if plan.get(k) is not None:
+            bits.append(f"{lbl} {plan[k]}")
+    if plan.get("scheduler"):
+        bits.append(plan["scheduler"])
+    out = ", ".join(bits)
+    if plan["missing"]:
+        out += (' · <span style="color:#f38ba8;">not found locally: '
+                + ", ".join(html.escape(m) for m in plan["missing"]) + "</span>")
+    if plan["notes"]:
+        out += " · " + "; ".join(plan["notes"])
+    return out
 
 
 def _kernel_cache_note() -> str:
@@ -4393,39 +4525,83 @@ def _unique_output(base: str) -> Path:
     return path
 
 
-def _save_outputs(images: list, meta: dict | None = None) -> list[Path]:
-    """Save images with A1111-style 'parameters' metadata. meta['seeds'] holds the
+def _gen_record(pipe, **settings) -> dict:
+    """Everything needed to make an image again: settings + the exact model, VAE and LoRA
+    files (name, AutoV2 hash when known) that were loaded in `pipe`."""
+    from backend.model_hash import autov2, hash_later
+    rec = {"app": "ImageGen Studio", "format": 1}
+    rec.update({k: v for k, v in settings.items() if v is not None})
+    if pipe is not None:
+        mp = str(getattr(pipe, "current_model", "") or "")
+        vp = getattr(pipe, "_last_vae_path", None)
+        loras = [(name, path, w) for _, (name, path, w) in sorted(getattr(pipe, "_lora_adapters", {}).items())]
+        hash_later(mp, vp, *[path for _, path, _ in loras])
+        # a local file → its name; a Hugging Face repo ID ("org/name-1.0") → kept whole
+        rec["model"] = {"file": Path(mp).name if Path(mp).is_file() else mp,
+                        "family": getattr(pipe, "model_family", ""), "sha256_10": autov2(mp)}
+        rec["vae"] = {"file": Path(vp).name, "sha256_10": autov2(vp)} if vp else None
+        rec["loras"] = [{"file": Path(path).name, "weight": round(float(w), 3), "sha256_10": autov2(path)}
+                        for name, path, w in loras]
+    return rec
+
+
+def _params_text(rec: dict) -> str:
+    """A1111 'parameters' text (read by A1111/Forge/Civitai and by PNG Info)."""
+    text = rec.get("prompt", "") or ""
+    if rec.get("negative_prompt"):
+        text += f"\nNegative prompt: {rec['negative_prompt']}"
+    parts = []
+    for key, label in (("steps", "Steps"), ("scheduler", "Sampler"), ("cfg_scale", "CFG scale"), ("seed", "Seed")):
+        if rec.get(key) is not None:
+            parts.append(f"{label}: {rec[key]}")
+    if rec.get("width") and rec.get("height"):
+        parts.append(f"Size: {rec['width']}x{rec['height']}")
+    model = rec.get("model") or {}
+    if model.get("sha256_10"):
+        parts.append(f"Model hash: {model['sha256_10']}")
+    if model.get("file"):
+        f = str(model["file"])
+        parts.append(f"Model: {Path(f).stem if f.lower().endswith(('.safetensors', '.ckpt', '.pt', '.bin')) else f}")
+    if rec.get("vae"):
+        parts.append(f"VAE: {rec['vae']['file']}")
+    if rec.get("strength") is not None:
+        parts.append(f"Denoising strength: {rec['strength']}")
+    if rec.get("source_image"):
+        parts.append(f"img2img source: {rec['source_image']}")
+    parts.append("Version: ImageGen Studio")
+    if rec.get("loras"):   # last: PNG Info reads "LoRAs:" to the end of the line
+        parts.append("LoRAs: " + ", ".join(f"{Path(l['file']).stem}:{l['weight']:g}" for l in rec["loras"]))
+    return text + ("\n" + ", ".join(parts) if parts else "")
+
+
+def _save_outputs(images: list, meta: dict | None = None, pipe=None) -> list[Path]:
+    """Save images with their generation record: A1111 'parameters' text plus an 'imagegen'
+    JSON chunk with the exact model / VAE / LoRA files and weights. meta['seeds'] holds the
     seed actually used for each image (so every file is reproducible on its own)."""
     from PIL.PngImagePlugin import PngInfo
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     meta = dict(meta or {})
     seeds = list(meta.pop("seeds", None) or [meta.pop("seed", -1)])
+    if "img2img_strength" in meta:
+        meta["strength"] = meta.pop("img2img_strength")
+    legacy_model, legacy_loras = meta.pop("model", None), meta.pop("loras", None)
     ts = int(time.time())
     saved = []
     for i, img in enumerate(images):
         seed_i = seeds[i] if i < len(seeds) else seeds[-1]
+        rec = _gen_record(pipe, **dict(meta, seed=seed_i))
+        if pipe is None and legacy_model:
+            rec["model"] = {"file": legacy_model}
+        if pipe is None and legacy_loras:
+            rec["loras"] = [{"file": n, "weight": w} for n, w in _loras_from_meta("", legacy_loras)[0]]
+        if not rec.get("width") and hasattr(img, "size"):
+            rec["width"], rec["height"] = img.size
         pnginfo = PngInfo()
-        if meta:
-            params_text = meta.get("prompt", "")
-            neg = meta.get("negative_prompt", "")
-            if neg:
-                params_text += f"\nNegative prompt: {neg}"
-            fields = dict(meta, seed=seed_i)
-            detail_parts = []
-            for k in ("steps", "cfg_scale", "seed", "scheduler", "width", "height"):
-                if k in fields:
-                    label = {"cfg_scale": "CFG scale", "scheduler": "Sampler"}.get(k, k.capitalize())
-                    detail_parts.append(f"{label}: {fields[k]}")
-            if "img2img_strength" in meta:
-                detail_parts.append(f"Denoising strength: {meta['img2img_strength']}")
-            if meta.get("model"):
-                detail_parts.append(f"Model: {meta['model']}")
-            if meta.get("loras"):
-                detail_parts.append(f"LoRAs: {meta['loras']}")
-            if detail_parts:
-                params_text += "\n" + ", ".join(detail_parts)
-            pnginfo.add_text("parameters", params_text)
-            img.info["parameters"] = params_text   # travels with the image to Upscale / img2img
+        params_text = _params_text(rec)
+        pnginfo.add_text("parameters", params_text)
+        pnginfo.add_itxt("imagegen", _json.dumps(rec, ensure_ascii=False))
+        img.info["parameters"] = params_text   # travels with the image to Upscale / img2img
+        img.info["imagegen"] = _json.dumps(rec, ensure_ascii=False)
         path = OUTPUTS_DIR / f"{ts}_seed{seed_i}_{i}.png"
         n = 1
         while path.exists():   # two runs in the same second with the same seed

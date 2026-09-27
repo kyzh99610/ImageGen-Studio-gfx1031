@@ -103,6 +103,13 @@ window, shows a loading screen while it starts, and frees the GPU when you close
 
 - **Generate:** SD 1.x / SD 2.x / SDXL / Pony / Illustrious / NoobAI, 9 samplers, batches, reusable
   per-image seeds, Auto-Loop, A1111 prompt weighting (`(tag:1.2)`, `[tag]`, `BREAK`, `<lora:name:0.8>`)
+- **Reproducible images:** every PNG records the checkpoint, VAE, LoRAs + weights and all settings (A1111-compatible,
+  incl. model hash). Drop one into img2img and everything comes back.
+- **Clickable LoRA keywords:** trigger words, the creator's ready-made prompts, and the LoRA's training tags ranked by
+  how many training images had them. One click adds a character's defining tags.
+- **Long prompts done right:** 75-token chunks cut between tags (`BREAK` starts a new one), a live token counter,
+  warnings when a trigger word falls out of the first chunk, and no duplicate tags when presets or tags are added
+  (the stronger weight wins).
 - **Three LoRA slots**, including LyCORIS LoHa/LoKr. SD 1.5 vs SDXL is read from the file header, and
   mismatches are refused with a clear message instead of producing black images.
 - **img2img**, and an **SD 1.5 → SDXL Bridge** (compose with SD 1.5, refine with SDXL)
@@ -162,7 +169,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 72 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
+That runs 78 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
 
 ## Credits and licenses
 
