@@ -1,0 +1,49 @@
+# ImageGen Studio — Python 3.10 packages (versions of the tested, working setup).
+# install.bat installs these; do it by hand with:
+#   python -m pip install torch==2.4.1+cu118 torchvision==0.19.1+cu118 --index-url https://download.pytorch.org/whl/cu118
+#   python -m pip install -r requirements.txt
+# torch must be the CUDA 11.8 build: ZLUDA runs CUDA programs on AMD GPUs.
+
+# Core (torch/torchvision come from the cu118 index above; these pins keep pip from swapping them)
+torch==2.4.1
+torchvision==0.19.1
+torch-directml==0.2.5.dev240914
+
+# Diffusion
+diffusers==0.36.0
+transformers==4.44.0
+tokenizers==0.19.1
+huggingface_hub==0.36.2
+accelerate==1.12.0
+safetensors==0.7.0
+compel==2.0.2
+peft==0.17.0
+
+# Image processing
+Pillow==10.2.0
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+# onnxruntime and onnxruntime-directml share one package dir; install only one.
+onnxruntime-directml==1.23.0
+# fp16 copy of the Real-ESRGAN model on the GPU (~1.5x faster upscaling)
+onnx==1.17.0
+onnxconverter-common==1.16.0
+protobuf==3.20.3
+# Watermark Remover tab (OCR text detection)
+easyocr==1.7.2
+
+# Web / UI
+gradio==4.19.2
+gradio_client==0.10.1
+fastapi==0.109.2
+starlette==0.36.3
+uvicorn[standard]==0.27.1
+websockets==11.0.3
+httpx==0.26.0
+requests
+tqdm==4.66.2
+pydantic==2.6.1
+setuptools==69.5.1
+
+# Optional — AMD XDNA NPU (Ryzen AI 8700G / Hawk Point) offload: install AMD Ryzen AI
+# Software; the app finds its conda env and talks to it through a subprocess bridge.

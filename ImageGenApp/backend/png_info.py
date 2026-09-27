@@ -1,0 +1,265 @@
+"""
+backend/png_info.py
+Extract and parse generation metadata from PNG/JPEG images.
+Supports Automatic1111, diffusers, ComfyUI, NovelAI, and ImageGen Studio formats.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any
+from PIL import Image
+
+
+def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, Any]:
+    """
+    Read generation metadata from a PIL Image or image file path.
+    Returns a dictionary of parsed parameters:
+      - prompt: str
+      - negative_prompt: str
+      - steps: int | None
+      - sampler: str | None
+      - cfg_scale: float | None
+      - seed: int | None
+      - width: int | None
+      - height: int | None
+      - model: str | None
+      - loras: str | None
+      - raw_text: str
+    """
+    if isinstance(image_or_path, (str, Path)):
+        # Read and close: an open handle keeps the file locked on Windows
+        with Image.open(str(image_or_path)) as f:
+            f.load()
+            img = f.copy()
+            img.info = dict(f.info)
+    else:
+        img = image_or_path
+
+    raw_text = ""
+    info = getattr(img, "info", None) or {}
+    for key in ("parameters", "Comment", "prompt", "Description"):
+        val = info.get(key)
+        if isinstance(val, bytes):
+            val = val.decode("utf-8", "replace")
+        if val:
+            raw_text = str(val)
+            break
+    if not raw_text:
+        raw_text = _exif_user_comment(img)
+
+    # NovelAI keeps its settings as JSON in "Comment"; ComfyUI stores a node graph in
+    # "prompt". Neither is the A1111 text format parsed below.
+    novelai = _parse_json(info.get("Comment")) if "Comment" in info else None
+    if novelai is not None and isinstance(novelai, dict) and "prompt" in novelai:
+        return _from_novelai(img, novelai, str(info.get("Comment")), info.get("Description"))
+    if raw_text.lstrip().startswith("{") and _parse_json(raw_text) is not None:
+        return _empty_result(img, raw_text, note="ComfyUI workflow (node graph) — not A1111 parameters")
+
+    result: dict[str, Any] = {
+        "prompt": "",
+        "negative_prompt": "",
+        "steps": None,
+        "sampler": None,
+        "cfg_scale": None,
+        "seed": None,
+        "width": img.width if hasattr(img, "width") else 512,
+        "height": img.height if hasattr(img, "height") else 512,
+        "model": None,
+        "loras": None,
+        "raw_text": raw_text,
+    }
+
+    if not raw_text:
+        return result
+
+    # Standard A1111 / ImageGen parameters format:
+    # <Positive Prompt>
+    # Negative prompt: <Negative Prompt>
+    # Steps: 20, Sampler: DPM++ 2M Karras, CFG scale: 7.0, Seed: 42, Size: 512x512, Model: xyz...
+    lines = raw_text.strip().split("\n")
+    param_line_idx = -1
+    neg_line_idx = -1
+
+    for i, line in enumerate(lines):
+        line_s = line.strip()
+        if line_s.startswith("Negative prompt:"):
+            neg_line_idx = i
+        elif re.search(r"\bSteps:\s*\d+", line_s, re.I):
+            param_line_idx = i
+
+    # Extract positive prompt
+    if neg_line_idx != -1:
+        result["prompt"] = "\n".join(lines[:neg_line_idx]).strip()
+        if param_line_idx != -1 and param_line_idx > neg_line_idx:
+            neg_content = "\n".join(lines[neg_line_idx:param_line_idx])
+            result["negative_prompt"] = re.sub(r"^Negative prompt:\s*", "", neg_content, flags=re.I).strip()
+        else:
+            neg_content = "\n".join(lines[neg_line_idx:])
+            result["negative_prompt"] = re.sub(r"^Negative prompt:\s*", "", neg_content, flags=re.I).strip()
+    elif param_line_idx != -1:
+        result["prompt"] = "\n".join(lines[:param_line_idx]).strip()
+    else:
+        result["prompt"] = raw_text.strip()
+
+    # Extract key-value pairs from parameter line
+    param_text = lines[param_line_idx] if param_line_idx != -1 else raw_text
+    
+    # Steps
+    m_steps = re.search(r"\bSteps:\s*(\d+)", param_text, re.I)
+    if m_steps:
+        result["steps"] = int(m_steps.group(1))
+
+    # Sampler
+    m_sampler = re.search(r"\b(?:Sampler|Scheduler):\s*([^,]+)", param_text, re.I)
+    if m_sampler:
+        result["sampler"] = m_sampler.group(1).strip()
+
+    # CFG scale
+    m_cfg = re.search(r"\bCFG\s*scale:\s*([0-9.]+)", param_text, re.I)
+    if m_cfg:
+        try:
+            result["cfg_scale"] = float(m_cfg.group(1))
+        except ValueError:
+            pass
+
+    # Seed
+    m_seed = re.search(r"\bSeed:\s*(-?\d+)", param_text, re.I)
+    if m_seed:
+        result["seed"] = int(m_seed.group(1))
+
+    # Size (e.g. Size: 832x1216 or 512×768)
+    m_size = re.search(r"\bSize:\s*(\d+)[x×](\d+)", param_text, re.I)
+    if m_size:
+        result["width"] = int(m_size.group(1))
+        result["height"] = int(m_size.group(2))
+
+    # Model
+    m_model = re.search(r"\bModel:\s*([^,]+)", param_text, re.I)
+    if m_model:
+        result["model"] = m_model.group(1).strip()
+
+    # LoRAs
+    m_loras = re.search(r"\bLoRAs:\s*([^,\n]+(?:,\s*[^,\n]+)*)", param_text, re.I)
+    if m_loras:
+        result["loras"] = m_loras.group(1).strip()
+
+    return result
+
+
+def _parse_json(val):
+    import json
+    try:
+        return json.loads(val.decode("utf-8", "replace") if isinstance(val, bytes) else str(val))
+    except Exception:
+        return None
+
+
+def _exif_user_comment(img) -> str:
+    """A1111 saves JPEG/WebP parameters as EXIF UserComment (tag 0x9286). It lives in the
+    Exif sub-IFD (0x8769), not the base IFD, and starts with an 8-byte charset header."""
+    try:
+        exif = img.getexif()
+    except Exception:
+        return ""
+    if not exif:
+        return ""
+    val = None
+    try:
+        val = exif.get_ifd(0x8769).get(0x9286)
+    except Exception:
+        pass
+    if val is None:
+        val = exif.get(0x9286)
+    if val is None:
+        return ""
+    nul = chr(0)
+    if isinstance(val, bytes):
+        head, body = val[:8], val[8:]
+        if head.startswith(b"UNICODE"):
+            # piexif (A1111) writes UTF-16BE; some tools write UTF-16LE: keep the
+            # decoding that yields fewer unprintable characters
+            def junk(t):
+                return sum(not (c.isprintable() or c in "\r\n\t") for c in t)
+            text = min((body.decode(enc, "replace") for enc in ("utf-16-be", "utf-16-le")), key=junk)
+            return text.strip(nul).strip()
+        if head.startswith(b"ASCII") or head == bytes(8):
+            return body.decode("utf-8", "replace").strip(nul).strip()
+        return val.decode("utf-8", "replace").strip(nul).strip()
+    return str(val).strip(nul).strip()
+
+
+def _empty_result(img, raw_text: str = "", note: str = "") -> dict[str, Any]:
+    return {
+        "prompt": "", "negative_prompt": "", "steps": None, "sampler": None,
+        "cfg_scale": None, "seed": None,
+        "width": getattr(img, "width", None), "height": getattr(img, "height", None),
+        "model": None, "loras": None, "raw_text": raw_text, "note": note,
+    }
+
+
+def _from_novelai(img, d: dict, raw: str, description) -> dict[str, Any]:
+    r = _empty_result(img, raw)
+    r["prompt"] = str(d.get("prompt") or description or "")
+    r["negative_prompt"] = str(d.get("uc") or "")
+    for key, dst, cast in (("steps", "steps", int), ("scale", "cfg_scale", float),
+                           ("seed", "seed", int), ("width", "width", int), ("height", "height", int)):
+        try:
+            if d.get(key) is not None:
+                r[dst] = cast(d[key])
+        except (TypeError, ValueError):
+            pass
+    if d.get("sampler"):
+        r["sampler"] = str(d["sampler"])
+    r["model"] = "NovelAI"
+    return r
+
+
+def format_png_info_html(meta: dict[str, Any]) -> str:
+    """Format parsed metadata into a high-readability HTML presentation."""
+    from html import escape
+    meta = {k: (escape(v) if isinstance(v, str) else v) for k, v in meta.items()}
+    if meta.get("note") and not meta.get("prompt"):
+        return f'<p style="color:#9399b2;font-size:13px;padding:12px;">{meta["note"]}. See Raw Parameters.</p>'
+    if not meta.get("raw_text") and not meta.get("prompt"):
+        return '<p style="color:#9399b2;font-size:13px;padding:12px;">No generation metadata detected in this image.</p>'
+
+    badges = []
+    if meta.get("model"):
+        badges.append(f'<span style="background:#313244;color:#cdd6f4;padding:3px 8px;border-radius:4px;font-size:13px;">📦 Model: <b>{meta["model"]}</b></span>')
+    if meta.get("sampler"):
+        badges.append(f'<span style="background:#313244;color:#89b4fa;padding:3px 8px;border-radius:4px;font-size:13px;">🎛️ Sampler: <b>{meta["sampler"]}</b></span>')
+    if meta.get("steps") is not None:
+        badges.append(f'<span style="background:#313244;color:#a6e3a1;padding:3px 8px;border-radius:4px;font-size:13px;">👣 Steps: <b>{meta["steps"]}</b></span>')
+    if meta.get("cfg_scale") is not None:
+        badges.append(f'<span style="background:#313244;color:#f9e2af;padding:3px 8px;border-radius:4px;font-size:13px;">🎯 CFG: <b>{meta["cfg_scale"]}</b></span>')
+    if meta.get("seed") is not None:
+        badges.append(f'<span style="background:#313244;color:#fab387;padding:3px 8px;border-radius:4px;font-size:13px;">🎲 Seed: <b>{meta["seed"]}</b></span>')
+    if meta.get("width") and meta.get("height"):
+        badges.append(f'<span style="background:#313244;color:#cba6f7;padding:3px 8px;border-radius:4px;font-size:13px;">📐 Size: <b>{meta["width"]}×{meta["height"]}</b></span>')
+    if meta.get("loras"):
+        badges.append(f'<span style="background:#313244;color:#f38ba8;padding:3px 8px;border-radius:4px;font-size:13px;">🧬 LoRAs: <b>{meta["loras"]}</b></span>')
+
+    badge_html = " ".join(badges)
+
+    html = f"""
+    <div style="background:#1e1e2e;padding:12px;border-radius:8px;border:1px solid #313244;margin:8px 0;">
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">
+            {badge_html}
+        </div>
+        <div style="margin-bottom:8px;">
+            <b style="color:#a6e3a1;font-size:13px;">➕ Prompt:</b>
+            <div style="background:#181825;padding:8px;border-radius:6px;font-size:13px;color:#cdd6f4;white-space:pre-wrap;max-height:120px;overflow-y:auto;border:1px solid #313244;">{meta.get("prompt") or "(empty)"}</div>
+        </div>
+        <div style="margin-bottom:4px;">
+            <b style="color:#f38ba8;font-size:13px;">➖ Negative Prompt:</b>
+            <div style="background:#181825;padding:8px;border-radius:6px;font-size:13px;color:#bac2de;white-space:pre-wrap;max-height:80px;overflow-y:auto;border:1px solid #313244;">{meta.get("negative_prompt") or "(empty)"}</div>
+        </div>
+    </div>
+    """
+    return html
+
+
+# Alias for convenience
+read_png_info = read_image_metadata
