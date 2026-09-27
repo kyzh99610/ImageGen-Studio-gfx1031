@@ -465,17 +465,20 @@ def _vram_spill_note(device: str) -> str:
     return msg
 
 
-def _build_embeds(pipe, prompt: str, neg_prompt: str, device: str) -> dict:
+def _build_embeds(pipe, prompt: str, neg_prompt: str, device: str, clip_skip: int = 1) -> dict:
     """
     Encode prompts with Compel (chunk-and-concatenate for >77 tokens).
     Returns a dict of kwargs to splat into pipe() — either prompt_embeds or
     raw strings when Compel is unavailable or the text encoder is on DML.
     SD 1.5 only — SDXL uses _build_sdxl_embeds() in sdxl_pipeline.py.
     """
+    # CLIP skip 2 (A1111 "Clip skip: 2") = the text encoder's penultimate layer — what most
+    # SD 1.5 anime checkpoints were trained with. diffusers counts it as clip_skip=1.
+    skip_kw = {"clip_skip": clip_skip - 1} if clip_skip and clip_skip > 1 else {}
     try:
-        from compel import Compel
+        from compel import Compel, ReturnedEmbeddingsType
     except ImportError:
-        return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt)}
+        return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt), **skip_kw}
 
     # Clear this frame's references on the way out: something in the Compel call
     # path captures the call stack, which kept this frame — and through `pipe` the
@@ -485,11 +488,14 @@ def _build_embeds(pipe, prompt: str, neg_prompt: str, device: str) -> dict:
     try:
         te_device = str(next(pipe.text_encoder.parameters()).device)
         if "privateuseone" in te_device:
-            return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt)}
+            return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt), **skip_kw}
         c = Compel(
             tokenizer=pipe.tokenizer,
             text_encoder=pipe.text_encoder,
             truncate_long_prompts=False,
+            returned_embeddings_type=(ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED
+                                      if clip_skip and clip_skip > 1 else
+                                      ReturnedEmbeddingsType.LAST_HIDDEN_STATES_NORMALIZED),
         )
         # 75-token chunks cut at tag boundaries (BREAK = new chunk), each encoded with
         # Compel and concatenated — a tag is never split across two chunks.
@@ -503,7 +509,7 @@ def _build_embeds(pipe, prompt: str, neg_prompt: str, device: str) -> dict:
         return dict(prompt_embeds=pos, negative_prompt_embeds=neg)
     except Exception as e:
         print(f"[Compel] Encoding failed ({e}), falling back to raw 77-token strings")
-        return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt)}
+        return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt), **skip_kw}
     finally:
         pipe = c = None
 
@@ -530,6 +536,7 @@ class SDPipeline:
         self.is_sdxl     = False
         self.model_family = "sd15"
         self.last_seeds: list[int] = []
+        self.last_var_seeds: list[int] = []
         # Tiled decode needs ~1 GB less VRAM; the Bridge turns this on while an SDXL
         # model shares the card (colour shift is irrelevant there — SDXL redraws it)
         self.force_tiled_decode = False
@@ -859,6 +866,9 @@ class SDPipeline:
         scheduler: str = "DPM++ 2M Karras",
         batch_size: int = 1,
         step_callback=None,
+        clip_skip: int = 1,
+        var_seed: int = -1,
+        var_strength: float = 0.0,
     ) -> tuple[list[Image.Image], str]:
         """
         Run text-to-image generation. Returns (images, info_string).
@@ -873,6 +883,9 @@ class SDPipeline:
         generator, seeds = _make_generators(seed, self.device, max(1, int(batch_size)))
         self.last_seeds = seeds
         used_seed = seeds[0]
+        latents, self.last_var_seeds = variation_latents(
+            self.pipe, generator, var_seed, var_strength, max(1, int(batch_size)), width, height, self.device)
+        lat_kw = {"latents": latents} if latents is not None else {}
 
         cb_kwargs = {}
         if step_callback is not None:
@@ -883,7 +896,7 @@ class SDPipeline:
 
         _vram_reset(self.device)
         t0 = time.time()
-        embeds = _build_embeds(self.pipe, prompt, negative_prompt, self.device)
+        embeds = _build_embeds(self.pipe, prompt, negative_prompt, self.device, clip_skip)
 
         # ZLUDA: decode latents ourselves (GPU first, CPU fallback) — see _decode_latents
         use_cpu_vae = "cuda" in self.device
@@ -900,6 +913,7 @@ class SDPipeline:
                     guidance_scale=cfg_scale,
                     generator=generator,
                     num_images_per_prompt=batch_size,
+                    **lat_kw,
                     **cb_kwargs,
                 )
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
@@ -958,6 +972,7 @@ class SDPipeline:
         seed: int = -1,
         scheduler: str = "DPM++ 2M Karras",
         step_callback=None,
+        clip_skip: int = 1,
     ) -> tuple[list[Image.Image], str]:
         """
         Run image-to-image generation. Returns (images, info_string).
@@ -1007,7 +1022,7 @@ class SDPipeline:
 
         _vram_reset(self.device)
         t0 = time.time()
-        embeds = _build_embeds(self.img2img_pipe, prompt, negative_prompt, self.device)
+        embeds = _build_embeds(self.img2img_pipe, prompt, negative_prompt, self.device, clip_skip)
 
         # ZLUDA: decode latents ourselves (GPU first, CPU fallback) — see _decode_latents
         use_cpu_vae = "cuda" in self.device
@@ -1053,6 +1068,49 @@ def _make_generators(seed: int, device: str, n: int) -> tuple:
     gen, first = _make_generator(seed, device)
     gens = [gen] + [torch_generator(device).manual_seed((first + i) % 2**32) for i in range(1, n)]
     return gens, [(first + i) % 2**32 for i in range(n)]
+
+
+def _slerp(t: float, a, b):
+    """Spherical interpolation between two noise tensors (keeps the noise's statistics —
+    a plain mix would shrink its variance and wash the image out)."""
+    import torch
+    af, bf = a.flatten(1).float(), b.flatten(1).float()
+    dot = (af / af.norm(dim=1, keepdim=True) * bf / bf.norm(dim=1, keepdim=True)).sum(1).clamp(-1, 1)
+    omega = torch.acos(dot)[:, None]
+    so = torch.sin(omega)
+    if float(so.abs().min()) < 1e-6:
+        out = (1 - t) * af + t * bf
+    else:
+        out = torch.sin((1 - t) * omega) / so * af + torch.sin(t * omega) / so * bf
+    return out.reshape(a.shape).to(a.dtype)
+
+
+def variation_latents(pipe, generators, var_seed, var_strength: float, batch: int,
+                      width: int, height: int, device: str):
+    """Initial latents for "variations": the image's own noise (same generator the pipeline
+    would use, so strength 0 is identical) blended toward a second seed's noise.
+    Returns (latents, variation seeds) — or (None, []) when variations are off."""
+    if not var_strength or var_strength <= 0:
+        return None, []
+    import torch
+    from diffusers.utils.torch_utils import randn_tensor
+    if var_seed is None or int(var_seed) < 0:
+        var_seed = int(torch.randint(0, 2**32, (1,)).item())
+    var_seeds = [(int(var_seed) + i) % 2**32 for i in range(batch)]
+    gens = generators if isinstance(generators, list) else [generators]
+    dtype = pipe.unet.dtype
+    ch = pipe.unet.config.in_channels
+    shape = (1, ch, height // pipe.vae_scale_factor, width // pipe.vae_scale_factor)
+    dev = torch.device(device if "privateuseone" not in device else "cpu")
+    lat = []
+    for i in range(batch):
+        base = randn_tensor(shape, generator=gens[i], device=dev, dtype=dtype)
+        other = randn_tensor(shape, generator=torch_generator(device).manual_seed(var_seeds[i]), device=dev, dtype=dtype)
+        # the blend runs on the CPU: acos/sin on these tiny tensors would make ZLUDA compile
+        # new GPU kernels (minutes the first time) for no speed gain
+        mixed = _slerp(min(1.0, float(var_strength)), base.float().cpu(), other.float().cpu())
+        lat.append(mixed.to(dev, dtype))
+    return torch.cat(lat), var_seeds
 
 
 def torch_generator(device: str):

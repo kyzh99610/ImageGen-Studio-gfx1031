@@ -259,6 +259,31 @@ def parameters_html() -> str:
     )
     h += _note("💡 Start with <b>DPM++ 2M Karras</b> at 20 steps. Only change if you need specific characteristics. "
                + _cn("新手直接用 DPM++ 2M Karras + 20步，这是最稳定的组合。"))
+    h += '<div class="hg-h3">Hires Fix, Variations, CLIP Skip & X/Y Grid &nbsp;<span class="cn">高清修复、变体、CLIP跳层与对比网格</span></div>'
+    h += _table(
+        ["Setting / 设置", "What it does / 作用", _cn("中文说明")],
+        [
+            ["🔍 Hires fix",
+             "Generates at the model's native size (good composition, no doubled bodies), upscales ×1.5–2, then "
+             "re-draws details with img2img at the big size (denoise 0.35–0.5). SD 1.5 512×768 → 768×1152 in ~30 s; "
+             "SDXL 832×1216 → 1248×1824 in ~2 min (fits 12 GB).",
+             _cn("先按原生尺寸构图，放大后再以图生图重绘细节（降噪0.35–0.5）。")],
+            ["🔀 Variations",
+             "Keeps the main seed and blends in a second seed's noise: 0.05–0.2 = same picture, small changes. "
+             "“🔀 More like this” under the gallery sets it up for the image you picked.",
+             _cn("保持主种子并混入变体种子：0.05–0.2 为小幅变化。图库下“More like this”一键设置。")],
+            ["✂️ CLIP skip",
+             "2 = use the text encoder's second-to-last layer — what most SD 1.5 anime checkpoints were trained "
+             "with (A1111 “Clip skip: 2”). SDXL always does this already.",
+             _cn("2 = 使用文本编码器倒数第二层，多数 SD1.5 动漫模型推荐。SDXL 不受影响。")],
+            ["📊 X/Y grid",
+             "Same seed, every combination of two settings (CFG, steps, sampler, seed, LoRA 1 weight, CLIP skip, "
+             "hires denoise, or Prompt S/R word swaps) in one labelled grid image.",
+             _cn("同一种子下对比两组参数的所有组合，生成带标签的网格图。")],
+        ]
+    )
+    h += _tip("All of these are saved in the image and come back when you drop it into Image-to-Image. "
+              + _cn("以上设置都会写入图片，拖入图生图即可恢复。"))
     return _wrap(h)
 
 

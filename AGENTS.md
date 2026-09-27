@@ -26,7 +26,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── run_zluda.bat <script.py>  ← run any script under the launch.bat ZLUDA environment
 │   ├── install.bat / requirements.txt
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
-│   ├── run_tests.py               ← 78-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 81-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -61,7 +61,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 73 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 76 pass + 5 skip on machines without a Ryzen AI NPU
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
 
@@ -170,6 +170,29 @@ stem → cached hash (renamed files). Used by PNG Info → Send to Generate and 
 (**upload, not change** — the gallery's "Send to img2img" must not overwrite a prompt the user edited since).
 Same seed + settings on this GPU differ by ~1–1.7/255 run to run (native convs aren't bit-exact); a restored
 regeneration measured 0.63/255.
+
+### Hires fix, variations, CLIP skip, X/Y grid, batch folders
+- **Hires fix** (`app._hires_pass`): txt2img at the entered size → `_upscale_to()` (Lanczos, or Real-ESRGAN ×2/×4 then
+  Lanczos) → `sd.img2img(strength=denoise, steps=ceil(hires_steps/denoise))` with each image's own seed. Long side capped
+  at 1536 (SD 1.5) / 2048 (SDXL). SDXL 832×1216 → 1248×1824 peaks at 10.1 of 12 GB, ~60 s for 12 steps. The img2img
+  passes overwrite `sd.last_seeds` — restored afterwards. Record: `width/height` = first pass + `hires{scale,denoise,
+  steps,upscaler}`; A1111 text "Hires upscale/steps/upscaler" + "Denoising strength" (= hires denoise, which
+  png_info moves out of `strength`).
+- **Variations** (`sd_pipeline.variation_latents`): the pipeline's own first noise (same generator → strength 0 is
+  bit-identical) slerped toward `var_seed`'s noise, passed as `latents=`. The slerp runs on the **CPU**: acos/sin on
+  the GPU made ZLUDA compile new kernels (a batch of 3 took 154 s instead of ~25 s).
+- **CLIP skip** (SD 1.5): Compel `PENULTIMATE_HIDDEN_STATES_NORMALIZED`; the string fallback passes diffusers
+  `clip_skip=1` (diffusers counts from 0). SDXL already uses the penultimate layer.
+- `app._clean_extra()` sanitises all of these; `_plan_extra_updates()` restores them (drop into img2img / PNG Info).
+- **X/Y grid** (`do_xy_grid`, `_xy_values`, `_xy_grid`): ≤ 48 cells, fixed seed, each cell via `do_generate` (saved
+  with its record) + a labelled grid PNG. LoRA-weight axis re-syncs LoRAs per value and restores slot 1 afterwards.
+- **Batch folders**: Upscale tab (`do_upscale_folder` → outputs/upscaled_<folder>/) and Watermark tab
+  (`do_remove_folder`: auto-detect + chosen method; images with nothing found are copied → outputs/cleaned_<folder>/).
+  `_carry_params()` keeps the source's parameters + imagegen record in both, and in the single-image remover.
+- **LaMa** (`watermark_remover.inpaint_lama`): one 512² ONNX run per separate region, square context crops
+  (mirror-padded, never stretched — a wide bottom caption squeezed into a square came back as a grey smear),
+  feathered blend where the mask touches the crop/image edge (seamlessClone washes to grey there). OCR boxes are
+  widened by ~1 character so "©"/"@" next to the text are removed too.
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the

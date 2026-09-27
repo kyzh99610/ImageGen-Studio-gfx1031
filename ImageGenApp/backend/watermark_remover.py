@@ -121,8 +121,12 @@ def detect_text_regions(
         # bbox_pts: [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
         xs = [int(p[0]) for p in bbox_pts]
         ys = [int(p[1]) for p in bbox_pts]
+        # OCR boxes stop at the letters: "©", "®", "™" or "@" a space away were left behind
+        # ("© SAMPLE" → only "SAMPLE" removed). Widen by about one character on each side.
+        pad = int((max(ys) - min(ys)) * 0.9)
+        W, H = image.size
         regions.append({
-            "bbox":       (min(xs), min(ys), max(xs), max(ys)),
+            "bbox":       (max(0, min(xs) - pad), min(ys), min(W, max(xs) + pad), max(ys)),
             "text":       text,
             "confidence": round(conf, 2),
             "source":     "ocr",
@@ -484,93 +488,88 @@ def inpaint_lama(
     session = _get_lama_session()
 
     W, H = image.size
-    mask_np = np.array(mask.convert("L"))
-
-    # Find bounding box of the mask region
-    ys, xs = np.where(mask_np > 0)
-    if len(xs) == 0:
+    mask_np = (np.array(mask.convert("L")) > 0).astype(np.uint8)
+    if not mask_np.any():
         return image  # nothing to inpaint
+    result = np.array(image.convert("RGB"))
 
-    x1_m, y1_m = int(xs.min()), int(ys.min())
-    x2_m, y2_m = int(xs.max()), int(ys.max())
+    # One LaMa run per separate region (a corner logo and a caption far apart used to share
+    # one huge crop, squashed to 512×512 — soft, smeared fill). Regions whose context crops
+    # would overlap are processed together.
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mask_np, connectivity=8)
+    boxes = [list(stats[i][:4]) for i in range(1, n)]            # x, y, w, h
+    groups: list[list[int]] = []
+    for x, y, w, h in sorted(boxes, key=lambda b: (b[1], b[0])):
+        box = [x, y, x + w, y + h]
+        for g in groups:
+            ctx = max(g[2] - g[0], g[3] - g[1]) // 2 + 32
+            if box[0] < g[2] + ctx and box[2] > g[0] - ctx and box[1] < g[3] + ctx and box[3] > g[1] - ctx:
+                g[:] = [min(g[0], box[0]), min(g[1], box[1]), max(g[2], box[2]), max(g[3], box[3])]
+                break
+        else:
+            groups.append(box)
 
-    # Pad crop region (50% of bbox on each side, min 32 px) for context
-    pw = max(32, (x2_m - x1_m) // 2)
-    ph = max(32, (y2_m - y1_m) // 2)
-    cx1 = max(0, x1_m - pw)
-    cy1 = max(0, y1_m - ph)
-    cx2 = min(W, x2_m + pw)
-    cy2 = min(H, y2_m + ph)
+    for gi, (x1, y1, x2, y2) in enumerate(groups):
+        if progress_callback:
+            progress_callback(0.35 + 0.6 * gi / len(groups), f"Running LaMa ({gi + 1}/{len(groups)})…")
+        # Square crop around the region with context on every side. Small watermarks keep
+        # their native resolution (a 512 px crop), large ones are scaled down — never
+        # stretched: a wide caption band squeezed into a square came back as a grey smear.
+        side = max(512, int(max(x2 - x1, y2 - y1) * 1.5) + 64)
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        cx1 = int(min(max(0, cx - side // 2), max(0, W - side)))
+        cy1 = int(min(max(0, cy - side // 2), max(0, H - side)))
+        cx2, cy2 = min(W, cx1 + side), min(H, cy1 + side)
+        crop = result[cy1:cy2, cx1:cx2].copy()
+        cmask = mask_np[cy1:cy2, cx1:cx2].copy()
+        ch, cw = crop.shape[:2]
+        # image smaller than the square on one side: mirror-pad instead of distorting
+        pb, pr = max(0, max(ch, cw) - ch), max(0, max(ch, cw) - cw)
+        crop_sq = cv2.copyMakeBorder(crop, 0, pb, 0, pr, cv2.BORDER_REFLECT_101)
+        mask_sq = cv2.copyMakeBorder(cmask, 0, pb, 0, pr, cv2.BORDER_CONSTANT, value=0)
+        S = crop_sq.shape[0]
 
-    # Crop image and mask to the patch
-    crop_img  = np.array(image.convert("RGB").crop((cx1, cy1, cx2, cy2)))
-    crop_mask = np.array(mask.convert("L") .crop((cx1, cy1, cx2, cy2)))
-    ch_orig, cw_orig = crop_img.shape[:2]
+        img_512 = cv2.resize(cv2.cvtColor(crop_sq, cv2.COLOR_RGB2BGR), (512, 512),
+                             interpolation=cv2.INTER_AREA if S > 512 else cv2.INTER_CUBIC)
+        msk_512 = cv2.resize(mask_sq * 255, (512, 512), interpolation=cv2.INTER_NEAREST)
+        msk_512 = cv2.dilate((msk_512 > 0).astype(np.uint8), np.ones((3, 3), np.uint8))   # cover resize edges
+        img_t = (img_512.astype(np.float32) / 255.0).transpose(2, 0, 1)[np.newaxis]
+        msk_t = msk_512.astype(np.float32)[np.newaxis, np.newaxis]
 
-    # Pre-process crop: resize to 512×512, BGR float32 [0,1]
-    img_bgr = cv2.cvtColor(crop_img, cv2.COLOR_RGB2BGR)
-    img_512 = cv2.resize(img_bgr, (512, 512)).astype(np.float32) / 255.0
-    img_t   = img_512.transpose(2, 0, 1)[np.newaxis]           # 1,3,512,512
+        raw = session.run(None, {"image": img_t, "mask": msk_t})[0][0].transpose(1, 2, 0)
+        if raw.max() > 1.5:
+            raw = raw / 255.0
+        raw = raw.clip(0.0, 1.0)
+        out_sq = cv2.resize(raw, (S, S), interpolation=cv2.INTER_CUBIC)[:ch, :cw, ::-1]
+        out_rgb = (out_sq * 255.0).clip(0, 255).astype(np.uint8)
 
-    msk_512 = cv2.resize(crop_mask, (512, 512),
-                         interpolation=cv2.INTER_NEAREST)
-    msk_bin = (msk_512 > 0).astype(np.float32)
-    msk_t   = msk_bin[np.newaxis, np.newaxis]                   # 1,1,512,512
+        # Composite. seamlessClone matches colours best but washes toward grey when the mask
+        # touches the crop/image border (e.g. a caption along the bottom edge) — use a
+        # feathered blend there.
+        m255 = cmask * 255
+        edge = cmask[0, :].any() or cmask[-1, :].any() or cmask[:, 0].any() or cmask[:, -1].any()
+        composite = None
+        if not edge:
+            try:
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                m_safe = cv2.erode(m255, k, iterations=1)
+                if m_safe.max() > 0:
+                    ys, xs = np.where(m_safe > 0)
+                    center = (int((xs.min() + xs.max()) // 2), int((ys.min() + ys.max()) // 2))
+                    composite = cv2.seamlessClone(out_rgb, crop, m_safe, center, cv2.NORMAL_CLONE)
+            except Exception:
+                composite = None
+        if composite is None:
+            soft = cv2.dilate(m255, np.ones((5, 5), np.uint8))
+            soft = cv2.GaussianBlur(soft.astype(np.float32) / 255.0, (0, 0), 2.0)[:, :, None]
+            composite = (out_rgb.astype(np.float32) * soft + crop.astype(np.float32) * (1 - soft)
+                         ).clip(0, 255).astype(np.uint8)
+        # only the masked neighbourhood changes
+        region = cv2.dilate(m255, np.ones((7, 7), np.uint8)) > 0
+        crop[region] = composite[region]
+        result[cy1:cy2, cx1:cx2] = crop
 
-    if progress_callback:
-        progress_callback(0.35, "Running LaMa inference…")
-
-    out_t  = session.run(None, {"image": img_t, "mask": msk_t})[0]  # 1,3,512,512
-    raw = out_t[0].transpose(1, 2, 0)                                # H,W,3 BGR float
-
-    # Normalise to [0,1] float32 — keep float throughout to avoid
-    # precision loss from repeated uint8 floor rounding (causes darkening).
-    if raw.max() > 1.5:
-        raw = raw / 255.0
-    raw = raw.clip(0.0, 1.0)
-
-    # Resize at float32 precision using bicubic (better quality than bilinear)
-    out_crop_bgr_f = cv2.resize(raw, (cw_orig, ch_orig),
-                                interpolation=cv2.INTER_CUBIC)
-    out_crop_rgb = (out_crop_bgr_f[:, :, ::-1] * 255.0).clip(0, 255).astype(np.uint8)
-
-    # ── Composite: Poisson seamless blending (primary) ────────────────────────
-    # cv2.seamlessClone adjusts colour gradients at the mask boundary so the
-    # inpainted region matches the surroundings — eliminates the darker halo
-    # that Gaussian alpha-blending causes.
-    # IMPORTANT: `center` must be the bounding-box center of the mask in the
-    # crop, NOT the image center.  seamlessClone maps the mask-bbox centre in
-    # src to `center` in dst — using (w//2, h//2) shifts content to the wrong
-    # place whenever the watermark is not at the exact middle of the crop.
-    mask_uint8 = (crop_mask > 0).astype(np.uint8) * 255
-    try:
-        # Erode 1 px so the mask never touches the crop border (seamlessClone
-        # requirement — touching border causes it to corrupt the whole image).
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        mask_safe = cv2.erode(mask_uint8, k, iterations=1)
-        if mask_safe.max() == 0:
-            raise ValueError("mask eroded to empty")
-        mys, mxs = np.where(mask_safe > 0)
-        center = (int((int(mxs.min()) + int(mxs.max())) // 2),
-                  int((int(mys.min()) + int(mys.max())) // 2))
-        composite = cv2.seamlessClone(
-            out_crop_rgb, crop_img, mask_safe, center, cv2.NORMAL_CLONE
-        )
-    except Exception:
-        # Fallback: feathered alpha blend (correct position, slight halo risk)
-        blur_r = max(3, int(min(ch_orig, cw_orig) * 0.03)) | 1
-        alpha  = cv2.GaussianBlur(
-            mask_uint8.astype(np.float32) / 255.0, (blur_r, blur_r), 0
-        )[:, :, np.newaxis]
-        composite = (
-            out_crop_rgb.astype(np.float32) * alpha
-            + crop_img.astype(np.float32) * (1.0 - alpha)
-        ).clip(0, 255).astype(np.uint8)
-
-    # Paste the composited crop back into a full-resolution copy
-    result = image.convert("RGB").copy()
-    result.paste(Image.fromarray(composite), (cx1, cy1))
-
+    result = Image.fromarray(result)
     if progress_callback:
         progress_callback(1.0, "LaMa inpainting complete.")
     return result

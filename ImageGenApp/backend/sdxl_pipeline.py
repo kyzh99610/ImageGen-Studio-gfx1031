@@ -764,6 +764,7 @@ class SDXLPipeline:
         self.is_sdxl = True  # always True for this class
         self.model_family = "sdxl"
         self.last_seeds: list[int] = []
+        self.last_var_seeds: list[int] = []
         self.unet_only_dml: bool = False  # not used by SDXL pipeline, kept for API compat
         self._last_vae_path: str | None = None
         self._clean_unet_state: dict | None = None
@@ -1114,6 +1115,9 @@ class SDXLPipeline:
         scheduler: str = "DPM++ 2M Karras",
         batch_size: int = 1,
         step_callback=None,
+        clip_skip: int = 1,                    # SDXL always uses the penultimate layer already
+        var_seed: int = -1,
+        var_strength: float = 0.0,
     ) -> tuple[list[Image.Image], str]:
         if self.pipe is None:
             return [], "❌ No model loaded. Pick a checkpoint and click Load Model (Generate tab)."
@@ -1127,6 +1131,10 @@ class SDXLPipeline:
         generator, seeds = _make_generators(seed, self.device, max(1, int(batch_size)))
         self.last_seeds = seeds
         used_seed = seeds[0]
+        from backend.sd_pipeline import variation_latents
+        latents, self.last_var_seeds = variation_latents(
+            self.pipe, generator, var_seed, var_strength, max(1, int(batch_size)), width, height, self.device)
+        lat_kw = {"latents": latents} if latents is not None else {}
         # Decode latents ourselves: GPU (ZLUDA) with CPU fallback, or CPU (DML)
         use_cpu_vae = "privateuseone" in self.device or "cuda" in self.device
 
@@ -1205,6 +1213,7 @@ class SDXLPipeline:
                     guidance_scale=cfg_scale,
                     generator=generator,
                     num_images_per_prompt=batch_size,
+                    **lat_kw,
                     **cb_kwargs,
                 )
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
@@ -1254,6 +1263,7 @@ class SDXLPipeline:
         seed: int = -1,
         scheduler: str = "DPM++ 2M Karras",
         step_callback=None,
+        clip_skip: int = 1,                    # (SDXL already uses the penultimate layer)
     ) -> tuple[list[Image.Image], str]:
         if self.pipe is None:
             return [], "❌ No model loaded."
