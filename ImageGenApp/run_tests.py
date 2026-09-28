@@ -1569,8 +1569,19 @@ def _():
         assert wc.resolve("a, __nope__, {b|b}", 1, missing) == "a, __nope__, b" and missing == ["nope"]
         assert "loop" in wc.resolve("__loop__", 1)                  # self-reference stops at the depth limit
         assert wc._lines("../outfit") is None
+        # bug-check round: inside a word it's a tag, a Notepad BOM isn't part of the first line,
+        # a negative weight counts as 0 instead of leaking "-1::" into the prompt
+        assert wc.resolve("long__hair__style, {a|a}", 1) == "long__hair__style, a"
+        (tmp / "bom.txt").write_bytes(b"\xef\xbb\xbfred\nblue\n")
+        assert {wc.resolve("__bom__", s) for s in range(30)} == {"red", "blue"}
+        assert {wc.resolve("{-1::a|b}", s) for s in range(20)} == {"b"}
     finally:
         wc.WILDCARD_DIRS = old
+    # "{a|b}, {a|b}" asks for two picks: merge / tidy must not collapse it (a repeated addition still merges)
+    from backend.prompt_tools import merge_prompts, tidy_prompt
+    assert merge_prompts("{a|b}, {a|b}, c, c") == "{a|b}, {a|b}, c"
+    assert merge_prompts("x, __outfit__", "__outfit__, y") == "x, __outfit__, y"
+    assert tidy_prompt("__pose__, __pose__, c")[1] == []
     assert split_tags("a, {b, c|d}, e") == ["a", "{b, c|d}", "e"]
     # the shipped starter files all resolve
     shipped = wc.list_wildcards()
@@ -1618,6 +1629,7 @@ def _():
         pr = cc.card_prompt(card, "purple bikini · choker", "beach, silver hair")
         assert pr.count("silver hair") == 1 and pr.endswith("purple bikini, choker, beach"), pr
         assert cc.card_prompt(card, "no such outfit") == card["tags"]
+        assert cc.card_prompt({"tags": ""}) == "" and cc.card_prompt({"tags": "", "outfits": {"o": "x"}}, "o") == "x"
         cc.save_card(card)
         assert cc.list_cards() == ["Heroine"] and cc.load_card("Heroine") == card
         assert cc.load_card("../Heroine") is None or cc.load_card("../Heroine")["name"] == "Heroine"
@@ -1628,6 +1640,8 @@ def _():
         assert "cfg" not in bad and bad["steps"] == 30 and bad["clip_skip"] == 2
         assert bad["loras"] == [{"file": "b.safetensors", "weight": 0.8}] and bad["outfits"] == {"ok": "x"}
         assert cc.clean_card({"name": "  "}) is None and cc.clean_card("x") is None
+        odd = cc.clean_card({"name": "q", "width": "832.7", "height": "inf", "steps": 30.4, "cfg": "nan"})
+        assert odd.get("width") == 832 and "height" not in odd and odd.get("steps") == 30 and "cfg" not in odd, odd
         (cc.CARDS_DIR / "broken.json").write_text("{nope", encoding="utf-8")
         assert cc.load_card("broken") is None
     finally:
@@ -1666,6 +1680,39 @@ def _():
         assert wd.tags_text(r, exclude="Long_Hair", with_character=False) == ""
     finally:
         wd._session, wd._labels = old
+
+
+@test("Unload frees text encoders: pyparsing's packrat cache no longer pins Compel frames; inpaint pipe dropped")
+def _():
+    import gc, weakref
+    import pyparsing as pp
+    from backend.prompt_tools import release_parser_cache
+    pp.ParserElement.enable_packrat()          # some library switches it on in the app process
+
+    class Encoder:                             # stands in for Compel → text encoders
+        pass
+
+    def encode(enc):
+        from compel.prompt_parser import PromptParser
+        PromptParser().parse_conjunction("(masterpiece)1.2, 1girl, [x]")   # what Compel runs per prompt
+
+    enc = Encoder(); ref = weakref.ref(enc)
+    encode(enc); del enc
+    gc.collect()
+    assert ref() is not None, "packrat no longer keeps frames — this test can't show the leak any more"
+    release_parser_cache(); gc.collect()
+    assert ref() is None, "the parser cache still holds the encoder's frame"
+    # both pipelines drop the cached inpaint pipe (face detail / inpaint) on unload
+    from backend.sd_pipeline import SDPipeline
+    from backend.sdxl_pipeline import SDXLPipeline
+    for cls in (SDPipeline, SDXLPipeline):
+        obj = cls.__new__(cls)
+        obj.__dict__.update(pipe=None, img2img_pipe=None, _inpaint_pipe=object(), _vae_needs_fp32=False)
+        try:
+            obj._unload()
+        except Exception:
+            pass
+        assert obj.__dict__.get("_inpaint_pipe") is None, cls.__name__
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -40,7 +40,7 @@ def safe_name(name) -> str:
 def _num(v, lo, hi, cast):
     try:
         v = cast(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return v if lo <= v <= hi else None
 
@@ -68,8 +68,9 @@ def clean_card(d) -> dict | None:
             "loras": loras[:3],
             "tags": d.get("tags") if isinstance(d.get("tags"), str) else "",
             "outfits": outfits}
-    for k, lo, hi, cast in (("width", 256, 2048, int), ("height", 256, 2048, int), ("cfg", 1.0, 30.0, float),
-                            ("steps", 1, 150, int), ("clip_skip", 1, 4, int)):
+    as_int = lambda v: int(round(float(v)))      # "832.7" / 1216.0 from a hand-edited file
+    for k, lo, hi, cast in (("width", 256, 2048, as_int), ("height", 256, 2048, as_int), ("cfg", 1.0, 30.0, float),
+                            ("steps", 1, 150, as_int), ("clip_skip", 1, 4, as_int)):
         if d.get(k) is not None:
             v = _num(d.get(k), lo, hi, cast)
             if v is not None:
@@ -165,4 +166,5 @@ def card_prompt(card: dict, outfit: str | None = None, scene: str = "") -> str:
     if outfit and outfit in (card.get("outfits") or {}):
         parts.append(card["outfits"][outfit])
     parts.append(scene or "")
-    return merge_prompts(*[p for p in parts if p])
+    parts = [p for p in parts if p and p.strip()]
+    return merge_prompts(*parts) if parts else ""

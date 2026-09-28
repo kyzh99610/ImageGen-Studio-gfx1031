@@ -302,7 +302,7 @@ ImageGenApp/
 ├── run_zluda.bat             # Run any script under the ZLUDA environment
 ├── install.bat               # One-time dependency installer
 ├── selftest_zluda.py         # GPU-vs-CPU correctness self-test
-├── run_tests.py              # Test suite (86 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
+├── run_tests.py              # Test suite (87 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
 ├── download_models.bat/.py   # Starter model downloader
 ├── backend/
 │   ├── sd_pipeline.py        # SD 1.x inference (txt2img, img2img, LoRA)

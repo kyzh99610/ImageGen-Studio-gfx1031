@@ -17,7 +17,8 @@ except Exception:                                   # standalone use / tests
     _here = Path(__file__).resolve().parent.parent
     WILDCARD_DIRS = [_here / "wildcards", _here / "models" / "wildcards"]
 
-_WILD = re.compile(r"__([A-Za-z0-9][\w\-/ ]*?)__")
+# not inside a word: "long__hair__style" is a tag, not __hair__
+_WILD = re.compile(r"(?<![\w])__([A-Za-z0-9][\w\-/ ]*?)__(?![\w])")
 _MAX_DEPTH = 20
 _cache: dict[Path, tuple[float, list[str]]] = {}
 
@@ -43,7 +44,7 @@ def _lines(name: str) -> list[str] | None:
             hit = _cache.get(f)
             if hit and hit[0] == mt:
                 return hit[1]
-            text = f.read_bytes().decode("utf-8", "replace")
+            text = f.read_bytes().decode("utf-8-sig", "replace")       # Notepad adds a BOM
             lines = [l.strip() for l in text.splitlines()]
             lines = [l for l in lines if l and not l.startswith("#")]
             _cache[f] = (mt, lines)
@@ -91,7 +92,7 @@ def _pick_group(body: str, rng: random.Random) -> str:
         body = body[m.end():]
     opts, weights = [], []
     for o in _split_options(body):
-        wm = re.match(r"^\s*(\d*\.?\d+)::", o)
+        wm = re.match(r"^\s*(-?\d*\.?\d+)::", o)
         w = float(wm.group(1)) if wm else 1.0
         opts.append((o[wm.end():] if wm else o).strip())
         weights.append(max(w, 0.0))
