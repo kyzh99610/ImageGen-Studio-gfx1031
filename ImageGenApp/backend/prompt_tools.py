@@ -40,9 +40,9 @@ def split_tags(prompt: str) -> list[str]:
             ch = seg[j]
             if ch == "\\" and j + 1 < len(seg):
                 buf.append(seg[j:j + 2]); j += 2; continue
-            if ch in "([<":
+            if ch in "([<{":
                 depth += 1
-            elif ch in ")]>" and depth:
+            elif ch in ")]>}" and depth:
                 depth -= 1
             if ch in ",\n" and depth == 0:
                 out.append("".join(buf)); buf = []
