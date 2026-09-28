@@ -27,7 +27,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── install.bat / requirements.txt
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 86-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 87-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -66,7 +66,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 81 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 82 pass + 5 skip on machines without a Ryzen AI NPU
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
 
@@ -158,10 +158,15 @@ WDDM does **not** raise OOM when VRAM is full — it pages into shared system RA
 When something "hangs", check Task Manager → GPU → Shared GPU memory for python.exe.
 
 ### Unloading must actually free VRAM
-Something in the Compel call path captures the call stack under Gradio's worker threads, which kept
-`_build_embeds`' frame — and through its `pipe` local, the whole pipeline — alive after `_unload()`. Both encoders
-clear their locals in a `finally` (`pipe = c = None`). If VRAM doesn't drop after an unload, look for a frame or
-closure holding `pipe` (`gc.get_referrers(weakref_to_pipe())` inside the app — a plain script won't reproduce it).
+**Root cause (found 2026-09-27):** Compel parses prompts with pyparsing, and pyparsing's *packrat cache* (switched
+on globally by some library in the app process) stores parse exceptions with their tracebacks — so the Compel call
+frames, their callers' frames and everything in their locals (`pipe`, the Compel object → the text encoders) stayed
+alive after `_unload()`. `prompt_tools.release_parser_cache()` (`ParserElement.reset_cache()`) runs after every
+chunked encode and in both `_unload()`s; the older `finally: pipe = c = None` clears stay as a second line.
+Measured (`VRAM … held`): SD 1.5 → SDXL left 8.6 GB held instead of 6.6 (the SD 1.5 inpaint pipe too — `_unload()`
+now drops `_inpaint_pipe`), SDXL → SD 1.5 3.6 GB instead of 2.0 (the SDXL TEs, 1.6 GB); both fixed. To debug another
+leak: weakref the module before unloading, then walk `gc.get_referrers` inside the app (a plain script won't
+reproduce it) — frames under `pyparsing/core.py _parseCache` point here.
 
 ### Reproducible outputs & restore
 `app._save_outputs(images, meta, pipe=…)` writes A1111 `parameters` text (Steps, Sampler, CFG scale, Seed,
@@ -430,6 +435,9 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
     checkpoint header (Pony/Illustrious were counted as SD 1.5). `IMAGEGEN_GPU=abc`/empty crashed `config` import.
     `.bat` launchers: `%VAR%` inside `( )` blocks broke for paths like `Program Files (x86)` (tested from
     `D:\IG Test (x86) & co\…`), `--port --no-pause` took `--no-pause` as the port, em-dashes in two .bat files.
+20. **VRAM stayed held after switching models** (1.6–2 GB, SDXL peak 11.5 of 12 GB) → pyparsing's packrat cache kept
+    Compel's frames (→ text encoders) alive, and `_unload()` kept the cached inpaint pipe. See "Unloading must
+    actually free VRAM". Found by the 2026-09-27 regression run (`VRAM: … held` after SD 1.5 ↔ SDXL switches).
 
 ## Troubleshooting
 

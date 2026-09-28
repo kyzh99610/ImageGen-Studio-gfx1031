@@ -178,7 +178,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 86 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
+That runs 87 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
 
 ## Credits and licenses
 

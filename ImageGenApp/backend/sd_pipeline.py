@@ -641,11 +641,16 @@ class SDPipeline:
         import torch
         self.pipe         = None
         self.img2img_pipe = None
+        # the cached inpaint pipe (face detail / inpaint) holds the old UNet, TEs and VAE:
+        # left in place it kept ~2.5 GB of VRAM after switching SD 1.5 → SDXL
+        self._inpaint_pipe = None
         self.current_model = None
         self.loaded_loras  = []
         self._lora_adapters = {}
         self._clean_unet_state = None
         self._clean_te_state   = None
+        from backend.prompt_tools import release_parser_cache
+        release_parser_cache()        # it can hold Compel → the text encoders
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

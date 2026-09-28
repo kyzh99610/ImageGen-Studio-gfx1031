@@ -1001,8 +1001,12 @@ def _build_generate_tab():
                                     'or in <code>models/wildcards/</code>). Picks come from each image\'s seed, so '
                                     'the same seed gives the same picks; the resolved prompt is saved in the image.</p>')
                             _wc0 = _list_wc()
+                            # type="index" + a State: with type="values" Gradio 4.19 looks the click up in
+                            # the samples the Dataset was *built* with, so after 🔄 it inserted the wrong one
                             wc_ds = gr.Dataset(label="Click to add to the prompt", components=["textbox"],
-                                               samples=[[f"__{n}__"] for n in _wc0] or [["-"]], samples_per_page=40)
+                                               samples=[[f"__{n}__"] for n in _wc0] or [["-"]], samples_per_page=40,
+                                               type="index")
+                            wc_names_state = gr.State([f"__{n}__" for n in _wc0])
                             with gr.Row():
                                 wc_preview_btn = gr.Button("👁 Preview 4 picks of this prompt", size="sm")
                                 wc_refresh_btn = gr.Button("🔄 Reload wildcard files", size="sm")
@@ -1651,6 +1655,8 @@ def _build_generate_tab():
                     mode="txt2img", prompt=prompt, negative_prompt=neg_prompt,
                     steps=steps, cfg_scale=cfg, seeds=[seed], scheduler=scheduler,
                     width=width, height=height,
+                    **({"prompt_template": template["prompt"],
+                        "negative_template": template["negative"] or None} if template else {}),
                 ), pipe=sd)
                 info_html = (
                     f'<p style="color:#a6adc8;font-size:13px;">'
@@ -2721,12 +2727,12 @@ def _build_generate_tab():
         _w.change(_update_gen_vram, _gen_vram_inputs, [_gen_vram_bar])
 
     # ── Wildcards ───────────────────────────────────────────────────────────
-    def do_wc_add(prompt, sample):
-        tag = (sample[0] if isinstance(sample, (list, tuple)) and sample else sample) or ""
-        tag = str(tag).strip()
-        if not tag or tag == "-":
+    def do_wc_add(prompt, idx, names):
+        try:
+            tag = str(names[int(idx)]).strip()
+        except (TypeError, ValueError, IndexError):
             return gr.update()
-        return merge_prompts(prompt or "", tag)
+        return merge_prompts(prompt or "", tag) if tag else gr.update()
 
     def do_wc_preview(prompt, neg):
         from backend import wildcards as _wc
@@ -2744,12 +2750,12 @@ def _build_generate_tab():
 
     def do_wc_refresh():
         from backend.wildcards import list_wildcards
-        names = list_wildcards()
-        return gr.update(samples=[[f"__{n}__"] for n in names] or [["-"]])
+        names = [f"__{n}__" for n in list_wildcards()]
+        return gr.update(samples=[[n] for n in names] or [["-"]]), names
 
-    wc_ds.click(do_wc_add, [prompt_txt, wc_ds], [prompt_txt])
+    wc_ds.click(do_wc_add, [prompt_txt, wc_ds, wc_names_state], [prompt_txt])
     wc_preview_btn.click(do_wc_preview, [prompt_txt, neg_prompt_txt], [wc_preview_html])
-    wc_refresh_btn.click(do_wc_refresh, [], [wc_ds])
+    wc_refresh_btn.click(do_wc_refresh, [], [wc_ds, wc_names_state])
 
     # ── WD14 interrogate ────────────────────────────────────────────────────
     def do_interrogate(img, prompt, thr, progress=gr.Progress()):
@@ -2881,7 +2887,8 @@ def _build_generate_tab():
         return (_card_choices(card["name"]), gr.update(choices=outs, value=outs[1] if len(outs) > 1 else _NO_OUTFIT),
                 card["name"], _card_summary(card).replace("🎴", "🧩 Built"))
 
-    card_dd.change(on_card_pick, [card_dd], [outfit_dd, card_name_txt, card_status])
+    # .input, not .change: Save/Build set the dropdown themselves and report their own result
+    card_dd.input(on_card_pick, [card_dd], [outfit_dd, card_name_txt, card_status])
     card_load_btn.click(
         do_card_load,
         [card_dd, outfit_dd, card_scene_txt, neg_prompt_txt],
@@ -3939,7 +3946,7 @@ def _build_civitai_tab(model_dd, lora_dd, vae_dd, more_lora_dds=()):
 
         with gr.Row():
             search_box  = gr.Textbox(label="Name search", placeholder="searches model name/description…", scale=3)
-            tag_box     = gr.Textbox(label="Tag", placeholder="e.g. cum on tongue, ahegao, facial…", scale=2,
+            tag_box     = gr.Textbox(label="Tag", placeholder="e.g. soft lighting, smile, cherry blossoms…", scale=2,
                                      info="Searches Civitai tags — how popular models are actually indexed.")
             type_dd     = gr.Dropdown(
                 ["Checkpoint", "LoRA", "LoCon / LyCORIS", "DoRA", "TextualInversion", "VAE", "Upscaler", "All"],

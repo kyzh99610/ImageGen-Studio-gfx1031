@@ -32,11 +32,15 @@ _cascades: dict = {}
 def _embeds(sdp, pipe, prompt: str, negative: str, clip_skip: int) -> dict:
     """Prompt embeddings exactly as txt2img builds them (Compel weights, long prompts,
     CLIP skip for SD 1.5, pooled embeddings for SDXL)."""
-    if getattr(sdp, "is_sdxl", False):
-        from backend.sdxl_pipeline import _build_sdxl_embeds
-        return _build_sdxl_embeds(pipe, prompt, negative)
-    from backend.sd_pipeline import _build_embeds
-    return _build_embeds(pipe, prompt, negative, sdp.device, clip_skip)
+    # (frames on the Compel call path get captured; don't let this one keep `pipe` alive)
+    try:
+        if getattr(sdp, "is_sdxl", False):
+            from backend.sdxl_pipeline import _build_sdxl_embeds
+            return _build_sdxl_embeds(pipe, prompt, negative)
+        from backend.sd_pipeline import _build_embeds
+        return _build_embeds(pipe, prompt, negative, sdp.device, clip_skip)
+    finally:
+        pipe = sdp = None
 
 
 def _crop_box(mask_np: np.ndarray, W: int, H: int, pad: int, min_side: int) -> tuple[int, int, int, int]:
@@ -87,21 +91,28 @@ def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, nega
     if pipe is None or getattr(pipe, "unet", None) is not sdp.pipe.unet:
         pipe = _Inpaint.from_pipe(sdp.pipe, torch_dtype=sdp.dtype)
         sdp._inpaint_pipe = pipe
-    _load_scheduler(pipe, scheduler)
-    generator, used_seed = _make_generator(seed, sdp.device)
-    embeds = _embeds(sdp, pipe, prompt, negative, clip_skip)
-    cb = {}
-    if step_callback is not None:
-        def _cb(p, i, t, kw):
-            step_callback(i + 1, steps)
-            return kw
-        cb = {"callback_on_step_end": _cb}
-    with torch.inference_mode():
-        lat = pipe(**embeds, image=crop.resize((rw, rh), Image.LANCZOS),
-                   mask_image=crop_mask.resize((rw, rh), Image.NEAREST), width=rw, height=rh,
-                   strength=float(denoise), num_inference_steps=int(steps), guidance_scale=float(cfg),
-                   generator=generator, output_type="latent", **cb).images
-    result = sdp._decode_latents(pipe.vae, lat)[0].resize((cw, ch), Image.LANCZOS)
+    embeds = lat = None
+    # Like the txt2img encoders: this frame must not keep `pipe` (→ the old UNet / TEs) alive
+    # once the model is unloaded — after face detail, a switch to another model left
+    # 1.6–1.8 GB of VRAM held.
+    try:
+        _load_scheduler(pipe, scheduler)
+        generator, used_seed = _make_generator(seed, sdp.device)
+        embeds = _embeds(sdp, pipe, prompt, negative, clip_skip)
+        cb = {}
+        if step_callback is not None:
+            def _cb(p, i, t, kw):
+                step_callback(i + 1, steps)
+                return kw
+            cb = {"callback_on_step_end": _cb}
+        with torch.inference_mode():
+            lat = pipe(**embeds, image=crop.resize((rw, rh), Image.LANCZOS),
+                       mask_image=crop_mask.resize((rw, rh), Image.NEAREST), width=rw, height=rh,
+                       strength=float(denoise), num_inference_steps=int(steps), guidance_scale=float(cfg),
+                       generator=generator, output_type="latent", **cb).images
+        result = sdp._decode_latents(pipe.vae, lat)[0].resize((cw, ch), Image.LANCZOS)
+    finally:
+        pipe = embeds = lat = cb = None
     soft = crop_mask.filter(ImageFilter.MaxFilter(5)).filter(ImageFilter.GaussianBlur(feather))
     out = image.copy()
     out.paste(Image.composite(result, crop, soft), box[:2])
