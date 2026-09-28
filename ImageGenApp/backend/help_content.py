@@ -284,6 +284,18 @@ def parameters_html() -> str:
              "Paint over any area and describe what should be there; only that area is redrawn, at native "
              "resolution, with your model, LoRAs and seed.",
              _cn("涂抹要修改的区域并描述内容，仅重绘该区域。")],
+            ["🎲 Wildcards",
+             "{a|b|c} picks one option per image, {2$$a|b|c} two, {3::a|b} weights a; __outfit__ picks a line from "
+             "wildcards/outfit.txt (add your own .txt files). Picks follow each image's seed.",
+             _cn("{a|b|c} 每张图随机选一项；__outfit__ 从 wildcards/outfit.txt 随机取一行。随种子固定。")],
+            ["🎴 Character cards",
+             "Checkpoint + LoRAs + character tags + outfits + size/CFG/steps in one click. “Build from LoRA slot 1” "
+             "turns a character LoRA's trigger words and Civitai example prompts into a card with outfits.",
+             _cn("一键载入角色的模型、LoRA、角色标签与服装。可由 LoRA 自动生成。")],
+            ["🏷 Interrogate (WD14)",
+             "Reads an image's Danbooru tags into the prompt (img2img, PNG Info); in Train LoRA it tags a whole "
+             "dataset. ~1 s per image on the CPU.",
+             _cn("WD14 反推图片的 Danbooru 标签；训练页可批量打标。")],
             ["📊 X/Y grid",
              "Same seed, every combination of two settings (CFG, steps, sampler, seed, LoRA 1 weight, CLIP skip, "
              "hires denoise, checkpoint, or Prompt S/R word swaps) in one labelled grid image.",

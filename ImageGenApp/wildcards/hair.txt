@@ -1,0 +1,3 @@
+# __hair__  (colour + style)
+{black|brown|blonde|silver|white|pink|blue|red|purple|green} hair, {long hair|very long hair|medium hair|short hair|bob cut}
+{twintails|ponytail|side ponytail|braid|hair bun|messy hair|wavy hair|straight hair|hime cut|drill hair}

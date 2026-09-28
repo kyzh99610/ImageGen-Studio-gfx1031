@@ -26,7 +26,8 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── run_zluda.bat <script.py>  ← run any script under the launch.bat ZLUDA environment
 │   ├── install.bat / requirements.txt
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
-│   ├── run_tests.py               ← 82-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
+│   ├── run_tests.py               ← 86-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -42,6 +43,9 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │       │                             at tag boundaries (BREAK = new chunk), encode_chunked(), prompt warnings
 │       ├── lora_keywords.py       ← trigger words / creator prompts / training-tag coverage → keyword chips
 │       ├── detail_tools.py        ← inpaint_region (only-masked), detect_faces, face_detail (ADetailer-style)
+│       ├── wildcards.py           ← {a|b} / __name__ dynamic prompts, resolved per image seed
+│       ├── character_cards.py     ← settings/characters/*.json: model + LoRAs + tags + outfits, build from LoRA
+│       ├── wd_tagger.py           ← WD14 (wd-vit-tagger-v3 ONNX, CPU) image → Danbooru tags
 │       ├── model_hash.py          ← background SHA-256 cache (settings/_hash_cache.json) → A1111 "Model hash"
 │       ├── civitai_client.py, model_manager.py, tag_fetcher.py, trigger_reader.py
 │       ├── npu_bridge.py, vram_estimator.py, rocm_env.py (runtime + rocBLAS kernels per GPU arch)
@@ -62,7 +66,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 77 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 81 pass + 5 skip on machines without a Ryzen AI NPU
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
 
@@ -179,14 +183,47 @@ regeneration measured 0.63/255.
   builders as txt2img (Compel, chunks, CLIP skip / SDXL pooled), feathered paste-back. Measured: pixels outside the
   mask identical (Δ 0.00).
 - `detect_faces()`: nagadomi lbpcascade_animeface (MIT, downloaded once to models/detectors/, SHA-256 pinned) +
-  OpenCV's bundled Haar frontal-face cascade; overlapping boxes → bigger one; boxes < 45 % of the main face's width
-  are dropped (windows/buttons were detected as faces on an SDXL ship scene). Turned heads are often missed.
+  OpenCV's bundled Haar frontal-face cascade; overlapping boxes (IoU ≥ 0.3 or centre inside) → bigger one; boxes
+  < 45 % of the main face's width are dropped (windows/buttons were detected as faces on an SDXL ship scene).
+  Every box is **confirmed** (`_confirm_hits`: raw minNeighbors=0 hits on a crop enlarged to a ~160 px face; faces
+  6–49, false 0–3 on 15 SDXL outputs; ≥ 4 kept). Auto mode confirms all boxes with the *anime* cascade — Haar found
+  hands/chairs/bodies in anime images and confirmed them itself — and uses Haar-confirmed boxes only when nothing is
+  anime-confirmed (photos). A 505 px false box used to set the size bar and hide 4 real grid faces. Turned heads are
+  often missed.
 - `face_detail()`: per face an elliptical mask (face + 15–20 % margin), crop ≈ 2× the face, denoise 0.4 →
   small faces redrawn at ~native/2 px. SD 1.5 full-body 512×768: 1 face in 5.9 s, 1.8 % of pixels changed.
 - Generate tab: "✨ Face detail" runs after hires fix on txt2img *and* img2img results; "🖌 Inpaint" accordion
   (gr.ImageEditor, `app._editor_parts()`), record mode "inpaint" + `inpaint_padding` (not recreatable without the
   source + mask). X/Y grid "Checkpoint" axis: values matched to local file names; each switch goes through
   `_ensure_model` and re-syncs LoRAs.
+
+### Anime helpers: wildcards, character cards, WD14 tagger, family quality tags
+- **Wildcards** (`backend/wildcards.py`): `{a|b}`, `{2$$a|b|c}`, `{3::a|b}` (weight), `__name__` = random line of
+  `ImageGenApp/wildcards/name.txt` (shipped SFW starters: outfit, pose, expression, background, hair, eyes, lighting,
+  camera) or `models/wildcards/` (user; first dir wins; sub-folders `__a/b__`). Innermost group first, ≤ 20 rounds (a
+  self-referencing file stops there), `{tag}` without `|` and `\{…\}` stay literal, unknown `__x__` stay and are
+  reported. RNG = `random.Random(f"wildcards:{seed}")` per image. `do_generate` (so Auto-Loop and the X/Y grid too)
+  splits a dynamic prompt into batch-1 calls with seed, seed+1, … and records `prompt_template` /
+  `negative_template` next to the resolved prompt (restore uses the resolved one). `split_tags` treats `{}` as
+  brackets. The Bridge doesn't resolve them.
+- **Character cards** (`backend/character_cards.py`, `settings/characters/<name>.json`, gitignored): checkpoint / VAE
+  / ≤ 3 LoRAs by **file name** (found again with `list_checkpoints()` etc.), `tags`, named `outfits`, optional
+  negative, size, CFG, steps, sampler, CLIP skip; `clean_card()` drops anything else. `card_from_lora()`: Civitai
+  triggers + 🗝 likely triggers + body tags (hair/eyes/… ≥ 60 % coverage) + `1girl`/`solo` when ≥ 60 %; every
+  multi-tag Civitai trigger prompt minus those tags = one outfit, named after its clothing tags. Build refuses to
+  overwrite an existing card; Save keeps the card's outfits and stores the whole prompt as its tags.
+- **WD14 tagger** (`backend/wd_tagger.py`): SmilingWolf/wd-vit-tagger-v3 (Apache-2.0, `model.onnx` 378 MB via
+  hf_hub_download into `.hf_cache`), ORT **CPU** (0.8 s warm, doesn't touch VRAM). Input: RGBA on white, padded
+  square, bicubic 448, **BGR** float32 0–255 NHWC. General ≥ 0.35, character ≥ 0.85, rating kept apart; `_` → space
+  except kaomoji, brackets escaped. Used by 🏷 Interrogate (img2img accordion, PNG Info) and Train LoRA "Auto-Tag
+  All (WD14)" (trigger first). Gradio 4.19's `gr.Progress` raised "list index out of range" when called from an API
+  request before the first step — progress calls are wrapped (`_say`).
+- **Family quality tags** (`app._family_quality`): Illustrious/NoobAI get `masterpiece, best quality, amazing
+  quality, very aesthetic, absurdres` + `worst quality, low quality, bad quality, lowres, bad anatomy, jpeg
+  artifacts, signature, watermark`; Pony `score_9, score_8_up, score_7_up` + `score_4, score_5, score_6`; each side
+  only when none of that family's markers is there.
+- Face detail runs ~half the main steps (`ceil(max(10, steps × 0.5) / denoise)`): SDXL A/B at 1024² — 0.8× (~22
+  effective steps) ~45 s per face, 0.5× (~14) ~28 s, faces no worse.
 
 ### Hires fix, variations, CLIP skip, X/Y grid, batch folders
 - **Hires fix** (`app._hires_pass`): txt2img at the entered size → `_upscale_to()` (Lanczos, or Real-ESRGAN ×2/×4 then

@@ -1453,19 +1453,37 @@ def _():
     from backend.png_info import read_image_metadata as rd
     # the relative-size filter drops tiny false hits next to a real face
     boxes = [(100, 100, 300, 300), (10, 10, 40, 40), (400, 100, 560, 260)]
-    orig = dt._cascade
+    orig, orig_hits = dt._cascade, dt._confirm_hits
     try:
         class Fake:
             def __init__(self, found): self.found = found
             def detectMultiScale(self, *a, **k):
                 return [(x1, y1, x2 - x1, y2 - y1) for x1, y1, x2, y2 in self.found]
         dt._cascade = lambda kind: Fake(boxes) if kind == "anime" else None
+        dt._confirm_hits = lambda img, b, kind: 10
         got = dt.detect_faces(Image.new("RGB", (640, 480)), "auto")
         assert got == [(100, 100, 300, 300), (400, 100, 560, 260)], got
+        # unconfirmed boxes are dropped, and don't set the size the others are measured against
+        dt._confirm_hits = lambda img, b, kind: 0 if b == (100, 100, 300, 300) else 10
+        assert dt.detect_faces(Image.new("RGB", (640, 480)), "auto") == [(400, 100, 560, 260)]
+        # auto: Haar ("photo") boxes need the anime cascade's confirmation, unless nothing is anime
+        photo_box = [(500, 300, 600, 400)]
+        dt._cascade = lambda kind: Fake(boxes if kind == "anime" else photo_box)
+        dt._confirm_hits = lambda img, b, kind: 10 if (kind == "anime") == (b != photo_box[0]) else 0
+        got = dt.detect_faces(Image.new("RGB", (640, 480)), "auto")
+        assert got == [(100, 100, 300, 300), (400, 100, 560, 260)], got
+        dt._confirm_hits = lambda img, b, kind: 10 if kind == "photo" else 0      # a photo: Haar only
+        assert dt.detect_faces(Image.new("RGB", (640, 480)), "auto") == [(500, 300, 600, 400)]
+        # a second box centred inside a face is the same face
+        dt._cascade = lambda kind: Fake([(100, 100, 300, 300), (110, 180, 250, 320)]) if kind == "anime" else None
+        dt._confirm_hits = lambda img, b, kind: 10
+        assert dt.detect_faces(Image.new("RGB", (640, 480)), "auto") == [(100, 100, 300, 300)]
         dt._cascade = lambda kind: None
         assert dt.detect_faces(Image.new("RGB", (64, 64))) == []
     finally:
-        dt._cascade = orig
+        dt._cascade, dt._confirm_hits = orig, orig_hits
+    # the real confirmation: an empty picture has no face hits
+    assert dt._confirm_hits(Image.new("RGB", (300, 300), (200, 180, 160)), (100, 100, 200, 200), "anime") == 0
     # face_detail with no faces returns the image unchanged, without touching the model
     img = Image.new("RGB", (64, 64), (10, 20, 30))
     orig_df = dt.detect_faces
@@ -1518,6 +1536,136 @@ def _():
     with Image.open(p2) as im:
         assert "Inpaint: denoise 0.7, padding 48" in im.info["parameters"]
     assert _app._restore_plan(rd(p2))["mode"] == "inpaint"
+
+
+@test("Wildcards: {a|b}, __files__, weights, picks per seed, escapes, missing, no runaway recursion")
+def _():
+    from backend import wildcards as wc
+    from backend.prompt_tools import split_tags
+    tmp = Path(_tf.mkdtemp())
+    (tmp / "hair").mkdir()
+    (tmp / "hair" / "color.txt").write_text("# comment\nred hair\n\nblue hair\n", encoding="utf-8")
+    (tmp / "outfit.txt").write_text("maid, {apron|frills}\nkimono\n", encoding="utf-8")
+    (tmp / "loop.txt").write_text("__loop__\n", encoding="utf-8")
+    old = wc.WILDCARD_DIRS
+    try:
+        wc.WILDCARD_DIRS = [tmp]
+        assert wc.list_wildcards() == ["hair/color", "loop", "outfit"], wc.list_wildcards()
+        t = "1girl, __hair/color__, __outfit__, {smile|pout}, {keep}, (x:1.2)"
+        assert wc.is_dynamic(t) and not wc.is_dynamic("a, {b}, (c:1.2)") and not wc.is_dynamic("")
+        outs = {wc.resolve(t, s) for s in range(40)}
+        assert len(outs) > 4, outs                               # the picks vary with the seed
+        assert all(wc.resolve(t, s) == wc.resolve(t, s) for s in (1, 99))   # … and repeat per seed
+        for o in outs:
+            assert "__" not in o and "|" not in o and "{keep}" in o and "(x:1.2)" in o, o
+            assert ("red hair" in o) != ("blue hair" in o), o
+            assert not ("maid" in o and "apron" not in o and "frills" not in o), o   # nested group resolved
+        assert {wc.resolve("{0::a|b}", s) for s in range(30)} == {"b"}
+        two = wc.resolve("{2$$a|b|c}", 5).split(", ")
+        assert len(two) == 2 and len(set(two)) == 2 and set(two) <= {"a", "b", "c"}, two
+        assert wc.resolve("x, {|}, y", 3) == "x, y"                 # empty pick leaves no ", ,"
+        assert wc.resolve(r"\{a|b\}", 1) == r"\{a|b\}"               # escaped: literal
+        missing = []
+        assert wc.resolve("a, __nope__, {b|b}", 1, missing) == "a, __nope__, b" and missing == ["nope"]
+        assert "loop" in wc.resolve("__loop__", 1)                  # self-reference stops at the depth limit
+        assert wc._lines("../outfit") is None
+    finally:
+        wc.WILDCARD_DIRS = old
+    assert split_tags("a, {b, c|d}, e") == ["a", "{b, c|d}", "e"]
+    # the shipped starter files all resolve
+    shipped = wc.list_wildcards()
+    assert {"outfit", "pose", "expression", "background", "hair", "eyes", "lighting", "camera"} <= set(shipped), shipped
+    for n in shipped:
+        r = wc.resolve(f"__{n}__", 7)
+        assert r and "__" not in r and "{" not in r, (n, r)
+
+
+@test("Family quality tags: Illustrious aesthetic tags + negatives, Pony scores, nothing twice")
+def _():
+    import app as _app
+    pos, neg = _app._family_quality("illustrious", "1girl", "")
+    assert "very aesthetic" in pos and "absurdres" in pos and "worst quality" in neg, (pos, neg)
+    assert _app._family_quality("illustrious", "masterpiece, 1girl", "lowres, worst quality") == ("", "")
+    pos, neg = _app._family_quality("pony", "1girl", "bad hands")
+    assert pos.startswith("score_9") and "score_4" in neg
+    assert _app._family_quality("pony", "score_9, 1girl", "score_4") == ("", "")
+    assert _app._family_quality("weird", "x", "")[0] == "masterpiece, best quality"    # unknown → SD 1.5
+
+
+@test("Character cards: build from a LoRA (triggers, body tags, outfits), save/load, sanitising")
+def _():
+    import struct
+    from backend import character_cards as cc
+    tmp = Path(_tf.mkdtemp())
+    meta = {"ss_tag_frequency": json.dumps({"10_x": {"heroine": 20, "1girl": 20, "solo": 19, "silver hair": 19,
+                                                     "red eyes": 18, "cleavage": 15, "smile": 3}}),
+            "ss_dataset_dirs": json.dumps({"10_x": {"n_repeats": 10, "img_count": 20}})}
+    hdr = json.dumps({"__metadata__": meta, "w": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}}).encode()
+    lp = tmp / "IL_Heroine.safetensors"
+    lp.write_bytes(struct.pack("<Q", len(hdr)) + hdr + b"\0\0")
+    Path(str(lp) + ".civitai.json").write_text(json.dumps({"trainedWords": [
+        "heroine, silver hair, red eyes, maid, maid headdress, frilled apron",
+        "heroine, silver hair, red eyes, purple bikini, choker"]}), encoding="utf-8")
+    old = cc.CARDS_DIR
+    try:
+        cc.CARDS_DIR = tmp / "characters"
+        card = cc.card_from_lora(str(lp), 0.75, str(tmp / "base.safetensors"))
+        assert card["name"] == "Heroine" and card["loras"] == [{"file": "IL_Heroine.safetensors", "weight": 0.75}]
+        assert card["tags"].startswith("1girl, solo, heroine, silver hair, red eyes"), card["tags"]
+        assert "cleavage" not in card["tags"]                        # not a body tag
+        assert list(card["outfits"]) == ["maid · maid headdress · frilled apron", "purple bikini · choker"], card
+        assert card["outfits"]["purple bikini · choker"] == "purple bikini, choker"
+        pr = cc.card_prompt(card, "purple bikini · choker", "beach, silver hair")
+        assert pr.count("silver hair") == 1 and pr.endswith("purple bikini, choker, beach"), pr
+        assert cc.card_prompt(card, "no such outfit") == card["tags"]
+        cc.save_card(card)
+        assert cc.list_cards() == ["Heroine"] and cc.load_card("Heroine") == card
+        assert cc.load_card("../Heroine") is None or cc.load_card("../Heroine")["name"] == "Heroine"
+        bad = cc.clean_card({"name": "../CON", "checkpoint": "C:\\x\\m.safetensors", "width": "5000", "cfg": "x",
+                             "steps": 30, "loras": [{"file": "a/b.safetensors", "weight": "9"}, "junk"],
+                             "outfits": {"ok": "x", "": "y", "n": 3}, "clip_skip": 2})
+        assert bad["name"] == "_CON" and bad["checkpoint"] == "m.safetensors" and "width" not in bad
+        assert "cfg" not in bad and bad["steps"] == 30 and bad["clip_skip"] == 2
+        assert bad["loras"] == [{"file": "b.safetensors", "weight": 0.8}] and bad["outfits"] == {"ok": "x"}
+        assert cc.clean_card({"name": "  "}) is None and cc.clean_card("x") is None
+        (cc.CARDS_DIR / "broken.json").write_text("{nope", encoding="utf-8")
+        assert cc.load_card("broken") is None
+    finally:
+        cc.CARDS_DIR = old
+
+
+@test("WD14 tagger: input prep (white pad, BGR, NHWC), thresholds, rating kept apart, tag text")
+def _():
+    import numpy as np
+    from PIL import Image
+    from backend import wd_tagger as wd
+    im = Image.new("RGBA", (40, 20), (255, 0, 0, 255))
+    arr = wd._prepare(im, 448)
+    assert arr.shape == (1, 448, 448, 3) and arr.dtype == np.float32
+    assert tuple(arr[0, 224, 224]) == (0.0, 0.0, 255.0)          # red → BGR
+    assert tuple(arr[0, 5, 224]) == (255.0, 255.0, 255.0)        # padding is white
+    assert wd._pretty("hatsune_miku_(vocaloid)") == "hatsune miku \\(vocaloid\\)" and wd._pretty("^_^") == "^_^"
+
+    class In:
+        name, shape = "input", [1, 448, 448, 3]
+
+    class Sess:
+        def get_inputs(self): return [In()]
+        def run(self, _o, feed):
+            assert feed["input"].shape == (1, 448, 448, 3)
+            return [np.array([[0.9, 0.1, 0.8, 0.3, 0.95, 0.5]], dtype=np.float32)]
+    old = (wd._session, wd._labels)
+    try:
+        wd._session = Sess()
+        wd._labels = [("general", 9), ("explicit", 9), ("long_hair", 0), ("smile", 0), ("some_char_(game)", 4),
+                      ("other_char", 4)]
+        r = wd.tag_image(Image.new("RGB", (64, 64)), 0.35, 0.85, progress=lambda *a, **k: 1 / 0)
+        assert r["general"] == [("long hair", r["general"][0][1])] and len(r["general"]) == 1, r
+        assert [t for t, _ in r["character"]] == ["some char \\(game\\)"] and set(r["rating"]) == {"general", "explicit"}
+        assert wd.tags_text(r) == "some char \\(game\\), long hair"
+        assert wd.tags_text(r, exclude="Long_Hair", with_character=False) == ""
+    finally:
+        wd._session, wd._labels = old
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -577,6 +577,37 @@ def _clean_gen_args(steps, cfg, width, height, batch, seed, strength=0.75, img2i
     return steps_c, cfg_c, size[0], size[1], batch_c, seed_i, strength_c, fixes
 
 
+# Quality tags per model family (what the models were trained with). Added only when the
+# prompt has none of that family's own quality tags; merged, so nothing is duplicated.
+_FAMILY_QUALITY = {
+    # Illustrious / NoobAI: aesthetic + quality tags from their training captions
+    "illustrious": ("masterpiece, best quality, amazing quality, very aesthetic, absurdres",
+                    "worst quality, low quality, bad quality, lowres, bad anatomy, jpeg artifacts, "
+                    "signature, watermark"),
+    "pony": ("score_9, score_8_up, score_7_up", "score_4, score_5, score_6"),
+    "sdxl": ("masterpiece, best quality", "worst quality, low quality"),
+    "sd15": ("masterpiece, best quality", "worst quality, low quality, lowres"),
+}
+_QUALITY_MARKERS = {
+    "illustrious": ("masterpiece", "best quality", "amazing quality", "very aesthetic"),
+    "pony": ("score_9", "score_8", "score_7"),
+    "sdxl": ("masterpiece", "best quality"),
+    "sd15": ("masterpiece", "best quality"),
+}
+
+
+def _family_quality(family: str, prompt: str, negative: str) -> tuple[str, str]:
+    """(quality tags to add, negative tags to add) for a model family — each only when the
+    prompt / negative has none of that family's own quality tags yet."""
+    fam = family if family in _FAMILY_QUALITY else "sd15"
+    pos, neg = _FAMILY_QUALITY[fam]
+    p, n = (prompt or "").lower(), (negative or "").lower()
+    add_pos = "" if any(m in p for m in _QUALITY_MARKERS[fam]) else pos
+    neg_markers = ("score_4", "score_5") if fam == "pony" else ("worst quality", "low quality")
+    add_neg = "" if any(m in n for m in neg_markers) else neg
+    return add_pos, add_neg
+
+
 def _clean_extra(extra: dict | None) -> dict:
     """CLIP skip / variation / hires-fix settings made safe (UI values, saved sessions and
     restored images can all hold junk)."""
@@ -905,6 +936,26 @@ def _build_generate_tab():
                     )
                 fetch_triggers_status = gr.HTML("")
 
+                with gr.Accordion("🎴 Character cards — one click to a full character setup", open=False):
+                    from backend.character_cards import list_cards as _list_cards
+                    _cards0 = _list_cards()
+                    card_dd = gr.Dropdown(label="Character", choices=["(none)"] + _cards0,
+                                          value=_cards0[0] if _cards0 else "(none)",
+                                          info="Saved in settings/characters/ (checkpoint, LoRAs, tags, outfits, size…)")
+                    from backend.character_cards import load_card as _load_card
+                    _card0 = _load_card(_cards0[0]) if _cards0 else None
+                    _outs0 = ["(no outfit tags)"] + list((_card0 or {}).get("outfits") or {})
+                    outfit_dd = gr.Dropdown(label="Outfit", choices=_outs0, value=_outs0[1] if len(_outs0) > 1 else _outs0[0])
+                    card_scene_txt = gr.Textbox(label="Scene / extra tags", lines=1,
+                                                placeholder="__pose__, __expression__, __background__")
+                    card_load_btn = gr.Button("🎴 Load → checkpoint, LoRAs, prompt, settings", variant="primary",
+                                              size="sm")
+                    card_name_txt = gr.Textbox(label="Card name", lines=1, value=_cards0[0] if _cards0 else "")
+                    with gr.Row():
+                        card_save_btn = gr.Button("💾 Save current setup", size="sm")
+                        card_build_btn = gr.Button("🧩 Build from LoRA slot 1", size="sm")
+                    card_status = gr.HTML("")
+
                 gr.Markdown("---")
                 refresh_btn = gr.Button("🔄 Refresh model lists")
 
@@ -929,7 +980,9 @@ def _build_generate_tab():
                         auto_quality_cb = gr.Checkbox(
                             label="Auto-add quality tags",
                             value=_ls.get("auto_quality", True),
-                            info="Prepends 'masterpiece, best quality' (or score_9… for Pony) if your prompt has none.",
+                            info="Adds the quality tags your model family was trained with (Illustrious/NoobAI: "
+                                 "masterpiece … very aesthetic, absurdres · Pony: score_9… · SD 1.5: masterpiece, "
+                                 "best quality) and matching negative tags — only if you have none.",
                         )
                         with gr.Row():
                             # an estimate until the tokenizer has loaded in the background
@@ -939,6 +992,21 @@ def _build_generate_tab():
                         with gr.Row():
                             tidy_btn = gr.Button("🧹 Tidy prompts — merge duplicate tags (strongest weight wins)",
                                                  size="sm", variant="secondary")
+                        with gr.Accordion("🎲 Wildcards — different picks for every image", open=False):
+                            from backend.wildcards import list_wildcards as _list_wc
+                            gr.HTML('<p style="color:#a6adc8;font-size:13px;margin:0 0 4px;">'
+                                    '<code>{smile|pout|grin}</code> picks one per image · <code>{2$$a|b|c}</code> '
+                                    'picks two · <code>{3::a|b}</code> makes a 3× likelier · <code>__outfit__</code> '
+                                    'picks a line from <code>wildcards/outfit.txt</code> (add your own .txt files there '
+                                    'or in <code>models/wildcards/</code>). Picks come from each image\'s seed, so '
+                                    'the same seed gives the same picks; the resolved prompt is saved in the image.</p>')
+                            _wc0 = _list_wc()
+                            wc_ds = gr.Dataset(label="Click to add to the prompt", components=["textbox"],
+                                               samples=[[f"__{n}__"] for n in _wc0] or [["-"]], samples_per_page=40)
+                            with gr.Row():
+                                wc_preview_btn = gr.Button("👁 Preview 4 picks of this prompt", size="sm")
+                                wc_refresh_btn = gr.Button("🔄 Reload wildcard files", size="sm")
+                            wc_preview_html = gr.HTML("")
 
                         with gr.Row():
                             generate_btn = gr.Button("✨ Generate  (Ctrl+Enter)", variant="primary",
@@ -1055,6 +1123,12 @@ def _build_generate_tab():
                             i2i_restore_html = gr.HTML("")
                             recreate_btn = gr.Button("🔁 Recreate it exactly (img2img off → Generate)",
                                                      variant="primary", size="sm", visible=False)
+                            with gr.Row():
+                                tag_i2i_btn = gr.Button("🏷 Interrogate — write this image's tags into the prompt "
+                                                        "(WD14)", size="sm", variant="secondary", scale=3)
+                                tag_thr_sl = gr.Slider(0.2, 0.8, value=0.35, step=0.05, label="Tag threshold",
+                                                       scale=1, info="lower = more tags")
+                            tag_i2i_html = gr.HTML("")
                         with gr.Accordion("🖌 Inpaint — paint what to change", open=False):
                             inp_editor = gr.ImageEditor(
                                 label="Image — paint over the part to redraw", type="pil",
@@ -1428,7 +1502,9 @@ def _build_generate_tab():
         import math
         from backend.detail_tools import face_detail
         t0, out, found = time.time(), [], []
-        fsteps = min(150, math.ceil(max(12, int(steps) * 0.8) / ex["fd_denoise"]))
+        # ~half the main steps actually run (ADetailer runs steps × denoise). SDXL A/B at 1024²:
+        # 0.8× (~22 steps) ~45 s per face, 0.5× (~14) ~28 s, faces no worse
+        fsteps = min(150, math.ceil(max(10, int(steps) * 0.5) / ex["fd_denoise"]))
         for i, im in enumerate(imgs):
             progress(0, desc=f"Face detail {i + 1}/{len(imgs)}: finding faces…")
 
@@ -1490,6 +1566,7 @@ def _build_generate_tab():
     def do_generate(
         prompt, neg_prompt, scheduler, steps, cfg, width, height, batch,
         seed, init_img, strength, use_i2i, auto_quality=True, extra=None, progress=gr.Progress(),
+        template=None,
     ):
         global _smartsplit_pipe, _smartsplit_cfg
         # (the abort flag is cleared by the caller when the run starts — clearing it
@@ -1500,6 +1577,36 @@ def _build_generate_tab():
             steps, cfg, width, height, batch, seed, strength, img2img=bool(use_i2i and init_img is not None))
         prompt, neg_prompt = prompt or "", neg_prompt or ""
         ex = _clean_extra(extra)
+        from backend import wildcards as _wc
+        if template is None and (_wc.is_dynamic(prompt) or _wc.is_dynamic(neg_prompt)):
+            # Dynamic prompt: each image gets its own picks (from its own seed), one at a time
+            if seed < 0:
+                import random
+                seed = random.randint(0, 2**32 - 1 - batch)
+            n = 1 if (use_i2i and init_img is not None) else batch
+            all_imgs, infos, seeds_used, missing = [], [], [], []
+            for i in range(n):
+                s_i = (seed + i) % 2**32
+                p_i = _wc.resolve(prompt, s_i, missing)
+                n_i = _wc.resolve(neg_prompt, s_i, missing)
+                ex_i = dict(ex, var_seed=(ex["var_seed"] + i) % 2**32 if ex["var_seed"] >= 0 else -1)
+                imgs_i, info_i, _ = do_generate(
+                    p_i, n_i, scheduler, steps, cfg, width, height, 1, s_i, init_img, strength, use_i2i,
+                    auto_quality=auto_quality, extra=ex_i, progress=progress,
+                    template={"prompt": prompt, "negative": neg_prompt})
+                if not imgs_i:          # stopped or failed: report it and stop the batch
+                    infos.append(info_i)
+                    break
+                all_imgs += imgs_i
+                seeds_used += list(getattr(sd, "last_seeds", None) or [s_i])
+                infos.append(f'<p style="color:#cba6f7;font-size:13px;margin:2px 0;">🎲 #{i + 1}: '
+                             f'<code>{html.escape(p_i)}</code></p>' + info_i)
+            sd.last_seeds = seeds_used
+            if missing:
+                infos.insert(0, '<p style="color:#f9e2af;font-size:13px;">⚠ Unknown wildcard(s): '
+                             + ", ".join(f"<code>__{html.escape(m)}__</code>" for m in missing)
+                             + " — add a .txt file to ImageGenApp/wildcards/ or models/wildcards/</p>")
+            return all_imgs, "".join(infos), all_imgs
         if use_i2i and init_img is not None:
             # SD 1.5 attention at 2048 px needs ~4 GB per head slice and makes nothing better
             xl = sd.model_family in ("sdxl", "pony", "illustrious")
@@ -1508,19 +1615,17 @@ def _build_generate_tab():
         fixes_note = (f'<br><span style="color:#f9e2af;">Adjusted: {"; ".join(fixes)}</span>'
                       if fixes else "")
 
-        # ── Optionally prepend quality tags based on model family ─────────
-        family = sd.model_family
-        _q = prompt.lower()
-        added_tags = ""
+        # ── Optionally add the quality tags each model family was trained with ─
+        added_tags = added_neg = ""
         if auto_quality:
-            if family == "pony" and "score_" not in _q:
-                added_tags = "score_9, score_8_up, score_7_up"
-            elif family in ("sd15", "illustrious", "sdxl") and "masterpiece" not in _q:
-                added_tags = "masterpiece, best quality"
+            added_tags, added_neg = _family_quality(sd.model_family, prompt, neg_prompt)
             if added_tags:
                 prompt = merge_prompts(added_tags, prompt)
-        tags_note = (f'<br><span style="color:#9399b2;">Auto-added quality tags: '
-                     f'<code>{added_tags}</code></span>' if added_tags else "") + fixes_note
+            if added_neg:
+                neg_prompt = merge_prompts(neg_prompt, added_neg)
+        tags_note = ((f'<br><span style="color:#9399b2;">Auto-added quality tags: <code>{added_tags}</code>'
+                      + (f' · negative: <code>{added_neg}</code>' if added_neg else "") + '</span>')
+                     if (added_tags or added_neg) else "") + fixes_note
 
         try:
             # ── SmartSplit path ────────────────────────────────────────────────
@@ -1601,6 +1706,8 @@ def _build_generate_tab():
                 **({"face_detail": {"denoise": ex["fd_denoise"], "detector": ex["fd_mode"],
                                     "prompt": ex["fd_prompt"]}} if fd_note else {}),
                 **({"strength": strength, "source_image": Path(src).name if src else None} if i2i else {}),
+                **({"prompt_template": template["prompt"],
+                    "negative_template": template["negative"] or None} if template else {}),
             ), pipe=sd)
             if saved:
                 info_html += (f'<p style="color:#9399b2;font-size:13px;margin:2px 0;">'
@@ -2613,6 +2720,182 @@ def _build_generate_tab():
     for _w in _gen_vram_inputs:
         _w.change(_update_gen_vram, _gen_vram_inputs, [_gen_vram_bar])
 
+    # ── Wildcards ───────────────────────────────────────────────────────────
+    def do_wc_add(prompt, sample):
+        tag = (sample[0] if isinstance(sample, (list, tuple)) and sample else sample) or ""
+        tag = str(tag).strip()
+        if not tag or tag == "-":
+            return gr.update()
+        return merge_prompts(prompt or "", tag)
+
+    def do_wc_preview(prompt, neg):
+        from backend import wildcards as _wc
+        import random as _r
+        if not (_wc.is_dynamic(prompt) or _wc.is_dynamic(neg)):
+            return ('<p style="color:#a6adc8;font-size:13px;">No {a|b} groups or __wildcards__ in the prompt — '
+                    'every image gets the same prompt.</p>')
+        rows, missing = [], []
+        for _ in range(4):
+            sd_ = _r.randint(0, 2**32 - 1)
+            rows.append(f'<li><code>{html.escape(_wc.resolve(prompt, sd_, missing))}</code></li>')
+        warn = ("<br>⚠ Unknown: " + ", ".join(f"<code>__{html.escape(m)}__</code>" for m in missing)
+                if missing else "")
+        return f'<ul style="font-size:13px;color:#cdd6f4;margin:2px 0;">{"".join(rows)}</ul>{warn}'
+
+    def do_wc_refresh():
+        from backend.wildcards import list_wildcards
+        names = list_wildcards()
+        return gr.update(samples=[[f"__{n}__"] for n in names] or [["-"]])
+
+    wc_ds.click(do_wc_add, [prompt_txt, wc_ds], [prompt_txt])
+    wc_preview_btn.click(do_wc_preview, [prompt_txt, neg_prompt_txt], [wc_preview_html])
+    wc_refresh_btn.click(do_wc_refresh, [], [wc_ds])
+
+    # ── WD14 interrogate ────────────────────────────────────────────────────
+    def do_interrogate(img, prompt, thr, progress=gr.Progress()):
+        if img is None:
+            return gr.update(), '<p style="color:#f9e2af;font-size:13px;">⚠ Drop an image first.</p>'
+        try:
+            from backend.wd_tagger import tag_image, tags_text
+            res = tag_image(img, general_threshold=float(thr or 0.35), progress=progress)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            return gr.update(), f'<p style="color:#f38ba8;font-size:13px;">❌ Tagger failed: {html.escape(str(e))}</p>'
+        tags = tags_text(res)
+        rating = max(res["rating"].items(), key=lambda kv: kv[1])[0] if res["rating"] else "?"
+        chars = ", ".join(f"{t} {p:.0%}" for t, p in res["character"]) or "none recognised"
+        old = (f'<details><summary>previous prompt</summary><code>{html.escape(prompt)}</code></details>'
+               if (prompt or "").strip() else "")
+        return tags, (f'<p style="color:#a6e3a1;font-size:13px;margin:2px 0;">🏷 {len(res["general"])} tags · '
+                      f'character: {html.escape(chars)} · rating: {rating}</p>{old}')
+
+    tag_i2i_btn.click(do_interrogate, [init_image, prompt_txt, tag_thr_sl], [prompt_txt, tag_i2i_html])
+
+    # ── Character cards ─────────────────────────────────────────────────────
+    _NO_OUTFIT = "(no outfit tags)"
+
+    def _card_summary(card) -> str:
+        if not card:
+            return ""
+        loras = ", ".join(f"{Path(l['file']).stem} ×{l['weight']:g}" for l in card["loras"]) or "no LoRA"
+        return (f'<p style="color:#a6adc8;font-size:13px;margin:2px 0;">🎴 <b>{html.escape(card["name"])}</b> · '
+                f'{html.escape(card.get("checkpoint") or "current checkpoint")} · {html.escape(loras)} · '
+                f'{len(card["outfits"])} outfit(s)<br><code>{html.escape(card["tags"])}</code></p>')
+
+    def on_card_pick(name):
+        from backend.character_cards import load_card
+        card = load_card(name) if name and name != "(none)" else None
+        if not card:
+            return gr.update(choices=[_NO_OUTFIT], value=_NO_OUTFIT), gr.update(), ""
+        outs = [_NO_OUTFIT] + list(card["outfits"])
+        return (gr.update(choices=outs, value=outs[1] if len(outs) > 1 else _NO_OUTFIT),
+                card["name"], _card_summary(card))
+
+    def _find_file(fname, items):
+        want = (fname or "").lower()
+        return next((path for n, path in items if n.lower() == want), None) if want else None
+
+    def do_card_load(name, outfit, scene, neg, *cur):
+        from backend.character_cards import load_card, card_prompt
+        from backend.model_manager import list_checkpoints, list_loras, list_vaes
+        n_out = 16
+        card = load_card(name) if name and name != "(none)" else None
+        if not card:
+            return (*[gr.update()] * n_out, '<p style="color:#f9e2af;font-size:13px;">⚠ Pick a card first.</p>')
+        notes = []
+        model = gr.update()
+        if card.get("checkpoint"):
+            path = _find_file(card["checkpoint"], list_checkpoints())
+            if path:
+                model = path
+            else:
+                notes.append(f"checkpoint {card['checkpoint']} isn't installed (kept the current one)")
+        vae = gr.update()
+        if card.get("vae"):
+            vae = _find_file(card["vae"], list_vaes()) or gr.update()
+        lora_vals = []
+        loras = list_loras()
+        for l in (card["loras"] + [None] * 3)[:3]:
+            if l is None:
+                lora_vals += ["none", gr.update()]
+                continue
+            path = _find_file(l["file"], loras)
+            if not path:
+                notes.append(f"LoRA {l['file']} isn't installed")
+                lora_vals += ["none", gr.update()]
+            else:
+                lora_vals += [path, max(0.1, min(1.5, l["weight"]))]
+        prompt = card_prompt(card, outfit if outfit != _NO_OUTFIT else None, scene or "")
+        negative = merge_prompts(neg or "", card["negative"]) if card.get("negative") else gr.update()
+        g = lambda k: card[k] if k in card else gr.update()
+        msg = (f'<p style="color:#a6e3a1;font-size:13px;margin:2px 0;">✅ Loaded {html.escape(card["name"])}'
+               + (f' — {html.escape(outfit)}' if outfit and outfit != _NO_OUTFIT else "") + "</p>"
+               + (f'<p style="color:#f9e2af;font-size:13px;margin:2px 0;">⚠ {html.escape("; ".join(notes))}</p>'
+                  if notes else ""))
+        return (model, vae, *lora_vals, prompt, negative, g("width"), g("height"), g("cfg"), g("steps"),
+                g("scheduler") if card.get("scheduler") in SCHEDULER_MAP else gr.update(),
+                g("clip_skip") if card.get("clip_skip") in (1, 2) else gr.update(), msg)
+
+    def _card_choices(value):
+        from backend.character_cards import list_cards
+        return gr.update(choices=["(none)"] + list_cards(), value=value)
+
+    def do_card_save(name, model, vae, l1, w1, l2, w2, l3, w3, prompt, neg, w, h, cfg, steps, sched, cs):
+        from backend.character_cards import load_card, save_card, safe_name
+        n = safe_name(name)
+        if not n:
+            return gr.update(), gr.update(), '<p style="color:#f9e2af;font-size:13px;">⚠ Enter a card name.</p>'
+        old = load_card(n) or {}
+        card = {"name": n, "checkpoint": Path(str(model)).name if model and Path(str(model)).is_file() else None,
+                "vae": Path(str(vae)).name if vae and vae != "none" and Path(str(vae)).is_file() else None,
+                "loras": [{"file": Path(str(l)).name, "weight": wt} for l, wt in ((l1, w1), (l2, w2), (l3, w3))
+                          if l and l != "none"],
+                "tags": prompt or "", "outfits": old.get("outfits") or {}, "negative": neg or "",
+                "width": w, "height": h, "cfg": cfg, "steps": steps, "scheduler": sched, "clip_skip": cs}
+        try:
+            save_card(card)
+        except (OSError, ValueError) as e:
+            return gr.update(), gr.update(), f'<p style="color:#f38ba8;font-size:13px;">❌ {html.escape(str(e))}</p>'
+        outs = [_NO_OUTFIT] + list(card["outfits"])
+        return (_card_choices(n), gr.update(choices=outs, value=_NO_OUTFIT),
+                f'<p style="color:#a6e3a1;font-size:13px;">💾 Saved card <b>{html.escape(n)}</b> (the whole '
+                f'prompt is its tags; outfits kept). Edit settings/characters/{html.escape(n)}.json to fine-tune.</p>')
+
+    def do_card_build(name, lora, weight, model):
+        from backend.character_cards import card_from_lora, load_card, save_card, safe_name
+        if not lora or lora == "none":
+            return gr.update(), gr.update(), gr.update(), \
+                '<p style="color:#f9e2af;font-size:13px;">⚠ Pick the character LoRA in slot 1 first.</p>'
+        card = card_from_lora(lora, float(weight or 0.8),
+                              model if model and Path(str(model)).is_file() else None,
+                              name=safe_name(name) or None)
+        if not card:
+            return gr.update(), gr.update(), gr.update(), \
+                '<p style="color:#f38ba8;font-size:13px;">❌ Could not read that LoRA.</p>'
+        if load_card(card["name"]):
+            return gr.update(), gr.update(), gr.update(), (
+                f'<p style="color:#f9e2af;font-size:13px;">⚠ A card called {html.escape(card["name"])} already '
+                f'exists — type another name to build a new one.</p>')
+        save_card(card)
+        outs = [_NO_OUTFIT] + list(card["outfits"])
+        return (_card_choices(card["name"]), gr.update(choices=outs, value=outs[1] if len(outs) > 1 else _NO_OUTFIT),
+                card["name"], _card_summary(card).replace("🎴", "🧩 Built"))
+
+    card_dd.change(on_card_pick, [card_dd], [outfit_dd, card_name_txt, card_status])
+    card_load_btn.click(
+        do_card_load,
+        [card_dd, outfit_dd, card_scene_txt, neg_prompt_txt],
+        [model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3,
+         prompt_txt, neg_prompt_txt, width_sl, height_sl, cfg_sl, steps_sl, scheduler_dd, clip_skip_rb,
+         card_status])
+    card_save_btn.click(
+        do_card_save,
+        [card_name_txt, model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3,
+         prompt_txt, neg_prompt_txt, width_sl, height_sl, cfg_sl, steps_sl, scheduler_dd, clip_skip_rb],
+        [card_dd, outfit_dd, card_status])
+    card_build_btn.click(do_card_build, [card_name_txt, lora_dd, lora_weight, model_dd],
+                         [card_dd, outfit_dd, card_name_txt, card_status])
+
     gen_controls = {
         "model": model_dd,
         "vae": vae_dd,
@@ -3153,6 +3436,7 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
                     send_gen_btn = gr.Button("🚀 Send to Generate", variant="primary")
                     send_i2i_btn = gr.Button("🖼 Send to img2img", variant="secondary")
                     send_up_btn = gr.Button("🔍 Send to Upscale", variant="secondary")
+                png_tag_btn = gr.Button("🏷 Interrogate (WD14) → tags into the Generate prompt", size="sm")
                 png_action_status = gr.HTML("")
 
             with gr.Column(scale=1):
@@ -3207,6 +3491,20 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
                 *gen_controls["extra"],
             ],
         )
+
+        def do_png_tags(img, progress=gr.Progress()):
+            if img is None:
+                return gr.update(), '<p style="color:#f38ba8;font-size:13px;">⚠ No image loaded in PNG Info.</p>'
+            try:
+                from backend.wd_tagger import tag_image, tags_text
+                res = tag_image(img, progress=progress)
+            except Exception as e:
+                return gr.update(), f'<p style="color:#f38ba8;font-size:13px;">❌ Tagger failed: {html.escape(str(e))}</p>'
+            chars = ", ".join(f"{t} {p:.0%}" for t, p in res["character"]) or "none recognised"
+            return tags_text(res), (f'<p style="color:#a6e3a1;font-size:13px;">🏷 {len(res["general"])} tags sent '
+                                    f'to Generate · character: {html.escape(chars)}</p>')
+
+        png_tag_btn.click(do_png_tags, [png_input], [gen_controls["prompt"], png_action_status])
 
         def do_send_to_i2i(img):
             if img is None:
@@ -4094,6 +4392,10 @@ def _build_train_tab(gen_lora_dds=()):
                     scale=2)
                 autocap_btn = gr.Button("🤖 Auto-Caption All (BLIP)", scale=1)
                 unload_blip_btn = gr.Button("🗑️ Free BLIP RAM", scale=1)
+            with gr.Row():
+                wdtag_btn = gr.Button("🏷 Auto-Tag All (WD14 Danbooru tags — best for anime)", variant="primary",
+                                      scale=3)
+                wdtag_thr_sl = gr.Slider(0.2, 0.8, value=0.35, step=0.05, label="Tag threshold", scale=1)
             caption_status = gr.HTML("")
             gr.HTML(
                 '<div class="tr-note">'
@@ -4397,6 +4699,35 @@ def _build_train_tab(gen_lora_dds=()):
                     write_caption(img["path"], results[fn])
             return f'<p style="color:#a6e3a1">✅ Captioned {len(results)} images</p>'
 
+        def do_wdtag(folder, trigger, thr, progress=gr.Progress()):
+            if not folder or not Path(folder).is_dir():
+                return "❌ Set folder first."
+            from backend.dataset_manager import scan_images, write_caption
+            from backend.wd_tagger import tag_image, tags_text
+            from PIL import Image as _Img
+            imgs = scan_images(folder)
+            if not imgs:
+                return "❌ No images."
+            trig = (trigger or "").strip().strip(",")
+            done, failed = 0, []
+            for i, it in enumerate(imgs):
+                try:
+                    progress((i + 1) / len(imgs), desc=f"Tagging {Path(it['path']).name}")
+                except Exception:
+                    pass
+                try:
+                    with _Img.open(it["path"]) as im:
+                        tags = tags_text(tag_image(im, general_threshold=float(thr or 0.35)), exclude=trig)
+                except Exception as e:
+                    failed.append(f"{Path(it['path']).name}: {e}")
+                    continue
+                write_caption(it["path"], f"{trig}, {tags}" if trig and tags else (trig or tags))
+                done += 1
+            err = (f'<br><span style="color:#f38ba8;">{len(failed)} failed: {html.escape(failed[0])}</span>'
+                   if failed else "")
+            return (f'<p style="color:#a6e3a1">✅ Tagged {done} images (trigger word first, then Danbooru tags)'
+                    f'{err}</p>')
+
         def do_unload_blip():
             from backend.auto_tagger import unload_blip
             unload_blip()
@@ -4559,6 +4890,7 @@ def _build_train_tab(gen_lora_dds=()):
         prepare_btn.click(do_prepare, [train_folder, trigger_word_txt, train_res_dd],
                           [prepare_status])
 
+        wdtag_btn.click(do_wdtag, [train_folder, trigger_word_txt, wdtag_thr_sl], [caption_status])
         autocap_btn.click(
             do_autocaption,
             [train_folder, trigger_word_txt, caption_prefix_txt],
