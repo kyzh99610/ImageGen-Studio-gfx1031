@@ -630,11 +630,14 @@ def _clean_extra(extra: dict | None) -> dict:
         "fd_denoise": min(0.8, max(0.1, _num(e.get("fd_denoise"), 0.4))),
         "fd_mode": e.get("fd_mode") if e.get("fd_mode") in ("auto", "anime", "photo") else "auto",
         "fd_prompt": str(e.get("fd_prompt") or "")[:500],
+        "pag_scale": min(6.0, max(0.0, _num(e.get("pag_scale"), 0.0))),
+        "freeu": bool(e.get("freeu")),
+        "cfg_rescale": min(1.0, max(0.0, _num(e.get("cfg_rescale"), 0.0))),
     }
 
 
 _XY_AXES = ["none", "CFG", "Steps", "Sampler", "Seed", "LoRA 1 weight", "CLIP skip", "Hires denoise",
-            "Prompt S/R", "Checkpoint"]
+            "PAG scale", "CFG rescale", "Prompt S/R", "Checkpoint"]
 
 
 def _xy_values(axis: str, text: str) -> tuple[list, str]:
@@ -989,9 +992,15 @@ def _build_generate_tab():
                             token_html = gr.HTML(token_report_html(
                                 _ls.get("prompt", ""), _ls.get("negative_prompt", DEFAULT_NEGATIVE),
                                 None if tokenizer_ready() else "estimate"))
+                        # Danbooru tag autocomplete for the tag being typed at the end of the prompt
+                        tag_ac_ds = gr.Dataset(label="🔤 Danbooru tags — click to complete", components=["textbox"],
+                                               samples=[["-"]], type="index", visible=False, samples_per_page=12)
+                        tag_ac_state = gr.State([])
                         with gr.Row():
                             tidy_btn = gr.Button("🧹 Tidy prompts — merge duplicate tags (strongest weight wins)",
-                                                 size="sm", variant="secondary")
+                                                 size="sm", variant="secondary", scale=3)
+                            spell_btn = gr.Button("💡 Fix Danbooru spellings", size="sm", variant="secondary",
+                                                  scale=2)
                         with gr.Accordion("🎲 Wildcards — different picks for every image", open=False):
                             from backend.wildcards import list_wildcards as _list_wc
                             gr.HTML('<p style="color:#a6adc8;font-size:13px;margin:0 0 4px;">'
@@ -1023,7 +1032,7 @@ def _build_generate_tab():
                                 label="Sampler / Scheduler",
                                 choices=list(SCHEDULER_MAP.keys()),
                                 value=_ls.get("scheduler", "DPM++ 2M Karras"),
-                                info="DPM++ 2M Karras is the best all-rounder.",
+                                info="DPM++ 2M Karras: best all-rounder · DPM++ 2M AYS: similar quality in 10–12 steps.",
                             )
                             steps_sl    = gr.Slider(1, 150, value=_ls.get("steps", DEFAULT_STEPS), step=1,  label="Steps",
                                                     info="25–35 is the sweet spot.")
@@ -1101,6 +1110,19 @@ def _build_generate_tab():
                                                        value=_ls.get("fd_prompt", ""),
                                                        placeholder="e.g. detailed eyes, beautiful face",
                                                        info="Added to your prompt for the face pass only.")
+                        with gr.Accordion("🎚 Quality boosters — PAG, FreeU, CFG rescale",
+                                          open=bool(_ls.get("pag_scale") or _ls.get("freeu"))):
+                            with gr.Row():
+                                pag_sl = gr.Slider(0, 6, value=_ls.get("pag_scale", 0), step=0.5, label="PAG scale",
+                                                   info="Perturbed-attention guidance: cleaner structure, anatomy and "
+                                                        "backgrounds. 0 = off · 2–3 recommended · ~1.5× the time.")
+                                cfg_rescale_sl = gr.Slider(0, 1, value=_ls.get("cfg_rescale", 0), step=0.05,
+                                                           label="CFG rescale",
+                                                           info="Tames burned colours at high CFG. 0 = auto: 0.7 for "
+                                                                "v-prediction models (NoobAI v-pred…), else off.")
+                            freeu_cb = gr.Checkbox(label="FreeU", value=bool(_ls.get("freeu", False)),
+                                                   info="Re-weights UNet features: more detail and contrast at no "
+                                                        "cost; can over-saturate some anime models.")
                         last_seed_state = gr.State([])      # seed of each image in the gallery
                         selected_idx_state = gr.State(0)    # gallery image the user clicked
 
@@ -1581,6 +1603,9 @@ def _build_generate_tab():
             steps, cfg, width, height, batch, seed, strength, img2img=bool(use_i2i and init_img is not None))
         prompt, neg_prompt = prompt or "", neg_prompt or ""
         ex = _clean_extra(extra)
+        # PAG / FreeU / CFG rescale are read by backend.sampling.run_pipe for every pass
+        # (txt2img, hires, face detail) of this run; cfg_rescale 0 = auto (0.7 for v-pred)
+        sd.boosters = {"pag": ex["pag_scale"], "freeu": ex["freeu"], "cfg_rescale": ex["cfg_rescale"] or None}
         from backend import wildcards as _wc
         if template is None and (_wc.is_dynamic(prompt) or _wc.is_dynamic(neg_prompt)):
             # Dynamic prompt: each image gets its own picks (from its own seed), one at a time
@@ -1606,6 +1631,7 @@ def _build_generate_tab():
                 infos.append(f'<p style="color:#cba6f7;font-size:13px;margin:2px 0;">🎲 #{i + 1}: '
                              f'<code>{html.escape(p_i)}</code></p>' + info_i)
             sd.last_seeds = seeds_used
+            sd.boosters = {}
             if missing:
                 infos.insert(0, '<p style="color:#f9e2af;font-size:13px;">⚠ Unknown wildcard(s): '
                              + ", ".join(f"<code>__{html.escape(m)}__</code>" for m in missing)
@@ -1688,7 +1714,14 @@ def _build_generate_tab():
             var_seeds = list(getattr(sd, "last_var_seeds", None) or []) if ex["var_strength"] > 0 else []
             hires_note = ""
             if ex["hires_on"] and imgs and not (use_i2i and init_img is not None):
-                imgs, hires_note = _hires_pass(imgs, seeds, prompt, neg_prompt, cfg, scheduler, ex, progress)
+                # PAG shapes the composition in the first pass; in the hires pass it only cost time
+                # (1248×1824: ~130 s instead of ~75) and VRAM (peak 10.9 of 12 GB, batch 3)
+                _b = dict(getattr(sd, "boosters", None) or {})
+                sd.boosters = dict(_b, pag=0)
+                try:
+                    imgs, hires_note = _hires_pass(imgs, seeds, prompt, neg_prompt, cfg, scheduler, ex, progress)
+                finally:
+                    sd.boosters = _b
                 sd.last_seeds = seeds            # the hires img2img passes overwrote them
             fd_note = ""
             if ex["fd_on"] and imgs:
@@ -1714,6 +1747,7 @@ def _build_generate_tab():
                 **({"strength": strength, "source_image": Path(src).name if src else None} if i2i else {}),
                 **({"prompt_template": template["prompt"],
                     "negative_template": template["negative"] or None} if template else {}),
+                **_booster_record(sd, ex),
             ), pipe=sd)
             if saved:
                 info_html += (f'<p style="color:#9399b2;font-size:13px;margin:2px 0;">'
@@ -1747,6 +1781,7 @@ def _build_generate_tab():
             return [], f'<p style="color:#f38ba8;font-size:13px;">❌ Generation failed: {err}</p>', []
         finally:
             _generation_abort.clear()
+            sd.boosters = {}      # the Bridge / Inpaint buttons must not inherit this run's PAG / FreeU
 
     # ── Auto-Loop generator (yields after each batch) ────────────────────────
     def do_autoloop(
@@ -1756,11 +1791,13 @@ def _build_generate_tab():
         clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
         hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
         fd_on=False, fd_denoise=0.4, fd_mode="auto", fd_prompt="",
+        pag_scale=0.0, freeu=False, cfg_rescale=0.0,
     ):
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
                                   hires_on=hires_on, hires_scale=hires_scale, hires_denoise=hires_denoise,
                                   hires_steps=hires_steps, hires_upscaler=hires_upscaler, fd_on=fd_on,
-                                  fd_denoise=fd_denoise, fd_mode=fd_mode, fd_prompt=fd_prompt))
+                                  fd_denoise=fd_denoise, fd_mode=fd_mode, fd_prompt=fd_prompt,
+                                  pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale))
         import random
         # Guard against double-start
         if _autoloop_active.is_set():
@@ -2330,12 +2367,14 @@ def _build_generate_tab():
                        clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
                        hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
                        fd_on=False, fd_denoise=0.4, fd_mode="auto", fd_prompt="",
+                       pag_scale=0.0, freeu=False, cfg_rescale=0.0,
                        progress=gr.Progress()):
         _generation_abort.clear()          # a new run starts; Stop from here on counts
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
                                   hires_on=hires_on, hires_scale=hires_scale, hires_denoise=hires_denoise,
                                   hires_steps=hires_steps, hires_upscaler=hires_upscaler, fd_on=fd_on,
-                                  fd_denoise=fd_denoise, fd_mode=fd_mode, fd_prompt=fd_prompt))
+                                  fd_denoise=fd_denoise, fd_mode=fd_mode, fd_prompt=fd_prompt,
+                                  pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale))
         w1, w2, w3 = (_num(w, 0.8) for w in (w1, w2, w3))
         ok, status = _ensure_model(model_path, vae_path, progress)
         if _generation_abort.is_set():
@@ -2363,6 +2402,7 @@ def _build_generate_tab():
             hires_denoise=extra["hires_denoise"], hires_steps=extra["hires_steps"],
             hires_upscaler=extra["hires_upscaler"], fd_on=extra["fd_on"], fd_denoise=extra["fd_denoise"],
             fd_mode=extra["fd_mode"], fd_prompt=extra["fd_prompt"],
+            pag_scale=extra["pag_scale"], freeu=extra["freeu"], cfg_rescale=extra["cfg_rescale"],
         ))
         seeds = getattr(sd, "last_seeds", None) or []
         return (imgs, info_html, last, status, (list(seeds) if imgs else gr.update()),
@@ -2376,6 +2416,7 @@ def _build_generate_tab():
         init_image, strength_sl, use_i2i_cb,
         clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
         hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
+        pag_sl, freeu_cb, cfg_rescale_sl,
     ]
     gen_event = generate_btn.click(
         lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
@@ -2389,7 +2430,8 @@ def _build_generate_tab():
     def do_xy_grid(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, auto_quality, prompt, neg_prompt,
                    scheduler, steps, cfg, width, height, batch, seed, init_img, strength, use_i2i,
                    clip_skip, var_seed, var_strength, hires_on, hires_scale, hires_denoise, hires_steps,
-                   hires_upscaler, fd_on, fd_denoise, fd_mode, fd_prompt, x_axis, x_text, y_axis, y_text,
+                   hires_upscaler, fd_on, fd_denoise, fd_mode, fd_prompt, pag_scale, freeu, cfg_rescale,
+                   x_axis, x_text, y_axis, y_text,
                    progress=gr.Progress()):
         import random
         _generation_abort.clear()
@@ -2413,7 +2455,7 @@ def _build_generate_tab():
         base_extra = dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength, hires_on=hires_on,
                           hires_scale=hires_scale, hires_denoise=hires_denoise, hires_steps=hires_steps,
                           hires_upscaler=hires_upscaler, fd_on=fd_on, fd_denoise=fd_denoise, fd_mode=fd_mode,
-                          fd_prompt=fd_prompt)
+                          fd_prompt=fd_prompt, pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale)
         cells, t0, lora_w_now, model_now = [], time.time(), None, model_path
         total = len(xs) * len(ys)
         try:
@@ -2431,6 +2473,8 @@ def _build_generate_tab():
                         elif axis == "LoRA 1 weight": p["lw"] = v
                         elif axis == "CLIP skip": p["extra"]["clip_skip"] = v
                         elif axis == "Hires denoise": p["extra"].update(hires_on=True, hires_denoise=v)
+                        elif axis == "PAG scale": p["extra"]["pag_scale"] = v
+                        elif axis == "CFG rescale": p["extra"]["cfg_rescale"] = v
                         elif axis == "Prompt S/R": p["prompt"] = p["prompt"].replace(vals[0], v)
                         elif axis == "Checkpoint": p["model"] = v
                     if p["model"] != model_now:           # Checkpoint axis: switch models
@@ -2466,8 +2510,11 @@ def _build_generate_tab():
         while len(cells) % cols:                  # stopped mid-row: pad with blanks
             from PIL import Image as _I
             cells.append(_I.new("RGB", cells[0].size, (30, 30, 46)))
-        title = f"seed {seed} · {Path(str(sd.current_model)).stem} · X: {x_axis}" + (
-            f" · Y: {y_axis}" if y_axis not in (None, "none") else "")
+        # (a varied seed / checkpoint is in the axis labels — the base value would be wrong here)
+        axes_used = {x_axis, y_axis}
+        title = " · ".join([*([f"seed {seed}"] if "Seed" not in axes_used else []),
+                            *([Path(str(sd.current_model)).stem] if "Checkpoint" not in axes_used else []),
+                            f"X: {x_axis}"]) + (f" · Y: {y_axis}" if y_axis not in (None, "none") else "")
         grid = _xy_grid(cells, xl, yl[: len(cells) // cols], title)
         from PIL.PngImagePlugin import PngInfo
         info = PngInfo()
@@ -2589,11 +2636,11 @@ def _build_generate_tab():
                         lora_dd3, lora_weight3, strength_sl, use_i2i_cb, i2i_restore_html,
                         clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl,
                         hires_denoise_sl, hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb,
-                        fd_prompt_txt, recreate_btn]
+                        fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl, recreate_btn]
 
     def on_i2i_drop(img, restore):
         keep = [gr.update()] * 18
-        tail = [gr.update()] * 12 + [gr.update(visible=False)]
+        tail = [gr.update()] * 15 + [gr.update(visible=False)]
         if img is None:
             return (*keep, gr.update(), "", *tail)
         if not restore:
@@ -2706,6 +2753,7 @@ def _build_generate_tab():
             loop_max_batches, loop_delay,
             clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
             hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
+        pag_sl, freeu_cb, cfg_rescale_sl,
         ],
         [output_gallery, gen_info, loop_status, last_generated_images, last_seed_state],
     )
@@ -2725,6 +2773,62 @@ def _build_generate_tab():
     _gen_vram_inputs = [model_dd, width_sl, height_sl, batch_sl, lora_dd, vae_dd, use_i2i_cb]
     for _w in _gen_vram_inputs:
         _w.change(_update_gen_vram, _gen_vram_inputs, [_gen_vram_bar])
+
+    # ── Danbooru tag autocomplete ──────────────────────────────────────────
+    _tag_list_loading = []
+
+    def _partial_tag(prompt):
+        """The tag being typed: text after the last comma / line break (None if it's done)."""
+        p = prompt or ""
+        if not p or p[-1] in ",\n)]>}":
+            return None
+        cut = max(p.rfind(","), p.rfind("\n"))
+        part = p[cut + 1:].lstrip(" (")
+        return part if 2 <= len(part) <= 40 and "<" not in part and "__" not in part and "{" not in part else None
+
+    def do_tag_suggest(prompt):
+        from backend import danbooru_tags as dt
+        part = _partial_tag(prompt)
+        if part is None:
+            return gr.update(visible=False), []
+        if not dt.load(download=False):
+            if not _tag_list_loading:          # fetch the ~300 KB list once, in the background
+                _tag_list_loading.append(1)
+                threading.Thread(target=dt.load, daemon=True).start()
+            return gr.update(visible=False), []
+        sug = [(t, n) for t, n in dt.suggest(part) if t != part.strip().lower()]
+        if not sug:
+            return gr.update(visible=False), []
+        fmt = lambda n: f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(n)
+        return (gr.update(samples=[[f"{t}  ·  {fmt(n)}"] for t, n in sug], visible=True),
+                [t for t, _ in sug])
+
+    def do_tag_complete(prompt, idx, tags):
+        try:
+            tag = tags[int(idx)]
+        except (TypeError, ValueError, IndexError):
+            return gr.update(), gr.update(visible=False), []
+        part = _partial_tag(prompt)
+        head = (prompt or "")[: len(prompt or "") - len(part)] if part else (prompt or "")
+        # keep a "(" the user opened for weighting; escape brackets inside the tag itself
+        esc = tag.replace("(", "\\(").replace(")", "\\)")
+        return head + esc + ", ", gr.update(visible=False), []
+
+    def do_fix_spellings(pos, neg):
+        from backend.prompt_tools import apply_danbooru_fixes
+        p2, f1 = apply_danbooru_fixes(pos or "")
+        n2, f2 = apply_danbooru_fixes(neg or "")
+        fixes = f1 + f2
+        note = ('<p style="font-size:13px;color:#a6e3a1;margin:2px 0;">💡 Fixed: '
+                + ", ".join(f"{html.escape(a)} → <b>{html.escape(b)}</b>" for a, b in fixes) + "</p>") if fixes else \
+            '<p style="font-size:13px;color:#a6adc8;margin:2px 0;">💡 No near-miss Danbooru tags found.</p>'
+        return p2, n2, note
+
+    spell_btn.click(do_fix_spellings, [prompt_txt, neg_prompt_txt], [prompt_txt, neg_prompt_txt, gen_info])
+
+    prompt_txt.input(do_tag_suggest, [prompt_txt], [tag_ac_ds, tag_ac_state],
+                     trigger_mode="always_last", show_progress="hidden")
+    tag_ac_ds.click(do_tag_complete, [prompt_txt, tag_ac_ds, tag_ac_state], [prompt_txt, tag_ac_ds, tag_ac_state])
 
     # ── Wildcards ───────────────────────────────────────────────────────────
     def do_wc_add(prompt, idx, names):
@@ -2908,7 +3012,7 @@ def _build_generate_tab():
         "vae": vae_dd,
         "extra": [clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl,
                   hires_denoise_sl, hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb,
-                  fd_prompt_txt],
+                  fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl],
         "lora_dd1": lora_dd,
         "lora_w1": lora_weight,
         "lora_w2": lora_weight2,
@@ -3464,7 +3568,7 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
             if img is None:
                 return (*[gr.update()] * 16,
                         '<p style="color:#f38ba8;font-size:13px;">⚠ No image loaded in PNG Info.</p>',
-                        *[gr.update()] * 12)
+                        *[gr.update()] * 15)
             plan = _restore_plan(read_png_info(img))
             u = lambda v: gr.update() if v is None else v
             lora_ups = [gr.update()] * 6
@@ -5384,6 +5488,11 @@ def _restore_plan(meta: dict) -> dict:
     sampler = (meta.get("sampler") or "").lower()
     plan["scheduler"] = next((n for n in SCHEDULER_MAP if n.lower() == sampler), None) or next(
         (n for n in SCHEDULER_MAP if sampler and (sampler in n.lower() or n.lower() in sampler)), None)
+    # before record format 2 this app's "DPM++ 2M Karras" / "DPM++ SDE Karras" ran without
+    # Karras sigmas — restore what actually made the image
+    from backend.sampling import LEGACY_NAMES
+    if rec and int(_num(rec.get("format"), 1)) < 2 and plan["scheduler"] in LEGACY_NAMES:
+        plan["scheduler"] = LEGACY_NAMES[plan["scheduler"]]
     for k in ("steps", "cfg_scale", "seed", "width", "height", "strength"):
         plan[k] = meta.get(k)
     # checkpoint
@@ -5426,6 +5535,9 @@ def _restore_plan(meta: dict) -> dict:
     plan["var_strength"] = float(_num(meta.get("var_strength"), 0.0)) if meta.get("var_seed") is not None else 0.0
     plan["hires"] = meta.get("hires") if isinstance(meta.get("hires"), dict) else None
     plan["face_detail"] = meta.get("face_detail") if isinstance(meta.get("face_detail"), dict) else None
+    plan["pag_scale"] = float(_num(meta.get("pag_scale"), 0.0))
+    plan["freeu"] = bool(meta.get("freeu"))
+    plan["cfg_rescale"] = float(_num(meta.get("cfg_rescale"), 0.0))
     plan["mode"] = rec.get("mode") or ("img2img" if meta.get("strength") is not None else "txt2img")
     plan["exact"] = bool(rec)
     return plan
@@ -5447,7 +5559,10 @@ def _plan_extra_updates(plan: dict) -> list:
             ex["hires_scale"] if h else keep, ex["hires_denoise"] if h else keep,
             ex["hires_steps"] if h else keep, ex["hires_upscaler"] if h else keep,
             bool(fd), fdx["fd_denoise"] if fd else keep, fdx["fd_mode"] if fd else keep,
-            fdx["fd_prompt"] if fd else keep]
+            fdx["fd_prompt"] if fd else keep,
+            # boosters are part of how the image looks: always set (off when the record has none)
+            *(lambda b: [b["pag_scale"], b["freeu"], b["cfg_rescale"]])(_clean_extra(dict(
+                pag_scale=plan.get("pag_scale"), freeu=plan.get("freeu"), cfg_rescale=plan.get("cfg_rescale"))))]
 
 
 def _plan_summary(plan: dict) -> str:
@@ -5544,11 +5659,26 @@ def _unique_output(base: str) -> Path:
     return path
 
 
+def _booster_record(pipe, ex: dict) -> dict:
+    """PAG / FreeU / CFG rescale as they were applied (auto CFG rescale resolved), only
+    the ones in use — so a plain image's record stays as before."""
+    from backend.sampling import boosters
+    b = boosters(pipe)
+    out = {}
+    if b["pag"] > 0:
+        out["pag_scale"] = b["pag"]
+    if b["freeu"]:
+        out["freeu"] = True
+    if b["cfg_rescale"] > 0:
+        out["cfg_rescale"] = round(b["cfg_rescale"], 3)
+    return out
+
+
 def _gen_record(pipe, **settings) -> dict:
     """Everything needed to make an image again: settings + the exact model, VAE and LoRA
     files (name, AutoV2 hash when known) that were loaded in `pipe`."""
     from backend.model_hash import autov2, hash_later
-    rec = {"app": "ImageGen Studio", "format": 1}
+    rec = {"app": "ImageGen Studio", "format": 2}   # 2: Karras samplers use Karras sigmas
     rec.update({k: v for k, v in settings.items() if v is not None})
     if pipe is not None:
         mp = str(getattr(pipe, "current_model", "") or "")
@@ -5558,6 +5688,8 @@ def _gen_record(pipe, **settings) -> dict:
         # a local file → its name; a Hugging Face repo ID ("org/name-1.0") → kept whole
         rec["model"] = {"file": Path(mp).name if Path(mp).is_file() else mp,
                         "family": getattr(pipe, "model_family", ""), "sha256_10": autov2(mp)}
+        if (getattr(pipe, "prediction", None) or {}).get("v_pred"):
+            rec["model"]["prediction"] = "v"
         rec["vae"] = {"file": Path(vp).name, "sha256_10": autov2(vp)} if vp else None
         rec["loras"] = [{"file": Path(path).name, "weight": round(float(w), 3), "sha256_10": autov2(path)}
                         for name, path, w in loras]
@@ -5586,6 +5718,12 @@ def _params_text(rec: dict) -> str:
     fd = rec.get("face_detail") or {}
     if fd:
         parts.append(f"Face detail: denoise {fd['denoise']:g} ({fd['detector']})")
+    if rec.get("pag_scale"):
+        parts.append(f"PAG scale: {rec['pag_scale']:g}")
+    if rec.get("freeu"):
+        parts.append("FreeU: on")
+    if rec.get("cfg_rescale"):
+        parts.append(f"CFG rescale: {rec['cfg_rescale']:g}")
     if rec.get("mode") == "inpaint":
         parts.append(f"Inpaint: denoise {rec.get('strength')}, padding {rec.get('inpaint_padding')}")
     model = rec.get("model") or {}

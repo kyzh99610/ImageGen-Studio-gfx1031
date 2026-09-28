@@ -335,8 +335,50 @@ def token_report_html(prompt: str, negative: str = "", tokenizer=None, important
             'cut off, but tags in the first chunk steer the image most. BREAK starts a new chunk.</span>')
     warn = "".join(f'<br><span style="color:#f9e2af;">⚠ {w}</span>'
                    for w in prompt_warnings(prompt, negative, important, tokenizer))
+    fixes = danbooru_hints(prompt) + danbooru_hints(negative)
+    hint = ('<br><span style="color:#89dceb;">💡 Danbooru spelling (anime models learned these exact tags): '
+            + ", ".join(f"<i>{_esc(a)}</i> → <b>{_esc(b)}</b>" for a, b in fixes) + "</span>") if fixes else ""
     return (f'<p style="font-size:13px;color:#bac2de;margin:2px 0;">📏 {one("Prompt", prompt)} · '
-            f'{one("Negative", negative)}{note}{warn}</p>')
+            f'{one("Negative", negative)}{note}{warn}{hint}</p>')
+
+
+def danbooru_hints(prompt: str, limit: int = 6) -> list[tuple[str, str]]:
+    """(tag as written, the Danbooru tag it's a near-miss of) — only when the tag list is
+    already on disk (no download from here) and only for plain tags."""
+    try:
+        from backend.danbooru_tags import did_you_mean
+    except Exception:
+        return []
+    out = []
+    tags = split_tags(prompt or "")
+    if tags and (prompt or "").rstrip()[-1:] not in (",", "\n", ""):
+        tags = tags[:-1]            # still being typed ("thigh" on its way to "thighhighs")
+    for raw in tags:
+        if raw == "BREAK" or raw.startswith("<") or "{" in raw or "__" in raw:
+            continue
+        core = parse_tag(raw)[2]
+        if not core or any(c in core for c in "()[]|:"):
+            continue
+        m = did_you_mean(core)
+        if m and (core, m) not in out:
+            out.append((core, m))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def apply_danbooru_fixes(prompt: str) -> tuple[str, list[tuple[str, str]]]:
+    """The prompt with every danbooru_hints() near-miss replaced (weights kept:
+    "(long haired:1.2)" → "(long hair:1.2)"), and the list of changes."""
+    fixes = danbooru_hints(prompt + ",", limit=100)
+    if not fixes:
+        return prompt, []
+    out = []
+    for raw in split_tags(prompt):
+        core = parse_tag(raw)[2] if raw != "BREAK" else ""
+        new = next((b for a, b in fixes if a == core), None)
+        out.append(raw.replace(core, new.replace("(", "\\(").replace(")", "\\)"), 1) if new else raw)
+    return join_tags(out), fixes
 
 
 def _esc(s: str) -> str:
