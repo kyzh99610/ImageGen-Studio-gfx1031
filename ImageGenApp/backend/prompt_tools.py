@@ -119,17 +119,34 @@ def format_tag(core: str, weight: float) -> str:
     return f"({core}:{round(weight, 2):g})"
 
 
+_DYNAMIC = re.compile(r"\{[^{}]*\||(?<![\w])__[A-Za-z0-9][\w\-/ ]*?__(?![\w])")
+
+
+def _base_keys(base: str) -> list[tuple[str, float, str]]:
+    """(key, weight, raw) for the base prompt's tags. A wildcard group written twice
+    ("{a|b|c}, {a|b|c}") means two picks, so repeats of one get their own keys."""
+    out, seen = [], set()
+    for raw in split_tags(base):
+        if raw == "BREAK":
+            continue
+        k, w, _ = parse_tag(raw)
+        if k in seen and _DYNAMIC.search(raw):
+            k = f"{k}#{len(out)}"
+        seen.add(k)
+        out.append((k, w, raw))
+    return out
+
+
 def merge_prompts(base: str, *additions: str) -> str:
     """base + additions, every tag once at its strongest weight, first-seen order.
     Unchanged tags keep the user's own spelling; BREAK markers are kept."""
     # Fast path: nothing in the additions changes an existing tag → keep the user's text as
     # typed (line breaks, spacing) and just append the new tags.
     base_w: dict[str, float] = {}
-    for raw in split_tags(base):
-        if raw != "BREAK":
-            k, w, _ = parse_tag(raw)
-            base_w[k] = max(w, base_w.get(k, w))
-    if len(base_w) == len([t for t in split_tags(base) if t != "BREAK"]):   # base has no duplicates
+    bk = _base_keys(base)
+    for k, w, _ in bk:
+        base_w[k] = max(w, base_w.get(k, w))
+    if len(base_w) == len(bk):   # base has no duplicates
         new, new_w, touches = [], {}, False
         for text in additions:
             for raw in split_tags(text):
@@ -151,7 +168,8 @@ def merge_prompts(base: str, *additions: str) -> str:
             return head + (", " if head and new else "") + ", ".join(new) if new else (base or "")
     order: list[str] = []
     best: dict[str, tuple[float, str]] = {}
-    for text in (base, *additions):
+    for n_text, text in enumerate((base, *additions)):
+        seen_here: set[str] = set()
         for raw in split_tags(text):
             if raw == "BREAK":
                 k = f"BREAK#{len(order)}"
@@ -160,6 +178,9 @@ def merge_prompts(base: str, *additions: str) -> str:
             key, w, core = parse_tag(raw)
             if not key:
                 continue
+            if n_text == 0 and key in seen_here and _DYNAMIC.search(raw):
+                key = f"{key}#{len(order)}"          # "{a|b}, {a|b}" = two picks: keep both
+            seen_here.add(key)
             if key not in best:
                 order.append(key); best[key] = (w, raw)
             elif w > best[key][0] + 1e-6:
@@ -180,7 +201,7 @@ def tidy_prompt(prompt: str) -> tuple[str, list[str]]:
     """merge_prompts on one prompt + a human-readable list of what was merged."""
     seen: dict[str, list[str]] = {}
     for raw in split_tags(prompt):
-        if raw != "BREAK":
+        if raw != "BREAK" and not _DYNAMIC.search(raw):
             seen.setdefault(parse_tag(raw)[0], []).append(raw)
     dupes = [f"{v[0]} ×{len(v)}" if len(set(v)) == 1 else " / ".join(v)
              for v in seen.values() if len(v) > 1]
@@ -323,23 +344,41 @@ def _esc(s: str) -> str:
     return escape(s)
 
 
+def release_parser_cache():
+    """Empty pyparsing's packrat cache. Compel parses prompts with pyparsing, and packrat
+    caching (switched on globally by some library) stores parse exceptions *with their
+    tracebacks* — so the Compel call frames, the Compel object and through it the text
+    encoders stayed alive after the model was unloaded (1.6 GB of VRAM for SDXL)."""
+    try:
+        import pyparsing
+        pyparsing.ParserElement.reset_cache()
+    except Exception:
+        pass
+
+
 def encode_chunked(compel, prompt: str, tokenizer=None, sdxl: bool = False):
     """Encode each tag-aligned chunk with Compel and concatenate: [1, 77·k, dim]
     (+ the first chunk's pooled embedding for SDXL, as A1111 does)."""
     import torch
     from backend.prompt_syntax import a1111_to_compel
-    chunks = chunk_prompt(prompt, tokenizer)
-    embs, pooled = [], None
-    for tags in chunks:
-        out = compel(a1111_to_compel(", ".join(tags)))
-        if sdxl:
-            e, p = out
-            pooled = p if pooled is None else pooled
-        else:
-            e = out
-        embs.append(e)
-    emb = torch.cat(embs, dim=1) if len(embs) > 1 else embs[0]
-    return (emb, pooled) if sdxl else emb
+    # Frames on the Compel call path are kept by pyparsing's packrat cache (see
+    # release_parser_cache); a `compel` local here would keep the text encoders alive.
+    try:
+        chunks = chunk_prompt(prompt, tokenizer)
+        embs, pooled = [], None
+        for tags in chunks:
+            out = compel(a1111_to_compel(", ".join(tags)))
+            if sdxl:
+                e, p = out
+                pooled = p if pooled is None else pooled
+            else:
+                e = out
+            embs.append(e)
+        emb = torch.cat(embs, dim=1) if len(embs) > 1 else embs[0]
+        return (emb, pooled) if sdxl else emb
+    finally:
+        compel = tokenizer = out = None
+        release_parser_cache()
 
 
 def pad_to_same_chunks(compel, a, b, sdxl: bool = False):
@@ -347,7 +386,11 @@ def pad_to_same_chunks(compel, a, b, sdxl: bool = False):
     import torch
     if a.shape[1] == b.shape[1]:
         return a, b
-    empty = compel("")
+    try:
+        empty = compel("")
+    finally:
+        compel = None          # (see encode_chunked)
+        release_parser_cache()
     empty = empty[0] if sdxl else empty
     empty = empty.to(a.dtype)
     def pad(x, n):
