@@ -839,12 +839,17 @@ class SDXLPipeline:
             self.loaded_loras = []
             self._lora_adapters = {}
             self.img2img_pipe = None
+            from backend.sampling import detect_prediction, configure_prediction
+            self.prediction = detect_prediction(model_path_or_id) if is_local else {}
+            configure_prediction(self.pipe, self.prediction)
+            if self.prediction.get("v_pred"):
+                print(f"[SDXL Load] v-prediction checkpoint (zero-terminal SNR: {self.prediction['zero_snr']})")
             _load_embeddings(self.pipe)
             # LoRA restore snapshot is taken lazily on first load_lora():
             # saves a full CPU copy of the weights (~6.6 GB for SDXL) when no LoRA is used.
 
             model_name = path.stem if is_local else model_path_or_id
-            fam = self.model_family.capitalize()
+            fam = self.model_family.capitalize() + (" · v-pred" if self.prediction.get("v_pred") else "")
             return f"✅ Loaded: {model_name} ({fam}, {self.device})"
 
         except Exception as e:
@@ -861,6 +866,8 @@ class SDXLPipeline:
         # the cached inpaint pipe (face detail / inpaint) holds the old UNet, TEs and VAE:
         # left in place it kept ~2.5 GB of VRAM after switching SD 1.5 → SDXL
         self._inpaint_pipe = None
+        self._pag_pipes = None
+        self.prediction = {}
         self.current_model = None
         self.loaded_loras = []
         self._lora_adapters = {}
@@ -1209,18 +1216,19 @@ class SDXLPipeline:
             torch.cuda.empty_cache()
 
         try:
-            with torch.no_grad():
-                result = self.pipe(
-                    **embeds,
-                    width=width,
-                    height=height,
-                    num_inference_steps=steps,
-                    guidance_scale=cfg_scale,
-                    generator=generator,
-                    num_images_per_prompt=batch_size,
-                    **lat_kw,
-                    **cb_kwargs,
-                )
+            from backend.sampling import run_pipe
+            result = run_pipe(
+                self, self.pipe, "txt2img",
+                **embeds,
+                width=width,
+                height=height,
+                num_inference_steps=steps,
+                guidance_scale=cfg_scale,
+                generator=generator,
+                num_images_per_prompt=batch_size,
+                **lat_kw,
+                **cb_kwargs,
+            )
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
             if "out of memory" in str(e).lower() or isinstance(e, torch.cuda.OutOfMemoryError):
                 gc.collect()
@@ -1340,7 +1348,9 @@ class SDXLPipeline:
             with torch.no_grad():
                 if "cuda" in self.device:
                     init_image = self._encode_image(init_image, generator)
-                result = self.img2img_pipe(
+                from backend.sampling import run_pipe
+                result = run_pipe(
+                    self, self.img2img_pipe, "img2img",
                     **embeds,
                     image=init_image,
                     strength=strength,

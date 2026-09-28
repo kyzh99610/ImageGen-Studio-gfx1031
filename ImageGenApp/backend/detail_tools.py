@@ -105,11 +105,12 @@ def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, nega
                 step_callback(i + 1, steps)
                 return kw
             cb = {"callback_on_step_end": _cb}
+        from backend.sampling import run_pipe      # FreeU / CFG rescale as in the main pass
         with torch.inference_mode():
-            lat = pipe(**embeds, image=crop.resize((rw, rh), Image.LANCZOS),
-                       mask_image=crop_mask.resize((rw, rh), Image.NEAREST), width=rw, height=rh,
-                       strength=float(denoise), num_inference_steps=int(steps), guidance_scale=float(cfg),
-                       generator=generator, output_type="latent", **cb).images
+            lat = run_pipe(sdp, pipe, "inpaint", **embeds, image=crop.resize((rw, rh), Image.LANCZOS),
+                           mask_image=crop_mask.resize((rw, rh), Image.NEAREST), width=rw, height=rh,
+                           strength=float(denoise), num_inference_steps=int(steps), guidance_scale=float(cfg),
+                           generator=generator, output_type="latent", **cb).images
         result = sdp._decode_latents(pipe.vae, lat)[0].resize((cw, ch), Image.LANCZOS)
     finally:
         pipe = embeds = lat = cb = None
