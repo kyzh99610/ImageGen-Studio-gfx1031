@@ -108,6 +108,9 @@ window, shows a loading screen while it starts, and frees the GPU when you close
   sampler / LoRA weight / prompt words side by side.
 - **✨ Face detail** (ADetailer-style: faces redrawn at full resolution) and **🖌 Inpaint** (paint an area,
   redraw only that part with your model and LoRAs).
+- **Anime helpers:** 🎴 character cards (checkpoint + LoRAs + tags + outfits in one click, built from a character
+  LoRA's Civitai prompts), 🎲 wildcards (`{a|b}`, `__outfit__`: different picks per image, reproducible per seed),
+  🏷 WD14 interrogate / dataset auto-tagging, and quality tags matched to the model family (Illustrious, Pony, SD 1.5).
 - **Batch folders** for the upscaler and the watermark remover (auto-detect + LaMa), e.g. to clean a LoRA training set.
 - **Reproducible images:** every PNG records the checkpoint, VAE, LoRAs + weights and all settings (A1111-compatible,
   incl. model hash). Drop one into img2img and everything comes back.
@@ -175,7 +178,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 82 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
+That runs 86 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
 
 ## Credits and licenses
 

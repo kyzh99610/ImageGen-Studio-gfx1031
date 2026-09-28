@@ -1,0 +1,19 @@
+# one option per line; use in a prompt as __outfit__
+school uniform, pleated skirt
+serafuku, sailor collar, neckerchief
+maid, maid headdress, frilled apron
+kimono, obi, floral print
+yukata, hair flower
+casual, white shirt, denim shorts
+hoodie, oversized clothes
+sundress, straw hat
+gothic lolita, frills, lace
+idol clothes, frilled skirt
+business suit, pencil skirt
+winter coat, scarf, beret
+track jacket, sportswear
+military uniform, peaked cap
+china dress, side slit
+off-shoulder sweater
+witch hat, witch, cape
+armor, gauntlets, cape

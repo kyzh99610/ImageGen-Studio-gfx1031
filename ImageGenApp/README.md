@@ -13,7 +13,7 @@ A local AI image generation suite built for **AMD GPUs via ZLUDA v6 (ROCm/HIP)**
 | **Text-to-Image** | SD 1.x, SD 2.x, SDXL / Pony / Illustrious · 9 samplers · batching · seeds · auto-loop |
 | **Image-to-Image** | Variable denoising strength, same model |
 | **LoRA** | 3-slot LoRA fusion with per-slot weights · automatic LoRA/model compatibility check · SD 1.5 + SDXL |
-| **LoRA Training** | Dataset prep, aspect-ratio bucketing, BLIP auto-captioning, SD 1.5 + SDXL training, kohya-compatible output |
+| **LoRA Training** | Dataset prep, aspect-ratio bucketing, WD14 tags / BLIP auto-captioning, SD 1.5 + SDXL training, kohya-compatible output |
 | **Upscaling** | Lanczos (CPU) · Real-ESRGAN ONNX (DirectML on the discrete GPU) · Real-ESRGAN PyTorch |
 | **Watermark Remover** | GPU OCR + corner detection · draw-on-image brush · OCR-off mode for selective removal · LaMa / OpenCV / SD inpainting |
 | **Civitai Hub** | Search, preview, paginated results (100 per search, 20 per page), download with live speed/ETA tracking |
@@ -122,9 +122,15 @@ Generate images from text prompts using Stable Diffusion checkpoints. The output
 
 **Hires fix:** generate at the model's native size (good composition), then upscale ×1.5–2 and let the model re-draw details at the big size. SD 1.5 512×768 → 768×1152 takes about 30 s; SDXL 832×1216 → 1248×1824 about 2 min, and fits in 12 GB. Choose Lanczos, or Real-ESRGAN for sharper line art.
 
-**✨ Face detail (ADetailer-style):** finds faces (anime and photo detectors) and redraws each one at the model's full resolution with low denoise. Small faces in full-body or group shots get proper eyes and mouths, at about 5–15 s per face. You can add an extra face-only prompt.
+**✨ Face detail (ADetailer-style):** finds faces (anime and photo detectors) and redraws each one at the model's full resolution with low denoise. Small faces in full-body or group shots get proper eyes and mouths, at about 5–15 s per face on SD 1.5 and ~30 s on SDXL. Every detection is double-checked, so hands, chairs and folds aren't mistaken for faces. You can add an extra face-only prompt.
 
 **🖌 Inpaint:** paint over any part of an image and describe what should be there. Only the painted area changes, and it's redrawn at native resolution, so hands and faces get full detail. It uses your current model, LoRAs, sampler and seed.
+
+**🎴 Character cards:** save everything that makes a character come out right: checkpoint, LoRAs and weights, the character's tags, named outfits, negative prompt, size, CFG, steps, sampler and CLIP skip. Loading one sets all of it at once, with the outfit you pick and any scene tags you add. **🧩 Build from LoRA slot 1** makes a card from a character LoRA: its trigger words and hair/eye tags become the character, and each of the creator's example prompts on Civitai becomes an outfit. Cards are JSON files in `settings/characters/`.
+
+**🎲 Wildcards:** `{smile|pout|grin}` picks one option per image, `{2$$a|b|c}` picks two, and `{3::a|b}` makes *a* three times likelier. `__outfit__` picks a random line from `wildcards/outfit.txt`. Starter lists ship for outfit, pose, expression, background, hair, eyes, lighting and camera; add your own `.txt` files there or in `models/wildcards/`. Each image of a batch gets its own picks from its own seed, so a seed gives the same picks again. The resolved prompt is saved in the image (and the template beside it), and **👁 Preview** shows four sample picks.
+
+**🏷 Interrogate (WD14):** the WD14 anime tagger (wd-vit-tagger-v3, ~380 MB, downloaded on first use) reads an image and writes its Danbooru tags into the prompt. It's in the img2img section and in PNG Info, and runs on the CPU in about a second. In **Train LoRA**, *Auto-Tag All* captions a whole dataset with it (trigger word first). For anime training sets this works better than BLIP's sentences.
 
 **Variations & CLIP skip:** keep a seed you like and add a *variation seed* at 0.05–0.2 strength for the same picture with small changes. **🔀 More like this** under the gallery sets that up for the image you picked. **CLIP skip 2** is what most SD 1.5 anime checkpoints expect.
 
@@ -140,7 +146,7 @@ Also:
 - **txt2img** and **img2img** (🖼 Send to img2img opens the img2img section with the image loaded)
 - **9 samplers**: DPM++ 2M Karras, DPM++ SDE Karras, Euler a, Euler, DDIM, PNDM, LMS, Heun, UniPC
 - **Batch generation** (1–8 images) and **Auto-Loop** for continuous generation with a configurable delay
-- **Auto-add quality tags** checkbox — prepends `masterpiece, best quality` (or `score_9, …` for Pony) when your prompt has none; the exact prompt used is shown and saved
+- **Auto-add quality tags** checkbox — adds the quality tags each model family was trained with, plus matching negative tags: Illustrious/NoobAI `masterpiece, best quality, amazing quality, very aesthetic, absurdres`, Pony `score_9, score_8_up, score_7_up`, SD 1.5 `masterpiece, best quality`. Only added when your prompt has none; the exact prompt used is shown and saved
 - **Prompt presets**, **My Saved Prompts**, **Save / Load Settings** (restores the checkpoint too), **Quick Tags**
 - **Compel long-prompt encoding** with weighted/blended syntax `(word:1.3)`, `(word1|word2)`
 - **📂 Show in folder** under the gallery opens Explorer with the selected image highlighted
@@ -296,7 +302,7 @@ ImageGenApp/
 ├── run_zluda.bat             # Run any script under the ZLUDA environment
 ├── install.bat               # One-time dependency installer
 ├── selftest_zluda.py         # GPU-vs-CPU correctness self-test
-├── run_tests.py              # Test suite (82 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
+├── run_tests.py              # Test suite (86 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
 ├── download_models.bat/.py   # Starter model downloader
 ├── backend/
 │   ├── sd_pipeline.py        # SD 1.x inference (txt2img, img2img, LoRA)
@@ -318,6 +324,9 @@ ImageGenApp/
 │   ├── lora_keywords.py      # Keyword chips: trigger words, creator prompts, training-tag coverage
 │   ├── prompt_tools.py       # Tag merge (strongest weight wins), token counter, tag-aligned 75-token chunks
 │   ├── detail_tools.py       # Inpaint (only masked), face detection, face-detail pass
+│   ├── wildcards.py          # {a|b} and __name__ dynamic prompts
+│   ├── character_cards.py    # Character cards (settings/characters/)
+│   ├── wd_tagger.py          # WD14 anime tagger (interrogate, dataset tags)
 │   └── model_hash.py         # Background SHA-256 cache → A1111 "Model hash", finds renamed models
 ├── onnx_cache/               # Cached ONNX exports per model (auto-generated)
 │   └── <model_stem>/         # sdxl_te1.onnx, sdxl_te2.onnx + external data

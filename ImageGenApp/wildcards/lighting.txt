@@ -1,0 +1,11 @@
+# __lighting__
+soft lighting
+backlighting, rim light
+golden hour, warm lighting
+dramatic lighting, chiaroscuro
+cinematic lighting
+moonlight
+neon lighting, colorful
+sunlight, lens flare
+volumetric lighting, light rays
+studio lighting

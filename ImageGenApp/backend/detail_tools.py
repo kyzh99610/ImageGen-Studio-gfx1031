@@ -142,6 +142,32 @@ def _iou(a, b) -> float:
     return inter / float((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter + 1e-6)
 
 
+# A real face, cut out with some context and enlarged so it is ~160 px wide, draws many raw
+# (minNeighbors=0) cascade hits on it; hands, clothing folds and scenery draw 0–3. Measured on 15
+# SDXL outputs: faces 6–49 hits, false detections 0–3.
+_MIN_CONFIRM_HITS = 4
+
+
+def _confirm_hits(image: Image.Image, box, kind: str) -> int:
+    """Raw hits of the `kind` cascade centred inside `box`, on an enlarged crop around it."""
+    import cv2
+    c = _cascade(kind)
+    if c is None:
+        return 0
+    x1, y1, x2, y2 = box
+    fw = max(1, x2 - x1)
+    pad = fw // 2
+    cx1, cy1 = max(0, x1 - pad), max(0, y1 - pad)
+    crop = image.crop((cx1, cy1, min(image.width, x2 + pad), min(image.height, y2 + pad)))
+    sc = 160 / fw
+    crop = crop.resize((max(1, int(crop.width * sc)), max(1, int(crop.height * sc))), Image.BICUBIC)
+    g = cv2.equalizeHist(np.array(crop.convert("L")))
+    found = c.detectMultiScale(g, scaleFactor=1.05, minNeighbors=0, minSize=(80, 80))
+    bx1, by1, bx2, by2 = (x1 - cx1) * sc, (y1 - cy1) * sc, (x2 - cx1) * sc, (y2 - cy1) * sc
+    return sum(1 for x, y, w, h in (found if len(found) else [])
+               if bx1 <= x + w / 2 <= bx2 and by1 <= y + h / 2 <= by2)
+
+
 def detect_faces(image: Image.Image, mode: str = "auto", max_faces: int = 4,
                  min_frac: float = 0.03) -> list[tuple[int, int, int, int]]:
     """Face boxes (x1, y1, x2, y2), biggest first. mode: auto / anime / photo."""
@@ -156,15 +182,30 @@ def detect_faces(image: Image.Image, mode: str = "auto", max_faces: int = 4,
             continue
         found = c.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=7 if kind == "anime" else 8,
                                    minSize=(min_px, min_px))
-        boxes += [(int(x), int(y), int(x + w), int(y + h)) for x, y, w, h in (found if len(found) else [])]
-    boxes.sort(key=lambda b: -(b[2] - b[0]) * (b[3] - b[1]))
+        boxes += [((int(x), int(y), int(x + w), int(y + h)), kind) for x, y, w, h in (found if len(found) else [])]
+    boxes.sort(key=lambda bk: -(bk[0][2] - bk[0][0]) * (bk[0][3] - bk[0][1]))
+    # Confirm each box on an enlarged crop. The photo (Haar) cascade finds hands, folds and
+    # bodies in anime pictures and confirms them itself (a hand on a railing: 56 hits), so in
+    # auto mode the anime cascade confirms every box; only when it confirms none (a photo)
+    # are Haar boxes confirmed by Haar.
+    if mode == "auto":
+        cand = [b for b, _k in boxes if _confirm_hits(image, b, "anime") >= _MIN_CONFIRM_HITS]
+        if not cand:
+            cand = [b for b, k in boxes if k == "photo" and _confirm_hits(image, b, "photo") >= _MIN_CONFIRM_HITS]
+    else:
+        cand = [b for b, k in boxes if _confirm_hits(image, b, k) >= _MIN_CONFIRM_HITS]
     keep = []
-    for b in boxes:
+    for b in cand:
         # overlapping boxes: keep the bigger one. Boxes far smaller than the main face are
         # nearly always false hits (windows, buttons, background patterns) — a face-prompted
         # repaint there would draw a face into the scenery.
-        if all(_iou(b, k) < 0.3 for k in keep) and (not keep or (b[2] - b[0]) >= 0.45 * (keep[0][2] - keep[0][0])):
-            keep.append(b)
+        # (or its centre is inside one: two boxes on one face overlapped by only 28 %)
+        if any(_iou(b, k) >= 0.3 or (k[0] <= (b[0] + b[2]) / 2 <= k[2] and k[1] <= (b[1] + b[3]) / 2 <= k[3])
+               for k in keep):
+            continue
+        if keep and (b[2] - b[0]) < 0.45 * (keep[0][2] - keep[0][0]):
+            continue
+        keep.append(b)
     return keep[: max(0, int(max_faces))]
 
 
