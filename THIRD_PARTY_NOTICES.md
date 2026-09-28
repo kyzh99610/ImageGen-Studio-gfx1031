@@ -18,6 +18,6 @@ You install the **AMD HIP SDK** yourself, under AMD's license terms.
 
 At runtime the app may download models on request: the anime face detector
 [lbpcascade_animeface](https://github.com/nagadomi/lbpcascade_animeface) (MIT, SHA-256 checked) for Face detail; the WD14 tagger
-[SmilingWolf/wd-vit-tagger-v3](https://huggingface.co/SmilingWolf/wd-vit-tagger-v3) (Apache-2.0) for Interrogate / Auto-Tag; Stable Diffusion checkpoints from Hugging Face or Civitai,
+[SmilingWolf/wd-vit-tagger-v3](https://huggingface.co/SmilingWolf/wd-vit-tagger-v3) (Apache-2.0) for Interrogate / Auto-Tag, and its tag list for Danbooru tag autocomplete; Stable Diffusion checkpoints from Hugging Face or Civitai,
 the Real-ESRGAN and LaMa ONNX models, and BLIP for auto-captioning. Each model has its own license. Check it
 before using the outputs commercially.

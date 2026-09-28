@@ -108,6 +108,9 @@ window, shows a loading screen while it starts, and frees the GPU when you close
   sampler / LoRA weight / prompt words side by side.
 - **✨ Face detail** (ADetailer-style: faces redrawn at full resolution) and **🖌 Inpaint** (paint an area,
   redraw only that part with your model and LoRAs).
+- **Faster, cleaner sampling:** DPM++ 2M **AYS** (Align Your Steps: ~25-step quality in 10–12 steps, about 2×
+  faster), real Karras samplers, **PAG**, FreeU, CFG rescale, and automatic setup for **v-prediction**
+  checkpoints (NoobAI-XL v-pred). Danbooru tag autocomplete and spelling hints.
 - **Anime helpers:** 🎴 character cards (checkpoint + LoRAs + tags + outfits in one click, built from a character
   LoRA's Civitai prompts), 🎲 wildcards (`{a|b}`, `__outfit__`: different picks per image, reproducible per seed),
   🏷 WD14 interrogate / dataset auto-tagging, and quality tags matched to the model family (Illustrious, Pony, SD 1.5).
@@ -178,7 +181,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 87 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
+That runs 91 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
 
 ## Credits and licenses
 

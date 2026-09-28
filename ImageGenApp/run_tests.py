@@ -1715,6 +1715,186 @@ def _():
         assert obj.__dict__.get("_inpaint_pipe") is None, cls.__name__
 
 
+@test("Samplers: real Karras sigmas, AYS schedules, no option leaks, v-prediction config + detection")
+def _():
+    import struct
+    from diffusers import EulerDiscreteScheduler
+    from backend import sampling as sm
+    from diffusers.schedulers import AysSchedules
+    cfg = dict(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000,
+               steps_offset=1, timestep_spacing="leading", prediction_type="epsilon")
+
+    class Pipe:
+        def __init__(self, xl):
+            self.scheduler = EulerDiscreteScheduler(**cfg)
+            if xl:
+                self.text_encoder_2 = object()
+    for xl in (False, True):
+        p = Pipe(xl)
+        p.scheduler = sm.make_scheduler(p, "DPM++ 2M Karras")
+        assert p.scheduler.config.use_karras_sigmas is True          # it was plain DPM++ 2M before
+        p.scheduler = sm.make_scheduler(p, "DPM++ 2M")
+        assert not p.scheduler.config.use_karras_sigmas             # doesn't inherit the previous one's
+        p.scheduler = sm.make_scheduler(p, "DPM++ 2M SDE Karras")
+        assert p.scheduler.config.algorithm_type == "sde-dpmsolver++"
+        p.scheduler = sm.make_scheduler(p, "DPM++ 2M AYS")
+        assert p.scheduler.config.algorithm_type == "dpmsolver++"
+        table = AysSchedules["StableDiffusionXLTimesteps" if xl else "StableDiffusionTimesteps"]
+        p.scheduler.set_timesteps(10)
+        assert [int(t) for t in p.scheduler.timesteps] == table
+        for n in (6, 13, 40):
+            p.scheduler.set_timesteps(n)
+            ts = [int(t) for t in p.scheduler.timesteps]
+            assert len(ts) == n and ts[0] == 999 and ts[-1] == table[-1] and all(a > b for a, b in zip(ts, ts[1:])), ts
+    assert set(sm.LEGACY_NAMES.values()) <= set(sm.SCHEDULERS)
+    # v-prediction: kept by every scheduler made later; Karras / AYS off with zero-terminal SNR
+    p = Pipe(True)
+    sm.configure_prediction(p, {"v_pred": True, "zero_snr": True})
+    for name in ("DPM++ 2M Karras", "Euler a", "DPM++ 2M AYS"):
+        p.scheduler = sm.make_scheduler(p, name)
+        c = p.scheduler.config
+        assert c.prediction_type == "v_prediction" and c.rescale_betas_zero_snr and c.timestep_spacing == "trailing"
+        assert not c.get("use_karras_sigmas") and not getattr(p.scheduler, "_ays", False), name
+    # detection: NoobAI-style marker keys, modelspec metadata, file name
+    tmp = Path(_tf.mkdtemp())
+
+    def ckpt(name, keys, meta=None):
+        hdr = {k: {"dtype": "F16", "shape": [0], "data_offsets": [0, 0]} for k in keys}
+        if meta:
+            hdr["__metadata__"] = meta
+        raw = json.dumps(hdr).encode()
+        (tmp / name).write_bytes(struct.pack("<Q", len(raw)) + raw)
+        return str(tmp / name)
+    assert sm.detect_prediction(ckpt("a.safetensors", ["v_pred", "ztsnr", "w"])) == {"v_pred": True, "zero_snr": True}
+    assert sm.detect_prediction(ckpt("b.safetensors", ["w"]))["v_pred"] is False
+    assert sm.detect_prediction(ckpt("noob-vpred-1.0.safetensors", ["w"]))["v_pred"] is True
+    assert sm.detect_prediction(ckpt("c.safetensors", ["w"], {"modelspec.prediction_type": "v"}))["v_pred"] is True
+    assert sm.detect_prediction(str(tmp / "missing.safetensors"))["v_pred"] is False
+    (tmp / "junk.safetensors").write_bytes(b"\xff" * 20)
+    assert sm.detect_prediction(str(tmp / "junk.safetensors"))["v_pred"] is False
+
+
+@test("Boosters: run_pipe passes only supported args, restores PAG attention on a crash, FreeU off; FFT fallback")
+def _():
+    import torch
+    from backend import sampling as sm
+
+    class Unet:
+        def __init__(self):
+            self.procs = {"a": "orig"}; self.freeu = None; self.dtype = torch.float16
+        @property
+        def attn_processors(self): return dict(self.procs)
+        def set_attn_processor(self, p): self.procs = dict(p)
+        def enable_freeu(self, **k): self.freeu = k
+        def disable_freeu(self): self.freeu = None
+
+    class Plain:                          # like SD 1.5 img2img: no guidance_rescale
+        def __init__(self, unet): self.unet = unet; self.scheduler = "S"; self.got = None
+        def __call__(self, prompt=None, guidance_scale=7.0):
+            self.got = dict(prompt=prompt); assert self.unet.freeu is not None; return "ok"
+
+    class WithRescale(Plain):
+        def __call__(self, prompt=None, guidance_scale=7.0, guidance_rescale=0.0):
+            self.got = dict(prompt=prompt, guidance_rescale=guidance_rescale); return "ok"
+
+    class Host:                           # the SDPipeline wrapper
+        boosters = {"pag": 0, "freeu": True, "cfg_rescale": 0.6}
+        prediction = {}
+    u = Unet(); h = Host()
+    pl = Plain(u)
+    assert sm.run_pipe(h, pl, "img2img", prompt="x") == "ok" and pl.got == {"prompt": "x"} and u.freeu is None
+    wr = WithRescale(u)
+    sm.run_pipe(h, wr, "txt2img", prompt="x")
+    assert wr.got["guidance_rescale"] == 0.6
+    h.boosters = {"cfg_rescale": None}; h.prediction = {"v_pred": True}
+    assert sm.boosters(h)["cfg_rescale"] == 0.7                   # auto for v-prediction
+    h.prediction = {}
+    assert sm.boosters(h)["cfg_rescale"] == 0.0
+    # PAG: the PAG pipeline swaps processors and dies mid-run → the originals come back
+    class PagPipe:
+        def __init__(self, unet): self.unet = unet; self.scheduler = None
+        @classmethod
+        def from_pipe(cls, pipe, **k): return cls(pipe.unet)
+        def __call__(self, **k):
+            assert k["pag_scale"] == 3.0
+            self.unet.set_attn_processor({"a": "pag"})
+            raise RuntimeError("stopped")
+    orig = sm._pag_class
+    try:
+        sm._pag_class = lambda xl, kind: PagPipe
+        h.boosters = {"pag": 3.0}
+        try:
+            sm.run_pipe(h, wr, "txt2img", prompt="x")
+        except RuntimeError:
+            pass
+        assert u.procs == {"a": "orig"}, u.procs
+        assert sm.run_pipe(h, wr, "inpaint", prompt="x") == "ok"    # no PAG for inpaint
+    finally:
+        sm._pag_class = orig
+    # FreeU's Fourier filter: the wrapped version still filters CPU tensors like the original
+    import diffusers.utils.torch_utils as tu
+    sm._patch_fourier_filter()
+    x = torch.randn(1, 4, 16, 16)
+    assert getattr(tu.fourier_filter, "_cpu_fallback", False) and tu.fourier_filter(x, 1, 0.5).shape == x.shape
+
+
+@test("Sampler names in records: old images restore the sampler that really ran; boosters recorded + restored")
+def _():
+    import app as _app
+    from PIL import Image
+    from backend.png_info import read_image_metadata as rd
+    base = {"prompt": "x", "sampler": "DPM++ 2M Karras"}
+    old = _app._restore_plan(dict(base, imagegen={"app": "ImageGen Studio", "format": 1, "scheduler": "DPM++ 2M Karras"}))
+    new = _app._restore_plan(dict(base, imagegen={"app": "ImageGen Studio", "format": 2, "scheduler": "DPM++ 2M Karras"}))
+    a1111 = _app._restore_plan(dict(base))
+    assert old["scheduler"] == "DPM++ 2M" and new["scheduler"] == "DPM++ 2M Karras" and a1111["scheduler"] == "DPM++ 2M Karras"
+    assert _app._restore_plan(dict(base, sampler="DPM++ 2M SDE Karras"))["scheduler"] == "DPM++ 2M SDE Karras"
+    # record → A1111 text → restore
+    tmp = Path(_tf.mkdtemp())
+
+    class P:
+        current_model, _last_vae_path, model_family = "", None, "illustrious"
+        _lora_adapters = {}
+        boosters = {"pag": 2.5, "freeu": True, "cfg_rescale": None}
+        prediction = {"v_pred": True}
+    o = _app.OUTPUTS_DIR
+    try:
+        _app.OUTPUTS_DIR = tmp
+        [f] = _app._save_outputs([Image.new("RGB", (64, 64))], dict(
+            mode="txt2img", prompt="a", steps=12, cfg_scale=6, seeds=[1], scheduler="DPM++ 2M AYS", width=64, height=64,
+            **_app._booster_record(P(), {})), pipe=P())
+    finally:
+        _app.OUTPUTS_DIR = o
+    with Image.open(f) as im:
+        rec = json.loads(im.info["imagegen"]); params = im.info["parameters"]
+    assert rec["format"] == 2 and rec["pag_scale"] == 2.5 and rec["freeu"] is True and rec["cfg_rescale"] == 0.7, rec
+    assert "PAG scale: 2.5" in params and "FreeU: on" in params and "CFG rescale: 0.7" in params
+    ups = _app._plan_extra_updates(_app._restore_plan(rd(f)))
+    assert ups[-3:] == [2.5, True, 0.7], ups
+    ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
+    assert ups0[-3:] == [0.0, False, 0.0]                          # none recorded → off
+    ex = _app._clean_extra(dict(pag_scale="99", freeu="yes", cfg_rescale=-3))
+    assert ex["pag_scale"] == 6.0 and ex["freeu"] is True and ex["cfg_rescale"] == 0.0
+    assert "PAG scale" in _app._XY_AXES and _app._xy_values("PAG scale", "0, 2.5") == ([0.0, 2.5], "")
+
+
+@test("Danbooru tags: autocomplete by popularity, near-miss hints, one-click fixes keep weights")
+def _():
+    from backend import danbooru_tags as dt
+    from backend.prompt_tools import danbooru_hints, apply_danbooru_fixes
+    if not dt.load(download=False):
+        raise Skip("Danbooru tag list not downloaded yet (fetched on first autocomplete)")
+    sug = dt.suggest("long h")
+    assert sug[0][0] == "long hair" and all(a[1] >= b[1] for a, b in zip(sug, sug[1:]) if a[0].startswith("long h"))
+    assert dt.suggest("x") == [] and dt.did_you_mean("long hair") is None
+    assert dt.did_you_mean("long haired") == "long hair" and dt.did_you_mean("thigh highs") == "thighhighs"
+    for fine in ("masterpiece", "very aesthetic", "mychara", "score_9", "absurdres"):
+        assert dt.did_you_mean(fine) is None, fine            # quality tags / names aren't "fixed"
+    assert danbooru_hints("1girl, long haired, thigh") == [("long haired", "long hair")]   # last one still typed
+    p, fixes = apply_danbooru_fixes("(long haired:1.2), [blue eye], <lora:x:0.8>, {a|b}, __pose__, 1girl")
+    assert p == "(long hair:1.2), [blue eyes], <lora:x:0.8>, {a|b}, __pose__, 1girl", p
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Summary
 # ══════════════════════════════════════════════════════════════════════════

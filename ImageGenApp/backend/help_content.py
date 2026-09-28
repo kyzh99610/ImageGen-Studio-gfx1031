@@ -284,6 +284,18 @@ def parameters_html() -> str:
              "Paint over any area and describe what should be there; only that area is redrawn, at native "
              "resolution, with your model, LoRAs and seed.",
              _cn("涂抹要修改的区域并描述内容，仅重绘该区域。")],
+            ["⏩ DPM++ 2M AYS",
+             "NVIDIA's Align-Your-Steps schedule: about the quality of 25 steps in 10–12. The Karras samplers "
+             "really use Karras sigmas (as in A1111).",
+             _cn("AYS 采样计划：10–12 步约等于常规 25 步的质量。")],
+            ["🎚 PAG / FreeU / CFG rescale",
+             "PAG 2–3: cleaner structure and backgrounds (~1.5–2× time). FreeU: more detail and contrast. CFG rescale: "
+             "tames burned colours; automatic 0.7 for v-prediction models (NoobAI v-pred).",
+             _cn("PAG 改善结构与背景；FreeU 增加细节；CFG rescale 抑制过饱和，v-pred 模型自动 0.7。")],
+            ["🔤 Danbooru tags",
+             "Autocomplete chips while typing (most-used first) and near-miss hints (long haired → long hair); "
+             "“💡 Fix Danbooru spellings” applies them.",
+             _cn("输入时补全 Danbooru 标签，并提示拼写相近的正确标签。")],
             ["🎲 Wildcards",
              "{a|b|c} picks one option per image, {2$$a|b|c} two, {3::a|b} weights a; __outfit__ picks a line from "
              "wildcards/outfit.txt (add your own .txt files). Picks follow each image's seed.",

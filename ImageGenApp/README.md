@@ -10,7 +10,7 @@ A local AI image generation suite built for **AMD GPUs via ZLUDA v6 (ROCm/HIP)**
 
 | Feature | Details |
 |---|---|
-| **Text-to-Image** | SD 1.x, SD 2.x, SDXL / Pony / Illustrious · 9 samplers · batching · seeds · auto-loop |
+| **Text-to-Image** | SD 1.x, SD 2.x, SDXL / Pony / Illustrious · 14 samplers (incl. AYS) · batching · seeds · auto-loop |
 | **Image-to-Image** | Variable denoising strength, same model |
 | **LoRA** | 3-slot LoRA fusion with per-slot weights · automatic LoRA/model compatibility check · SD 1.5 + SDXL |
 | **LoRA Training** | Dataset prep, aspect-ratio bucketing, WD14 tags / BLIP auto-captioning, SD 1.5 + SDXL training, kohya-compatible output |
@@ -126,6 +126,20 @@ Generate images from text prompts using Stable Diffusion checkpoints. The output
 
 **🖌 Inpaint:** paint over any part of an image and describe what should be there. Only the painted area changes, and it's redrawn at native resolution, so hands and faces get full detail. It uses your current model, LoRAs, sampler and seed.
 
+**🎚 Samplers & quality boosters:**
+- **DPM++ 2M AYS** (NVIDIA's *Align Your Steps* schedule) gets about the quality of 25 regular steps in 10–12. On SDXL that's ~17 s instead of ~35 s.
+- The *Karras* samplers now really use Karras sigmas, as in A1111 and Forge.
+- **PAG** (perturbed-attention guidance, 2–3) gives cleaner structure, line art and backgrounds, at ~1.5–2× the time.
+- **FreeU** adds detail and contrast for free. Its settings are tuned for anime models: the paper's values over-saturated them.
+- **CFG rescale** tames burned colours at high CFG.
+- **V-prediction** checkpoints (e.g. NoobAI-XL v-pred) are detected and set up automatically, with CFG rescale 0.7.
+- The X/Y grid has *PAG scale* and *CFG rescale* axes for comparisons.
+
+**🔤 Danbooru tags:** anime checkpoints learned exact Danbooru tags.
+- While you type, the most-used matching tags appear as chips (e.g. `thigh` → thighhighs 1.0M, thighs 466k…); click one to complete it.
+- Near misses are pointed out under the prompt, like *long haired → long hair* or *thigh highs → thighhighs*.
+- **💡 Fix Danbooru spellings** corrects them all and keeps your weights.
+
 **🎴 Character cards:** save everything that makes a character come out right: checkpoint, LoRAs and weights, the character's tags, named outfits, negative prompt, size, CFG, steps, sampler and CLIP skip. Loading one sets all of it at once, with the outfit you pick and any scene tags you add. **🧩 Build from LoRA slot 1** makes a card from a character LoRA: its trigger words and hair/eye tags become the character, and each of the creator's example prompts on Civitai becomes an outfit. Cards are JSON files in `settings/characters/`.
 
 **🎲 Wildcards:** `{smile|pout|grin}` picks one option per image, `{2$$a|b|c}` picks two, and `{3::a|b}` makes *a* three times likelier. `__outfit__` picks a random line from `wildcards/outfit.txt`. Starter lists ship for outfit, pose, expression, background, hair, eyes, lighting and camera; add your own `.txt` files there or in `models/wildcards/`. Each image of a batch gets its own picks from its own seed, so a seed gives the same picks again. The resolved prompt is saved in the image (and the template beside it), and **👁 Preview** shows four sample picks.
@@ -144,7 +158,7 @@ Generate images from text prompts using Stable Diffusion checkpoints. The output
 
 Also:
 - **txt2img** and **img2img** (🖼 Send to img2img opens the img2img section with the image loaded)
-- **9 samplers**: DPM++ 2M Karras, DPM++ SDE Karras, Euler a, Euler, DDIM, PNDM, LMS, Heun, UniPC
+- **14 samplers**: DPM++ 2M Karras, DPM++ 2M, DPM++ 2M SDE Karras, DPM++ 2M AYS, DPM++ SDE (Karras), Euler a, Euler, Euler AYS, DDIM, PNDM, LMS, Heun, UniPC
 - **Batch generation** (1–8 images) and **Auto-Loop** for continuous generation with a configurable delay
 - **Auto-add quality tags** checkbox — adds the quality tags each model family was trained with, plus matching negative tags: Illustrious/NoobAI `masterpiece, best quality, amazing quality, very aesthetic, absurdres`, Pony `score_9, score_8_up, score_7_up`, SD 1.5 `masterpiece, best quality`. Only added when your prompt has none; the exact prompt used is shown and saved
 - **Prompt presets**, **My Saved Prompts**, **Save / Load Settings** (restores the checkpoint too), **Quick Tags**
@@ -302,7 +316,7 @@ ImageGenApp/
 ├── run_zluda.bat             # Run any script under the ZLUDA environment
 ├── install.bat               # One-time dependency installer
 ├── selftest_zluda.py         # GPU-vs-CPU correctness self-test
-├── run_tests.py              # Test suite (87 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
+├── run_tests.py              # Test suite (91 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
 ├── download_models.bat/.py   # Starter model downloader
 ├── backend/
 │   ├── sd_pipeline.py        # SD 1.x inference (txt2img, img2img, LoRA)
@@ -324,6 +338,8 @@ ImageGenApp/
 │   ├── lora_keywords.py      # Keyword chips: trigger words, creator prompts, training-tag coverage
 │   ├── prompt_tools.py       # Tag merge (strongest weight wins), token counter, tag-aligned 75-token chunks
 │   ├── detail_tools.py       # Inpaint (only masked), face detection, face-detail pass
+│   ├── sampling.py           # Samplers (Karras, AYS), v-prediction, PAG / FreeU / CFG rescale
+│   ├── danbooru_tags.py      # Danbooru tag autocomplete + spelling hints
 │   ├── wildcards.py          # {a|b} and __name__ dynamic prompts
 │   ├── character_cards.py    # Character cards (settings/characters/)
 │   ├── wd_tagger.py          # WD14 anime tagger (interrogate, dataset tags)

@@ -27,7 +27,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── install.bat / requirements.txt
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 87-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 91-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -43,6 +43,8 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │       │                             at tag boundaries (BREAK = new chunk), encode_chunked(), prompt warnings
 │       ├── lora_keywords.py       ← trigger words / creator prompts / training-tag coverage → keyword chips
 │       ├── detail_tools.py        ← inpaint_region (only-masked), detect_faces, face_detail (ADetailer-style)
+│       ├── sampling.py            ← scheduler table (real Karras, AYS), v-pred detection, run_pipe: PAG/FreeU/CFG rescale
+│       ├── danbooru_tags.py       ← Danbooru tag list: autocomplete, near-miss spelling hints
 │       ├── wildcards.py           ← {a|b} / __name__ dynamic prompts, resolved per image seed
 │       ├── character_cards.py     ← settings/characters/*.json: model + LoRAs + tags + outfits, build from LoRA
 │       ├── wd_tagger.py           ← WD14 (wd-vit-tagger-v3 ONNX, CPU) image → Danbooru tags
@@ -66,7 +68,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 82 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 86 pass + 5 skip on machines without a Ryzen AI NPU
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
 
@@ -201,6 +203,56 @@ regeneration measured 0.63/255.
   (gr.ImageEditor, `app._editor_parts()`), record mode "inpaint" + `inpaint_padding` (not recreatable without the
   source + mask). X/Y grid "Checkpoint" axis: values matched to local file names; each switch goes through
   `_ensure_model` and re-syncs LoRAs.
+
+### Samplers, AYS, PAG, FreeU, v-prediction (`backend/sampling.py`)
+- **"Karras" is real now.** Until 2026-09-28 `_load_scheduler` built `DPMSolverMultistepScheduler` without
+  `use_karras_sigmas`, so "DPM++ 2M Karras" (the default) and "DPM++ SDE Karras" were the plain samplers — not what
+  A1111 / Civitai metadata means. `SCHEDULERS` maps each name to (class, options); `make_scheduler()` drops options a
+  previous scheduler left in the config (`use_karras_sigmas`, `algorithm_type`). Records are `format: 2` since; a
+  format-1 record's "DPM++ 2M Karras" / "DPM++ SDE Karras" restores as "DPM++ 2M" / "DPM++ SDE" (`LEGACY_NAMES`),
+  A1111 text keeps meaning real Karras. New: DPM++ 2M, DPM++ 2M SDE Karras, DPM++ 2M AYS, DPM++ SDE, Euler AYS.
+- **AYS** (NVIDIA Align Your Steps, diffusers `AysSchedules`): exact 10-step tables for SD 1.5 / SDXL, other counts
+  interpolated log-linearly in sigma and mapped back to strictly decreasing timesteps. Implemented by wrapping the
+  scheduler instance's `set_timesteps`, so img2img / hires / inpaint (strength slicing) need nothing else. Character
+  grid (hassakuXL, 832×1216): AYS 10 steps ≈ the 25-step images, plain DPM++ 2M at 10 is soft; 12 AYS steps = 17 s
+  denoise vs ~35 s for 25 Karras steps.
+- **`run_pipe(sdp, pipe, kind, **call)`** — every txt2img / img2img / inpaint call of both pipelines goes through it:
+  `sdp.boosters` (set by `do_generate`, reset to `{}` in its `finally`, so Bridge / Inpaint buttons don't inherit
+  them) → PAG (`StableDiffusion[XL]PAG[Img2Img]Pipeline.from_pipe(pag_applied_layers=["mid"])`, cached per UNet in
+  `sdp._pag_pipes`, dropped in `_unload`), FreeU (`unet.enable_freeu`, off again in `finally`), CFG rescale
+  (`guidance_rescale`, only passed when the pipeline class accepts it — SD 1.5 img2img / inpaint don't). PAG swaps
+  attention processors on the shared UNet and diffusers restores them only at the end of a run: `run_pipe` restores
+  them in `finally` (a Stop mid-PAG left the next plain run broken otherwise; measured Δ 0.00 after the fix).
+  Timings (12 AYS steps, 832×1216): plain 17 s, PAG 2.5 29–34 s (batch 3 instead of 2), FreeU 22 s.
+- **FreeU under ZLUDA:** its Fourier filter needs cuFFT → `CUFFT_NOT_SUPPORTED`. `_patch_fourier_filter()` wraps
+  diffusers' `fourier_filter` (looked up as a module global by `apply_freeu`): after the first failure the FFT runs
+  on the CPU (small skip tensors, +30 % time).
+- **FreeU factors are tuned for anime checkpoints**, not the paper's: SDXL b1 1.05 / b2 1.1 / s1 0.95 / s2 0.8,
+  SD 1.5 b1 1.1 / b2 1.2 / s1 0.9 / s2 0.6. Measured on hassakuXL (same seeds, 12 AYS steps): the paper's SDXL values
+  (1.3/1.4/0.9/0.2) took mean saturation 63 → 135, clipped 10 % of pixels (vs 2 %) and bent the composition; the
+  chosen ones 83 / 5.5 % and 92 / 2.0 % on two seeds. Stacking paper-FreeU + PAG + hires gave burned images.
+- **Hires fix runs its second pass without PAG** (`do_generate` sets `pag=0` around `_hires_pass`): PAG shapes the
+  composition in the first pass; in the 1248×1824 pass it cost ~130 s instead of ~80 s and peaked at 10.9 of 12 GB
+  (batch 3). The record still lists the PAG scale (it describes the first pass).
+- **V-prediction:** `detect_prediction()` reads the safetensors header — `v_pred` / `ztsnr` marker keys (NoobAI),
+  `modelspec.prediction_type`, or "vpred" in the file name — and `configure_prediction()` sets
+  `prediction_type=v_prediction`, `rescale_betas_zero_snr`, `timestep_spacing=trailing`. Pass them to `from_config`
+  as **keyword arguments**: overrides inside the dict are reset by the config's hidden `_use_default_values`. With
+  zero-terminal SNR, Karras / AYS are skipped (sigma_max is infinite). CFG rescale 0 = auto → 0.7 for v-pred. No
+  v-pred checkpoint is installed here, so this path is unit-tested only.
+- UI: "🎚 Quality boosters" accordion; X/Y axes "PAG scale", "CFG rescale"; A1111 text "PAG scale: …",
+  "FreeU: on", "CFG rescale: …"; restore sets them (off when the record has none). The grid title leaves out the
+  base seed / checkpoint when that is an axis.
+
+### Danbooru tags (`backend/danbooru_tags.py`)
+WD14's `selected_tags.csv` (~8,100 general + ~2,750 character tags with post counts; ~300 KB via hf_hub_download —
+fetched in the background the first time someone types, never from the token counter). Autocomplete chips under the
+prompt for the tag being typed (text after the last comma; `prompt_txt.input`, `trigger_mode="always_last"`),
+brackets escaped on insert. "Did you mean": `difflib` cutoff 0.88 against general tags with the same first letter
+(~9 ms for 13 tags, lru-cached) — only near misses ("long haired" → long hair, "thigh highs" → thighhighs); the tag
+still being typed, quality tags, names and free text are left alone. Shown in the token counter;
+"💡 Fix Danbooru spellings" applies them keeping weight syntax. Danbooru calls silver hair "grey hair" (alias),
+the list has no aliases.
 
 ### Anime helpers: wildcards, character cards, WD14 tagger, family quality tags
 - **Wildcards** (`backend/wildcards.py`): `{a|b}`, `{2$$a|b|c}`, `{3::a|b}` (weight), `__name__` = random line of
@@ -438,6 +490,8 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
 20. **VRAM stayed held after switching models** (1.6–2 GB, SDXL peak 11.5 of 12 GB) → pyparsing's packrat cache kept
     Compel's frames (→ text encoders) alive, and `_unload()` kept the cached inpaint pipe. See "Unloading must
     actually free VRAM". Found by the 2026-09-27 regression run (`VRAM: … held` after SD 1.5 ↔ SDXL switches).
+21. **"DPM++ 2M Karras" wasn't Karras** (no `use_karras_sigmas`) → see "Samplers, AYS, …"; old records map to
+    "DPM++ 2M". Same section: FreeU crashed under ZLUDA (cuFFT) → CPU FFT fallback.
 
 ## Troubleshooting
 

@@ -245,45 +245,16 @@ def _strip_lora_layers(model) -> None:
             _strip_lora_layers(child)
 
 # ── Scheduler map ──────────────────────────────────────────────────────────────
-SCHEDULER_MAP: dict[str, str] = {
-    "DPM++ 2M Karras":       "DPMSolverMultistepScheduler",
-    "DPM++ SDE Karras":      "DPMSolverSDEScheduler",
-    "Euler a":               "EulerAncestralDiscreteScheduler",
-    "Euler":                 "EulerDiscreteScheduler",
-    "DDIM":                  "DDIMScheduler",
-    "PNDM":                  "PNDMScheduler",
-    "LMS":                   "LMSDiscreteScheduler",
-    "Heun":                  "HeunDiscreteScheduler",
-    "UniPC":                 "UniPCMultistepScheduler",
-}
+# (names → diffusers classes; the options per name live in backend/sampling.py)
+from backend.sampling import SCHEDULERS as _SCHEDULERS
+SCHEDULER_MAP: dict[str, str] = {name: cls for name, (cls, _) in _SCHEDULERS.items()}
 
 
 def _load_scheduler(pipe, name: str):
-    """Swap the scheduler on an existing pipeline."""
-    from diffusers import (
-        DPMSolverMultistepScheduler, DPMSolverSDEScheduler,
-        EulerAncestralDiscreteScheduler, EulerDiscreteScheduler,
-        DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler,
-        HeunDiscreteScheduler, UniPCMultistepScheduler,
-    )
-    cls_name = SCHEDULER_MAP.get(name, "DPMSolverMultistepScheduler")
-    cls = {
-        "DPMSolverMultistepScheduler":    DPMSolverMultistepScheduler,
-        "DPMSolverSDEScheduler":          DPMSolverSDEScheduler,
-        "EulerAncestralDiscreteScheduler": EulerAncestralDiscreteScheduler,
-        "EulerDiscreteScheduler":         EulerDiscreteScheduler,
-        "DDIMScheduler":                  DDIMScheduler,
-        "PNDMScheduler":                  PNDMScheduler,
-        "LMSDiscreteScheduler":           LMSDiscreteScheduler,
-        "HeunDiscreteScheduler":          HeunDiscreteScheduler,
-        "UniPCMultistepScheduler":        UniPCMultistepScheduler,
-    }[cls_name]
-    # lower_order_final prevents off-by-one IndexError on the last step
-    # in multistep solvers (DPM++ 2M, UniPC) that do second-order lookahead
-    extra = {}
-    if cls_name in ("DPMSolverMultistepScheduler", "UniPCMultistepScheduler"):
-        extra["lower_order_final"] = True
-    pipe.scheduler = cls.from_config(pipe.scheduler.config, **extra)
+    """Swap the scheduler on an existing pipeline (Karras / AYS / v-prediction handled in
+    backend/sampling.make_scheduler)."""
+    from backend.sampling import make_scheduler
+    pipe.scheduler = make_scheduler(pipe, name)
     return pipe
 
 
@@ -624,6 +595,9 @@ class SDPipeline:
             self.loaded_loras  = []
             self._lora_adapters = {}
             self.img2img_pipe  = None
+            from backend.sampling import detect_prediction, configure_prediction
+            self.prediction = detect_prediction(model_path_or_id) if is_local else {}
+            configure_prediction(self.pipe, self.prediction)
             _load_embeddings(self.pipe)
             # LoRA restore snapshot is taken lazily on first load_lora():
             # saves a full CPU copy of the weights (~6.6 GB for SDXL) when no LoRA is used.
@@ -644,6 +618,8 @@ class SDPipeline:
         # the cached inpaint pipe (face detail / inpaint) holds the old UNet, TEs and VAE:
         # left in place it kept ~2.5 GB of VRAM after switching SD 1.5 → SDXL
         self._inpaint_pipe = None
+        self._pag_pipes = None
+        self.prediction = {}
         self.current_model = None
         self.loaded_loras  = []
         self._lora_adapters = {}
@@ -909,18 +885,19 @@ class SDPipeline:
             embeds["output_type"] = "latent"
 
         try:
-            with torch.no_grad():
-                result = self.pipe(
-                    **embeds,
-                    width=width,
-                    height=height,
-                    num_inference_steps=steps,
-                    guidance_scale=cfg_scale,
-                    generator=generator,
-                    num_images_per_prompt=batch_size,
-                    **lat_kw,
-                    **cb_kwargs,
-                )
+            from backend.sampling import run_pipe
+            result = run_pipe(
+                self, self.pipe, "txt2img",
+                **embeds,
+                width=width,
+                height=height,
+                num_inference_steps=steps,
+                guidance_scale=cfg_scale,
+                generator=generator,
+                num_images_per_prompt=batch_size,
+                **lat_kw,
+                **cb_kwargs,
+            )
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
             if "out of memory" in str(e).lower() or isinstance(e, torch.cuda.OutOfMemoryError):
                 gc.collect()
@@ -1034,16 +1011,17 @@ class SDPipeline:
         if use_cpu_vae:
             embeds["output_type"] = "latent"
 
-        with torch.no_grad():
-            result = self.img2img_pipe(
-                **embeds,
-                image=init_image,
-                strength=strength,
-                num_inference_steps=steps,
-                guidance_scale=cfg_scale,
-                generator=generator,
-                **cb_kwargs,
-            )
+        from backend.sampling import run_pipe
+        result = run_pipe(
+            self, self.img2img_pipe, "img2img",
+            **embeds,
+            image=init_image,
+            strength=strength,
+            num_inference_steps=steps,
+            guidance_scale=cfg_scale,
+            generator=generator,
+            **cb_kwargs,
+        )
 
         if use_cpu_vae:
             images = self._decode_latents(self.img2img_pipe.vae, result.images)

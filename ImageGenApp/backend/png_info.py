@@ -205,7 +205,8 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
                                         for l in rec["loras"] if isinstance(l, dict) and l.get("file"))
         if rec.get("vae"):
             result["vae"] = (rec["vae"] or {}).get("file")
-        for k in ("clip_skip", "var_seed", "var_strength", "hires", "face_detail", "inpaint_padding"):
+        for k in ("clip_skip", "var_seed", "var_strength", "hires", "face_detail", "inpaint_padding",
+                  "pag_scale", "freeu", "cfg_rescale"):
             if rec.get(k) is not None:
                 result[k] = rec[k]
         if rec.get("hires") and rec.get("mode") != "img2img":
