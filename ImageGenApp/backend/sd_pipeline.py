@@ -220,6 +220,19 @@ def _load_companion_ti(pipe, lora_path: str) -> list[str]:
     return loaded
 
 
+def _restore_param(param, saved) -> None:
+    """Copy a snapshot tensor back into `param`. A token-embedding table that a textual
+    inversion grew after the snapshot (companion TIs load after the first LoRA) gets its
+    original rows back and keeps the new tokens' rows — a plain copy_() raised a size error."""
+    saved = saved.to(param.device)
+    if param.shape == saved.shape:
+        param.data.copy_(saved)
+    elif param.dim() == 2 and param.shape[1] == saved.shape[1] and param.shape[0] > saved.shape[0]:
+        param.data[:saved.shape[0]].copy_(saved)
+    else:
+        print(f"[LoRA] Snapshot shape {tuple(saved.shape)} doesn't fit {tuple(param.shape)} — left as is")
+
+
 def _strip_lora_layers(model) -> None:
     """
     Walk the module tree and replace every PEFT LoraLayer wrapper with its
@@ -666,11 +679,11 @@ class SDPipeline:
         with torch.no_grad():
             for name, param in self.pipe.unet.named_parameters():
                 if name in self._clean_unet_state:
-                    param.copy_(self._clean_unet_state[name])
+                    _restore_param(param, self._clean_unet_state[name])
             if self._clean_te_state and self.pipe.text_encoder is not None:
                 for name, param in self.pipe.text_encoder.named_parameters():
                     if name in self._clean_te_state:
-                        param.copy_(self._clean_te_state[name])
+                        _restore_param(param, self._clean_te_state[name])
 
     # ── LoRA management ────────────────────────────────────────────────────────
     def load_lora(self, lora_path: str, weight: float = 0.8, slot: int = 0) -> str:
