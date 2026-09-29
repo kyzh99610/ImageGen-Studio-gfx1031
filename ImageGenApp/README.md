@@ -6,99 +6,22 @@ A local AI image generation suite built for **AMD GPUs via ZLUDA v6 (ROCm/HIP)**
 
 ---
 
-## Features
+## Getting started
 
-| Feature | Details |
-|---|---|
-| **Text-to-Image** | SD 1.x, SD 2.x, SDXL / Pony / Illustrious · 14 samplers (incl. AYS) · batching · seeds · auto-loop |
-| **Image-to-Image** | Variable denoising strength, same model |
-| **LoRA** | 3-slot LoRA fusion with per-slot weights · automatic LoRA/model compatibility check · SD 1.5 + SDXL |
-| **LoRA Training** | Dataset prep, aspect-ratio bucketing, WD14 tags / BLIP auto-captioning, SD 1.5 + SDXL training, kohya-compatible output |
-| **Upscaling** | Lanczos (CPU) · Real-ESRGAN ONNX (DirectML on the discrete GPU) · Real-ESRGAN PyTorch |
-| **Watermark Remover** | GPU OCR + corner detection · draw-on-image brush · OCR-off mode for selective removal · LaMa / OpenCV / SD inpainting |
-| **Civitai Hub** | Search, preview, paginated results (100 per search, 20 per page), download with live speed/ETA tracking |
-| **Prompt Presets** | Save/load prompt+settings presets · Quick-tag buttons |
-| **ZLUDA v6** | AMD CUDA→HIP translation so PyTorch/Diffusers run unmodified (cuDNN/MIOpen disabled for correctness) |
-| **GPU Self-Test** | `run_zluda.bat selftest_zluda.py` checks GPU results against the CPU after driver/ZLUDA updates |
-| **Accelerated Text Encoding** | Optional: SDXL CLIP-L + OpenCLIP-G on the iGPU via ONNX DML (mainly for the DirectML backend) |
-| **SmartSplit** | SD 1.5 multi-device pipeline: text encoder on CPU/iGPU, UNet on dGPU, VAE on CPU |
-| **DirectML Fallback** | Runs on AMD / Intel / NVIDIA GPUs through DirectML when ZLUDA isn't available (slower) |
-| **Auto-save** | All outputs saved to `outputs/` with seed + metadata in filename |
-| **Bilingual Help** | Full in-app reference guide in English and Chinese (中文) |
+Installation, launching (browser or desktop window), launch options, the GPU self-test, performance numbers,
+supported GPUs and a feature overview are in the [main README](../README.md). This page describes each tab in
+detail. (Don't also install plain `onnxruntime` — it and `onnxruntime-directml` write to the same folder;
+re-run `install.bat` any time to repair packages.)
 
----
-
-## Quick Start (Windows)
-
-### 1. Install (once)
-
-See the [main README](../README.md#installation): install AMD HIP SDK 6.4, then run `installer\setup.bat`.
-It downloads portable Python 3.10, ZLUDA v6 and the gfx1031 rocBLAS kernels, and runs `install.bat`
-(PyTorch 2.4.1 CUDA 11.8 build + `requirements.txt`). Re-run `install.bat` any time to repair packages.
-(Don't also install plain `onnxruntime` — it and `onnxruntime-directml` write to the same folder.)
-
-### 2. Launch
-
-**In your browser:**
-
-```bat
-launch.bat
-```
-
-The launcher automatically:
-- Asks `backend\rocm_env.py` which AMD GPU to use (the best one, or `--gpu N`) and which HIP runtime has
-  kernels for it (the installed HIP SDK 6.x, or an optional `therock_sdk` folder), and — for gfx1031 GPUs
-  only — points rocBLAS at the gfx1031 kernel library that setup downloaded
-- Runs `ZLUDA_v6\zluda\zluda.exe -- python app.py` (ZLUDA v6 stable) to translate CUDA to AMD HIP
-- Serves the UI at `http://127.0.0.1:7860` — launching again while it runs just reopens that tab;
-  if another program owns the port, the next free one is used (the console says which)
-
-**Desktop window (optional):** with [Node.js](https://nodejs.org) installed, `cd desktop`,
-`npm install`, `npm run package`, then `powershell -ExecutionPolicy Bypass -File make_shortcuts.ps1` adds
-**ImageGen Studio** to the Desktop and Start menu. It opens its own window, shows a loading screen while the
-backend starts, and stops the backend — freeing the GPU — when you close it (Ctrl +/− zooms the UI).
-
-The **first generation after each launch is slower** (about a minute for SD 1.5) while ZLUDA loads its compiled GPU kernels; later generations run at full speed. **On a new PC (or after a ZLUDA/driver update) the very first image takes 10–15 minutes** while every GPU kernel compiles once — the Generate tab warns about this; it isn't stuck.
-
-### Options
-
-```bat
-launch.bat --port 8080          # Custom port
-launch.bat --share              # Public Gradio share link
-launch.bat --cpu                # Force CPU (skip ZLUDA)
-launch.bat --dml                # DirectML instead of ZLUDA
-launch.bat --gpu 1              # Pick a different GPU index
-launch.bat --no-browser         # Don't open a browser tab
-launch.bat --help               # List all options
-```
-
-### Check the GPU backend
-
-```bat
-run_zluda.bat selftest_zluda.py
-```
-
-Runs matrix multiply, convolution, attention and GroupNorm on the GPU and compares them with the CPU. Use it after any driver, ROCm or ZLUDA change — it fails loudly instead of letting you discover a broken backend through black images.
-
-### Performance (RX 6800M laptop, gfx1031, warm)
-
-Measured with a faster TheRock ROCm runtime; with the standard AMD HIP SDK 6.4 expect roughly 2× these
-times for SD 1.5 (see the main README for HIP SDK numbers).
-
-| Task | Time |
-|---|---|
-| SD 1.5, 512×768, 20 steps | ~7.5 s |
-| SD 1.5 img2img | ~5.5 s |
-| SDXL / Pony / Illustrious, 832×1216, batch 2, 20 steps | ~55 s |
-| SDXL img2img (strength 0.5, 16 steps) | ~15 s |
-| SDXL img2img, checkpoints whose VAE needs fp32 (strength 0.35, 10 steps) | ~8 s |
-| SD→SDXL Bridge (10 + 10 steps, 512×768 → 832×1216) | ~20 s per run |
+PowerShell users can also launch with `launch.ps1`:
 
 ```powershell
-.\launch.ps1 -Port 8080 -Share
-.\launch.ps1 -NoZluda            # Disable ZLUDA injection
-.\launch.ps1 -Cpu                # Force CPU mode
+.\launch.ps1 -Port 8080 -Share   # custom port, public Gradio share link
+.\launch.ps1 -Dml                # DirectML instead of ZLUDA
+.\launch.ps1 -Cpu                # force CPU mode
 ```
+
+`launch.bat --share` also creates a public Gradio link.
 
 ---
 
@@ -308,7 +231,7 @@ The XDNA1 NPU is detected when the AMD Ryzen AI SDK (tested: 1.7.0) is installed
 
 ```
 ImageGenApp/
-├── app.py                    # Main Gradio application (~3800 lines, entry point)
+├── app.py                    # Main Gradio application (entry point)
 ├── config.py                 # Paths, device detection, ZLUDA/cuDNN setup
 ├── requirements.txt          # Python dependencies
 ├── launch.bat                # Windows launcher with ZLUDA v6 injection
@@ -316,34 +239,10 @@ ImageGenApp/
 ├── run_zluda.bat             # Run any script under the ZLUDA environment
 ├── install.bat               # One-time dependency installer
 ├── selftest_zluda.py         # GPU-vs-CPU correctness self-test
-├── run_tests.py              # Test suite (91 CPU tests: UI build, rocm_env/gfx1031, PNG Info, prompts, edge cases, NPU; NPU ones skip without hardware)
+├── run_tests.py              # CPU test suite (NPU tests skip without the hardware)
 ├── download_models.bat/.py   # Starter model downloader
-├── backend/
-│   ├── sd_pipeline.py        # SD 1.x inference (txt2img, img2img, LoRA)
-│   ├── sdxl_pipeline.py      # SDXL inference + iGPU DML text encoding + LoRA
-│   ├── smartsplit_pipeline.py# SmartSplit multi-device pipeline (SD 1.5 only)
-│   ├── hardware_detector.py  # GPU/iGPU/NPU detection, VRAM scoring, registry query
-│   ├── npu_bridge.py         # Subprocess bridge to VitisAI conda env (NPU inference)
-│   ├── vram_estimator.py     # VRAM usage estimation for UI display
-│   ├── lora_trainer.py       # LoRA training (SD 1.5 + SDXL, kohya output)
-│   ├── dataset_manager.py    # Dataset scanning, aspect-ratio bucketing
-│   ├── auto_tagger.py        # BLIP auto-captioning
-│   ├── upscaler.py           # Multi-backend upscaling (Lanczos / ESRGAN)
-│   ├── watermark_remover.py  # OCR detection + LaMa/OpenCV/SD inpainting
-│   ├── civitai_client.py     # Civitai API v1 wrapper (search, download, progress)
-│   ├── model_manager.py      # Local model directory scanner
-│   ├── help_content.py       # Bilingual help tab content (EN/中文)
-│   ├── tag_fetcher.py        # Civitai tag/trigger word fetcher
-│   ├── trigger_reader.py     # Sidecar .civitai.json trigger word reader
-│   ├── lora_keywords.py      # Keyword chips: trigger words, creator prompts, training-tag coverage
-│   ├── prompt_tools.py       # Tag merge (strongest weight wins), token counter, tag-aligned 75-token chunks
-│   ├── detail_tools.py       # Inpaint (only masked), face detection, face-detail pass
-│   ├── sampling.py           # Samplers (Karras, AYS), v-prediction, PAG / FreeU / CFG rescale
-│   ├── danbooru_tags.py      # Danbooru tag autocomplete + spelling hints
-│   ├── wildcards.py          # {a|b} and __name__ dynamic prompts
-│   ├── character_cards.py    # Character cards (settings/characters/)
-│   ├── wd_tagger.py          # WD14 anime tagger (interrogate, dataset tags)
-│   └── model_hash.py         # Background SHA-256 cache → A1111 "Model hash", finds renamed models
+├── backend/                  # One module per feature (list with descriptions: ../AGENTS.md "Layout")
+├── wildcards/                # Starter wildcard files (__outfit__, __pose__ …)
 ├── onnx_cache/               # Cached ONNX exports per model (auto-generated)
 │   └── <model_stem>/         # sdxl_te1.onnx, sdxl_te2.onnx + external data
 ├── models/
@@ -359,27 +258,16 @@ ImageGenApp/
 
 ---
 
-## Hardware
-
-| GPU | Status |
-|---|---|
-| **gfx1031** — RX 6700 / 6700 XT / 6750 XT / 6750 GRE, RX 6700M / 6800M / 6850M XT | **Primary target**, fully tested on an RX 6800M 12 GB |
-| gfx1030 — RX 6800 / 6800 XT / 6900 XT / 6950 XT | Works (HIP SDK has its kernels); less tested |
-| RDNA 3 / 4 (RX 7000 / 9000) | Runtime choice is wired up; ZLUDA support there is still experimental |
-| Anything else | DirectML fallback (`launch.bat --dml`), slower |
-
----
-
 ## Troubleshooting
+
+Install and startup problems (first image slow, black images, VRAM spill, window flashes and closes) are in
+the [main README](../README.md#troubleshooting).
 
 | Problem | Solution |
 |---|---|
 | "CUDA not available" after launch | Ensure HIP SDK is installed and `launch.bat` is used (not `python app.py` directly) |
 | Model fails to load | Check that `.safetensors` is not corrupted; try a HuggingFace model ID |
 | Out of memory (OOM) | Reduce batch to 1, lower resolution, or restart app. Enable SmartSplit for SD 1.5. |
-| Generation suddenly very slow / "⚠ VRAM over-committed" | GPU memory spilled into system RAM (Windows doesn't raise OOM). Lower resolution or batch size |
-| First image after launch is slow | Normal — ZLUDA loads its compiled kernels once per session |
-| Black / noisy images or NaN errors | Run `run_zluda.bat selftest_zluda.py`. Make sure `IMAGEGEN_CUDNN` isn't set. Then check LoRA/model compatibility |
 | App window doesn't close after Ctrl+C | ZLUDA shutdown hang — close the console window |
 | Civitai search returns 0 results | Check your internet connection; Civitai is sometimes slow — try again |
 | Civitai download stuck | Large models (2–10 GB) take time; an API key helps. Check ETA in progress bar. |

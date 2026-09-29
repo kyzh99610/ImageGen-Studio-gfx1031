@@ -101,7 +101,7 @@ window, shows a loading screen while it starts, and frees the GPU when you close
 
 ## Features
 
-- **Generate:** SD 1.x / SD 2.x / SDXL / Pony / Illustrious / NoobAI, 9 samplers, batches, reusable
+- **Generate:** SD 1.x / SD 2.x / SDXL / Pony / Illustrious / NoobAI, 14 samplers, batches, reusable
   per-image seeds, Auto-Loop, A1111 prompt weighting (`(tag:1.2)`, `[tag]`, `BREAK`, `<lora:name:0.8>`)
 - **Hires fix** (small pass → upscale → re-draw details: SDXL 832×1216 → 1248×1824 fits in 12 GB), **variation
   seeds** ("more like this"), **CLIP skip 2** for SD 1.5 anime models, and an **X/Y grid** to compare CFG / steps /
