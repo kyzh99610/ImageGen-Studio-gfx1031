@@ -1682,6 +1682,42 @@ def _():
         wd._session, wd._labels = old
 
 
+@test("LoRA restore survives a textual inversion that grew the token table; A1111 'Schedule type' restores")
+def _():
+    import torch
+    from types import SimpleNamespace
+    from backend.sd_pipeline import SDPipeline
+    from backend.sdxl_pipeline import SDXLPipeline
+    for cls in (SDPipeline, SDXLPipeline):
+        te = torch.nn.Sequential(torch.nn.Embedding(10, 4), torch.nn.Linear(4, 4))
+        te2 = torch.nn.Sequential(torch.nn.Embedding(10, 4))
+        unet = torch.nn.Linear(4, 4)
+        sdp = cls.__new__(cls)
+        sdp.pipe = SimpleNamespace(unet=unet, text_encoder=te, text_encoder_2=te2)
+        sdp._clean_unet_state = sdp._clean_te_state = sdp._clean_te2_state = None
+        sdp._snapshot_clean_state()
+        clean = te[0].weight.detach().clone()
+        with torch.no_grad():                  # a fused LoRA changes weights …
+            unet.weight.add_(1); te[1].weight.add_(1); te[0].weight.add_(1)
+        te[0].weight = torch.nn.Parameter(torch.cat([te[0].weight.data, torch.full((1, 4), 7.0)]))  # … a TI adds a row
+        sdp._restore_clean_state()             # raised "size of tensor a (11) must match (10)" before
+        assert torch.equal(te[0].weight[:10], clean) and torch.equal(te[0].weight[10], torch.full((4,), 7.0))
+        assert torch.equal(unet.weight, sdp._clean_unet_state["weight"])
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    from backend.png_info import read_image_metadata
+    import tempfile
+    for text, want in (("Sampler: DPM++ 2M, Schedule type: Karras", "DPM++ 2M Karras"),
+                       ("Sampler: Euler, Schedule type: Align Your Steps", "Euler AYS"),
+                       ("Sampler: DPM++ 2M Karras, Schedule type: Karras", "DPM++ 2M Karras"),
+                       ("Sampler: Euler a, Schedule type: Automatic", "Euler a")):
+        info = PngInfo(); info.add_text("parameters", f"1girl\nSteps: 20, {text}, CFG scale: 7, Seed: 1")
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "a.png"
+            Image.new("RGB", (8, 8)).save(p, pnginfo=info)
+            assert read_image_metadata(p)["sampler"] == want, (text, read_image_metadata(p)["sampler"])
+
+
 @test("Unload frees text encoders: pyparsing's packrat cache no longer pins Compel frames; inpaint pipe dropped")
 def _():
     import gc, weakref
