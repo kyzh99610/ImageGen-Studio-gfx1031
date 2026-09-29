@@ -393,7 +393,8 @@ run on a PC (empty `zluda.db`) is much slower — ~15 min for the first SD 1.5 i
 ## Package versions (python-3.10)
 
 torch 2.4.1+cu118 · torchvision 0.19.1 · torch-directml 0.2.5 · diffusers 0.36.0 · transformers 4.44.0 ·
-huggingface_hub 0.36.2 · accelerate 1.12.0 · peft 0.17.0 · compel 2.0.2 · gradio 4.19.2 (index.html patched) ·
+huggingface_hub 0.36.2 · accelerate 1.12.0 · peft 0.17.0 · compel 2.0.2 · torchsde 0.2.6 (DPM++ SDE samplers; `make_scheduler` falls back to DPM++ 2M Karras
+without it) · gradio 4.19.2 (index.html patched) ·
 **onnxruntime-directml 1.23.0 only** (plain `onnxruntime` shares the same package dir — never install both;
 `rembg` will complain in `pip check`, harmless) · easyocr 1.7.2 · opencv-python-headless 4.9.0.80.
 

@@ -1739,6 +1739,15 @@ def _():
         assert p.scheduler.config.algorithm_type == "sde-dpmsolver++"
         p.scheduler = sm.make_scheduler(p, "DPM++ 2M AYS")
         assert p.scheduler.config.algorithm_type == "dpmsolver++"
+        # DPM++ SDE needs torchsde: builds when installed, else falls back instead of failing Generate
+        try:
+            import torchsde  # noqa: F401
+            assert type(sm.make_scheduler(p, "DPM++ SDE Karras")).__name__ == "DPMSolverSDEScheduler"
+        except ImportError:
+            pass
+        with patch("diffusers.DPMSolverSDEScheduler.from_config", side_effect=ImportError("no torchsde")):
+            fb = sm.make_scheduler(p, "DPM++ SDE")
+        assert type(fb).__name__ == "DPMSolverMultistepScheduler" and fb.config.use_karras_sigmas is True
         table = AysSchedules["StableDiffusionXLTimesteps" if xl else "StableDiffusionTimesteps"]
         p.scheduler.set_timesteps(10)
         assert [int(t) for t in p.scheduler.timesteps] == table
