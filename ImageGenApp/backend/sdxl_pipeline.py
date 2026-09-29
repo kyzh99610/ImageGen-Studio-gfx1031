@@ -25,7 +25,7 @@ from config import (
     DEFAULT_NEGATIVE, get_torch_dtype,
 )
 from backend.sd_pipeline import (
-    _strip_lora_layers, _load_scheduler, _make_generator, _make_generators, _seed_label, _gpu_vae_decode, _vram_reset, _vram_spill_note,
+    _strip_lora_layers, _restore_param, _load_scheduler, _make_generator, _make_generators, _seed_label, _gpu_vae_decode, _vram_reset, _vram_spill_note,
     _is_sdxl, _model_family, _load_embeddings, _load_companion_ti, SCHEDULER_MAP,
 )
 
@@ -919,7 +919,7 @@ class SDXLPipeline:
             restored, missed = 0, 0
             for name, param in self.pipe.unet.named_parameters():
                 if name in self._clean_unet_state:
-                    param.data.copy_(self._clean_unet_state[name].to(param.device))
+                    _restore_param(param, self._clean_unet_state[name])
                     restored += 1
                 else:
                     missed += 1
@@ -929,11 +929,11 @@ class SDXLPipeline:
             if self._clean_te_state and self.pipe.text_encoder is not None:
                 for name, param in self.pipe.text_encoder.named_parameters():
                     if name in self._clean_te_state:
-                        param.data.copy_(self._clean_te_state[name].to(param.device))
+                        _restore_param(param, self._clean_te_state[name])
             if self._clean_te2_state and getattr(self.pipe, "text_encoder_2", None) is not None:
                 for name, param in self.pipe.text_encoder_2.named_parameters():
                     if name in self._clean_te2_state:
-                        param.data.copy_(self._clean_te2_state[name].to(param.device))
+                        _restore_param(param, self._clean_te2_state[name])
 
     # ── LoRA management ────────────────────────────────────────────────────────
     def load_lora(self, lora_path: str, weight: float = 0.8, slot: int = 0) -> str:
