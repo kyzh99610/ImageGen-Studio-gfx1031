@@ -945,7 +945,7 @@ class SDXLPipeline:
         try:
             self._lora_adapters[slot] = (Path(lora_path).name, lora_path, weight)
             self._reload_all_loras()
-            names = [v[0] for v in sorted(self._lora_adapters.values())]
+            names = [v[0] for _, v in sorted(self._lora_adapters.items())]
             return (f"✅ Slot {slot+1}: {Path(lora_path).name} (×{weight:.2f})"
                     + (f" | Active: {', '.join(names)}" if len(names) > 1 else ""))
         except Exception as e:
@@ -968,7 +968,7 @@ class SDXLPipeline:
             return f"Slot {slot+1} is empty."
         name = self._lora_adapters.pop(slot)[0]
         self._reload_all_loras()
-        remaining = [v[0] for v in sorted(self._lora_adapters.values())]
+        remaining = [v[0] for _, v in sorted(self._lora_adapters.items())]
         return (f"✅ Removed: {name}"
                 + (f" | Active: {', '.join(remaining)}" if remaining else " | No LoRAs active"))
 
