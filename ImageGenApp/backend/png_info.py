@@ -115,6 +115,12 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
     m_sampler = re.search(r"\b(?:Sampler|Scheduler):\s*([^,]+)", param_text, re.I)
     if m_sampler:
         result["sampler"] = m_sampler.group(1).strip()
+        # A1111 1.9+ / Forge split "DPM++ 2M Karras" into "Sampler: DPM++ 2M, Schedule type: Karras"
+        m_sched = re.search(r"\bSchedule type:\s*([^,]+)", param_text, re.I)
+        sched = m_sched.group(1).strip().lower() if m_sched else ""
+        suffix = {"karras": "Karras", "align your steps": "AYS"}.get(sched)
+        if suffix and not result["sampler"].lower().endswith(suffix.lower()):
+            result["sampler"] += f" {suffix}"
 
     # CFG scale
     m_cfg = re.search(r"\bCFG\s*scale:\s*([0-9.]+)", param_text, re.I)
