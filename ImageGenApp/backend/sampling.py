@@ -96,7 +96,12 @@ def make_scheduler(pipe, name: str):
         if k not in extra and k in cfg:
             cfg.pop(k)
     cls = getattr(diffusers, cls_name)
-    sched = cls.from_config(cfg, **extra)
+    try:
+        sched = cls.from_config(cfg, **extra)
+    except ImportError as e:
+        # DPMSolverSDEScheduler needs torchsde (in requirements.txt; older installs lack it)
+        print(f"[Sampler] {name} unavailable ({e}); using DPM++ 2M Karras. Re-run install.bat to add it.")
+        return make_scheduler(pipe, "DPM++ 2M Karras")
     if ays:
         _use_ays(sched, xl=hasattr(pipe, "text_encoder_2"))
     return sched
