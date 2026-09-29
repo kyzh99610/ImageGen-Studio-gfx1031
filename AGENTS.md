@@ -4,7 +4,7 @@ Single source of truth for AI assistants (Copilot, Gemini, Claude, Codex…) wor
 `CLAUDE.md`, `GEMINI.md` and `.github/copilot-instructions.md` only point here — edit this file, not them.
 User-facing docs: `README.md` (install + gfx1031 background) and `ImageGenApp/README.md` (app features).
 
-**Last updated: 2026-09-27**
+**Last updated: 2026-09-29**
 
 ---
 
@@ -20,7 +20,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 <repo root>\                       ← runtimes/models are .gitignored (installer\setup.ps1 downloads them)
 ├── AGENTS.md                      ← this file
 ├── ImageGenApp/                   ← the app
-│   ├── app.py                     ← Gradio Blocks UI (~3800 lines), all callbacks, _save_outputs()
+│   ├── app.py                     ← Gradio Blocks UI (~6000 lines), all callbacks, _save_outputs()
 │   ├── config.py                  ← paths, device detection, ZLUDA env/cuDNN setup (import first!)
 │   ├── launch.bat / launch.ps1    ← main launchers (ZLUDA v6 + therock_sdk PATH setup)
 │   ├── run_zluda.bat <script.py>  ← run any script under the launch.bat ZLUDA environment
@@ -38,6 +38,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │       ├── watermark_remover.py   ← EasyOCR (GPU when cuDNN off) + LaMa/OpenCV/SD inpainting
 │       ├── lora_trainer.py, dataset_manager.py, auto_tagger.py
 │       ├── lycoris.py             ← LoHa/LoKr fusion (diffusers can't load them)
+│       ├── png_info.py            ← read A1111 / Forge / Civitai / NovelAI / ComfyUI metadata + imagegen records
 │       ├── prompt_syntax.py       ← A1111 (x:1.2)/((x))/[x] → Compel weights (Compel ignores A1111 syntax)
 │       ├── prompt_tools.py        ← tag parse/merge (strongest weight wins), CLIP token count, 75-token chunks
 │       │                             at tag boundaries (BREAK = new chunk), encode_chunked(), prompt warnings
@@ -385,7 +386,7 @@ run on a PC (empty `zluda.db`) is much slower — ~15 min for the first SD 1.5 i
 - `.bat` files are **CP1252/ANSI**, not UTF-8, and literal `)` inside `if` blocks must be escaped `^)`.
   Edit them byte-wise; don't let an editor re-save them as UTF-8.
 - Keep each file's existing line endings (`sdxl_pipeline.py` is CRLF, most others LF).
-- API keys live only in `ImageGenApp/settings/api_keys.json` (gitignored, excluded by `make_zip.ps1`).
+- API keys live only in `ImageGenApp/settings/api_keys.json` (gitignored).
   Never hardcode keys in launchers or scripts.
 - Git: commit messages `type: short imperative summary`; runtimes/models/outputs are .gitignored.
 
@@ -466,7 +467,8 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
 11. **img2img makes everything slow** → `from_pipe()` fp32 upcast of shared modules (2026-09-25).
 12. **SDXL LoRA load segfault** → `Module.cpu()` under ZLUDA; fuse on GPU (2026-09-25).
 13. **Accel-TE ran on the dGPU on the laptop** → hardcoded DML id 0; now looked up by name.
-14. **make_zip.ps1 would ship api_keys.json, LoRAs, outputs** → exclusion list fixed (2026-09-26).
+14. **The old make_zip.ps1 would ship api_keys.json, LoRAs, outputs** → exclusion list fixed (2026-09-26); the
+    script isn't in the repo any more — any packaging script must leave out `settings/`, `models/`, `outputs/`.
 15. **Seeds saved as -1** → real per-image seeds (batch: seed, seed+1, …) in filenames and PNG metadata.
 16. **Upscaler returned black images** → 512 px DML tiles exceeded Windows' ~2 s GPU watchdog (TDR); DML tiles
     capped at 256, CPU at 384, blank output retried on CPU.
