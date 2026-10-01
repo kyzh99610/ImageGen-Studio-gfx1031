@@ -82,6 +82,13 @@ def suggest(partial: str, limit: int = 12) -> list[tuple[str, int]]:
     return (starts + inner)[:limit]
 
 
+def _is_qualified(typed: str, known: str) -> bool:
+    """`typed` is `known` with extra words in front / behind ("black butterfly hair ornament" = the tag
+    "butterfly hair ornament" + a colour): a deliberate qualifier, not a typo — the bare tag would drop it."""
+    a, b = typed.split(), known.split()
+    return len(a) > len(b) and any(a[i:i + len(b)] == b for i in range(len(a) - len(b) + 1))
+
+
 @lru_cache(maxsize=4096)
 def did_you_mean(tag: str) -> str | None:
     """A Danbooru tag one small typo away from `tag` (None if `tag` is fine or nothing is close)."""
@@ -92,4 +99,4 @@ def did_you_mean(tag: str) -> str | None:
         return None
     pool = [_tags[i][0] for i in _by_first.get(k[0], [])]
     m = difflib.get_close_matches(k, pool, n=1, cutoff=0.88)
-    return m[0] if m and m[0] != k else None
+    return m[0] if m and m[0] != k and not _is_qualified(k, m[0]) else None

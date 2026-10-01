@@ -300,6 +300,10 @@ def parameters_html() -> str:
              "still bleeds, lower that tag's weight.",
              _cn("权重 (tag:1.3) 现与 A1111 相同（设置 → Prompt weights）；之前权重过强，背景/光照颜色会染到角色身上。"
                  "仍有串色时降低场景标签的权重。")],
+            ["🎲 Samplers on SDXL",
+             "LMS, PNDM and Heun fill SDXL pictures with colour noise here (SD 1.5 is fine) — use DPM++ 2M Karras / AYS, "
+             "Euler a or UniPC. The result line warns when one of them runs on an SDXL model.",
+             _cn("LMS、PNDM、Heun 在 SDXL 上会产生彩色噪点（SD 1.5 正常），请改用 DPM++ 2M Karras / AYS、Euler a 或 UniPC。")],
             ["🎴 Every outfit of a card",
              "Character cards → “🎴▶ Generate every outfit”: each outfit × N seeds (the same seeds for every outfit) "
              "with the current settings, then a labelled contact sheet. Pairs already made with the same settings "

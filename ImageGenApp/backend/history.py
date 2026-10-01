@@ -114,11 +114,32 @@ def search(index: dict, text: str = "", model: str = "", lora: str = "", favs_on
     return out
 
 
+def _placeholder() -> str | None:
+    """A grey tile with a cross for files that can't be thumbnailed (gone or damaged). The gallery must keep
+    one tile per name: it used to skip them, and every tile after the gap then mapped to the wrong
+    names[page × PAGE + index] when clicked."""
+    dst = THUMBS / "_unreadable.jpg"
+    try:
+        if not dst.exists():
+            THUMBS.mkdir(parents=True, exist_ok=True)
+            from PIL import ImageDraw
+            im = Image.new("RGB", (THUMB_SIDE, THUMB_SIDE), (49, 50, 68))
+            d = ImageDraw.Draw(im)
+            m = THUMB_SIDE // 4
+            d.line((m, m, THUMB_SIDE - m, THUMB_SIDE - m), fill=(137, 142, 170), width=6)
+            d.line((THUMB_SIDE - m, m, m, THUMB_SIDE - m), fill=(137, 142, 170), width=6)
+            im.save(dst, "JPEG", quality=85)
+        return str(dst)
+    except Exception:
+        return None
+
+
 def thumbnail(name: str, outputs: Path | None = None) -> str | None:
-    """Path of a ≤256 px JPEG thumbnail (made once, remade when the image changes)."""
+    """Path of a ≤256 px JPEG thumbnail (made once, remade when the image changes); a placeholder tile when
+    the file is gone or damaged."""
     src = Path(outputs or OUTPUTS_DIR) / name
     if not src.is_file():
-        return None
+        return _placeholder()
     THUMBS.mkdir(parents=True, exist_ok=True)
     dst = THUMBS / (src.stem + ".jpg")
     try:
@@ -128,4 +149,4 @@ def thumbnail(name: str, outputs: Path | None = None) -> str | None:
                 im.convert("RGB").save(dst, "JPEG", quality=85)
         return str(dst)
     except Exception:
-        return None
+        return _placeholder()

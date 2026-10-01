@@ -743,6 +743,11 @@ def _clean_extra(extra: dict | None) -> dict:
     }
 
 
+# these three samplers fill SDXL pictures with iridescent colour noise on faces and fabrics (SD 1.5 is fine);
+# a float32 step() didn't change it, cause unknown — the result says so instead of leaving it a mystery
+_SDXL_BAD_SAMPLERS = ("LMS", "PNDM", "Heun")
+_SDXL_FAMILIES = ("sdxl", "pony", "illustrious")
+
 _XY_AXES = ["none", "CFG", "Steps", "Sampler", "Seed", "LoRA 1 weight", "CLIP skip", "Hires denoise",
             "PAG scale", "CFG rescale", "Prompt S/R", "Checkpoint"]
 
@@ -1158,7 +1163,7 @@ def _build_generate_tab():
                                 label="Sampler / Scheduler",
                                 choices=list(SCHEDULER_MAP.keys()),
                                 value=_ls.get("scheduler", "DPM++ 2M Karras"),
-                                info="DPM++ 2M Karras: best all-rounder · DPM++ 2M AYS: similar quality in 10–12 steps.",
+                                info="DPM++ 2M Karras: best all-rounder · DPM++ 2M AYS: similar quality in 10–12 steps · LMS / PNDM / Heun garble SDXL (SD 1.5 only).",
                             )
                             steps_sl    = gr.Slider(1, 150, value=_ls.get("steps", DEFAULT_STEPS), step=1,  label="Steps",
                                                     info="25–35 is the sweet spot.")
@@ -1769,6 +1774,8 @@ def _build_generate_tab():
             return [], '<p style="color:#fab387;">⏹ Generation stopped.</p>', []
         steps, cfg, width, height, batch, seed, strength, fixes = _clean_gen_args(
             steps, cfg, width, height, batch, seed, strength, img2img=bool(use_i2i and init_img is not None))
+        if use_i2i and init_img is None:
+            fixes.append("img2img is on but no image is loaded — made a new image from the prompt instead")
         prompt, neg_prompt = prompt or "", neg_prompt or ""
         ex = _clean_extra(extra)
         # PAG / FreeU / CFG rescale are read by backend.sampling.run_pipe for every pass
@@ -1812,6 +1819,9 @@ def _build_generate_tab():
             fixes += img_fix
         fixes_note = (f'<br><span style="color:#f9e2af;">Adjusted: {"; ".join(fixes)}</span>'
                       if fixes else "")
+        if scheduler in _SDXL_BAD_SAMPLERS and sd.model_family in _SDXL_FAMILIES:
+            fixes_note += (f'<br><span style="color:#fab387;">⚠ {scheduler} garbles SDXL pictures here (colour noise on '
+                           f'faces and fabrics) — try DPM++ 2M AYS, Euler a or UniPC.</span>')
 
         # ── Optionally add the quality tags each model family was trained with ─
         added_tags = added_neg = ""
@@ -1989,7 +1999,10 @@ def _build_generate_tab():
                 return [], '<p style="color:#f38ba8;font-size:13px;">❌ GPU Out of Memory! Try lowering resolution or batch size.</p>', []
             return [], f'<p style="color:#f38ba8;font-size:13px;">❌ Generation failed: {err}</p>', []
         finally:
-            _generation_abort.clear()
+            # The abort flag is deliberately NOT cleared here: the outfit batch and the X/Y grid check it
+            # after every image, and a Stop that landed in a post pass (hires / hand / face — minutes on
+            # SDXL) used to disappear with the image's `finally`, so the batch carried on. Every top-level
+            # run clears it when it starts.
             sd.boosters = {}      # the Bridge / Inpaint buttons must not inherit this run's PAG / FreeU
 
     # ── Auto-Loop generator (yields after each batch) ────────────────────────
@@ -2079,6 +2092,8 @@ def _build_generate_tab():
                     last_error = f"Batch {batch_num} failed: {exc}"
                     break
                 if not imgs and _autoloop_active.is_set():
+                    if _generation_abort.is_set():      # the Stop button (not Stop Loop) ended this batch
+                        break
                     # do_generate reports failures (OOM, bad model…) as HTML, not exceptions
                     last_error = f"Batch {batch_num} produced no images."
                     yield [], info_html, info_html, gr.update(), gr.update()
@@ -2828,7 +2843,8 @@ def _build_generate_tab():
         xl = [fmt(x_axis, v) for v in xs]
         yl = [fmt(y_axis, v) for v in ys]
         cols = len(xs)
-        while len(cells) % cols:                  # stopped mid-row: pad with blanks
+        n_real = len(cells)
+        while len(cells) % cols:                  # stopped mid-row: pad with blanks (for the grid picture only)
             from PIL import Image as _I
             cells.append(_I.new("RGB", cells[0].size, (30, 30, 46)))
         # (a varied seed / checkpoint is in the axis labels — the base value would be wrong here)
@@ -2844,13 +2860,14 @@ def _build_generate_tab():
         gpath = _unique_output(f"grid_{int(time.time())}")
         grid.save(gpath, pnginfo=info)
         grid.info["saved_path"] = str(gpath)
-        msg = (f'<p style="color:#a6e3a1;font-size:13px;">📊 Grid of {len(cells)} images in '
-               f'{_fmt_elapsed(time.time() - t0)} — saved as {gpath.name} (each cell is saved too).</p>')
+        msg = (f'<p style="color:#a6e3a1;font-size:13px;">📊 Grid of {n_real} images in '
+               f'{_fmt_elapsed(time.time() - t0)} — saved as {gpath.name} (each cell is saved too)'
+               + (" — ⏹ stopped early" if _generation_abort.is_set() else "") + '.</p>')
         # the gallery shows the grid first, then the cells: keep the image list and seeds aligned with it
         # (Send to img2img / Show in folder / Last seed used the previous run's list before)
-        shown = [grid] + cells
+        shown = [grid] + cells[:n_real]
         return (shown, msg, status, _active_loras_html(), shown,
-                [cell_seeds[0] if cell_seeds else seed] + cell_seeds + [seed] * (len(cells) - len(cell_seeds)))
+                [cell_seeds[0] if cell_seeds else seed] + cell_seeds)
 
     def do_inpaint_ui(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, prompt, neg_prompt, scheduler,
                       steps, cfg, seed, clip_skip, editor, denoise, padding, progress=gr.Progress()):
@@ -3374,9 +3391,6 @@ def _build_generate_tab():
         if err:
             yield say(f"❌ LoRA problem: {err}")
             return
-        base = int(_num(seed, -1))
-        base = random.randint(0, 2**32 - 1) if base < 0 else base
-        seeds = [(base + k) % 2**32 for k in range(n_seeds)]
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength, hires_on=hires_on,
                                   hires_scale=hires_scale, hires_denoise=hires_denoise, hires_steps=hires_steps,
                                   hires_upscaler=hires_upscaler, fd_on=fd_on, fd_denoise=fd_denoise, fd_mode=fd_mode,
@@ -3390,6 +3404,25 @@ def _build_generate_tab():
         same = _json.dumps([Path(str(model_path)).name, vae_path, [(Path(str(l)).name, w) for l, w in
                             ((lora1, w1), (lora2, w2), (lora3, w3)) if l and l != "none"], neg_prompt, scheduler,
                             steps, cfg, width, height, bool(auto_quality), extra], sort_keys=True, default=str)
+        # seed -1 picks a random base seed — which made "Skip pairs already made" useless after a Stop or a
+        # crash (every run drew new seeds). While a batch of these exact settings is unfinished, its base seed
+        # is remembered in the index ("__pending__") and reused when Skip is on; a finished batch forgets it.
+        pend = index.get("__pending__") if isinstance(index.get("__pending__"), dict) else {}
+        pend_key = hashlib.sha1(f"{same}|{card['name']}|{scene or ''}|{n_seeds}".encode("utf-8")).hexdigest()[:16]
+        user_seed = int(_num(seed, -1))
+        track = user_seed < 0 and bool(resume)          # a random base seed that Skip should be able to find again
+        if user_seed >= 0:
+            base = user_seed
+        elif resume and str(pend.get(pend_key, "")).isdigit():
+            base = int(pend[pend_key]) % 2**32
+        else:
+            base = random.randint(0, 2**32 - 1)
+        seeds = [(base + k) % 2**32 for k in range(n_seeds)]
+        if track:
+            pend[pend_key] = base
+            index["__pending__"] = pend
+            idx_path.parent.mkdir(parents=True, exist_ok=True)
+            idx_path.write_text(_json.dumps(index, indent=1), encoding="utf-8")
         cells, cell_seeds, t0, made, reused = [], [], time.time(), 0, 0
         total = len(outfits) * n_seeds
         try:
@@ -3416,7 +3449,10 @@ def _build_generate_tab():
                     im = imgs[0]
                     cells.append(im); cell_seeds.append(s_); made += 1
                     saved = (getattr(im, "info", None) or {}).get("saved_path")
-                    if saved:
+                    # a Stop / error inside hires, hand or face detail leaves the previous stage's image saved
+                    # ("…saved the images from before it"): show it, but don't remember it as done — Skip would
+                    # keep it without that pass for good
+                    if saved and "saved the images from before it" not in info:
                         index[key] = Path(saved).name
                         idx_path.parent.mkdir(parents=True, exist_ok=True)
                         idx_path.write_text(_json.dumps(index, indent=1), encoding="utf-8")
@@ -3427,8 +3463,11 @@ def _build_generate_tab():
             if not cells:
                 yield say("⏹ Outfit batch stopped.", "#fab387")
                 return
+        if track and not _generation_abort.is_set() and len(cells) == total and pend.pop(pend_key, None) is not None:
+            idx_path.write_text(_json.dumps(index, indent=1), encoding="utf-8")      # finished: forget the seed
         rows = (len(cells) + n_seeds - 1) // n_seeds
-        while len(cells) % n_seeds:                     # stopped mid-row: pad with blanks
+        n_real = len(cells)
+        while len(cells) % n_seeds:                     # stopped mid-row: pad with blanks (contact sheet only)
             cells.append(_I.new("RGB", cells[0].size, (30, 30, 46)))
         labels = [o or "(no outfit)" for o in outfits][:rows]      # rows follow the outfit order
         sheet = _xy_grid(cells, [f"seed {s_}" for s_ in seeds], labels,
@@ -3436,12 +3475,28 @@ def _build_generate_tab():
         spath = _unique_output(f"outfits_{safe_name(card['name']) or 'card'}_{int(time.time())}")
         sheet.save(spath)
         sheet.info["saved_path"] = str(spath)
-        shown = [sheet] + cells
+        shown = [sheet] + cells[:n_real]
+        # off-model check (WD14, CPU, only when its model is already cached): does every image still show the hair /
+        # eye colours the card names? Scene colour leaking into the eyes was the first thing to go (measured).
+        ident = ""
+        try:
+            from backend import identity_check as _ic
+            if n_real and _ic.traits(card.get("tags", "")) and _ic.available():
+                res = _ic.check(cells[:n_real], card.get("tags", ""))
+                bad = [(outfits[i // n_seeds] or card["name"], cell_seeds[i], r["flags"]) for i, r in enumerate(res)
+                       if r.get("flags") and i < len(cell_seeds)]
+                if bad:
+                    ident = ('<br><span style="color:#f9e2af;">⚠ possibly off-model (WD14 does not see the card’s colours): '
+                             + "; ".join(f'{html.escape(str(o))} · seed {s_} ({html.escape(", ".join(f))})' for o, s_, f in bad[:8])
+                             + (f" … and {len(bad) - 8} more" if len(bad) > 8 else "") + "</span>")
+                else:
+                    ident = f"<br>✅ hair / eye colours match the card in all {n_real} image(s) (WD14)"
+        except Exception as e:
+            print(f"[Identity] check skipped: {e}")
         msg = (f'<p style="color:#a6e3a1;font-size:13px;">🎴 {html.escape(card["name"])}: {made} new + {reused} '
                f'reused image(s) in {_fmt_elapsed(time.time() - t0)} — contact sheet {spath.name}'
-               + (" (stopped early)" if _generation_abort.is_set() else "") + "</p>")
-        yield [shown, msg, shown, [cell_seeds[0] if cell_seeds else base] + cell_seeds
-               + [base] * (len(cells) - len(cell_seeds)), status, _active_loras_html()]
+               + (" (stopped early)" if _generation_abort.is_set() else "") + ident + "</p>")
+        yield [shown, msg, shown, [cell_seeds[0] if cell_seeds else base] + cell_seeds, status, _active_loras_html()]
 
     card_batch_btn.click(
         lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],

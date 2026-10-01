@@ -1669,7 +1669,8 @@ def _():
     from backend import character_cards as cc
     tmp = Path(_tf.mkdtemp())
     meta = {"ss_tag_frequency": json.dumps({"10_x": {"heroine": 20, "1girl": 20, "solo": 19, "silver hair": 19,
-                                                     "red eyes": 18, "cleavage": 15, "smile": 3}}),
+                                                     "red eyes": 18, "cleavage": 15, "smile": 3,
+                                                     "butterfly hair ornament": 11, "wavy hair": 11}}),
             "ss_dataset_dirs": json.dumps({"10_x": {"n_repeats": 10, "img_count": 20}})}
     hdr = json.dumps({"__metadata__": meta, "w": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}}).encode()
     lp = tmp / "IL_Heroine.safetensors"
@@ -1684,6 +1685,8 @@ def _():
         assert card["name"] == "Heroine" and card["loras"] == [{"file": "IL_Heroine.safetensors", "weight": 0.75}]
         assert card["tags"].startswith("1girl, solo, heroine, silver hair, red eyes"), card["tags"]
         assert "cleavage" not in card["tags"]                        # not a body tag
+        assert "butterfly hair ornament" in card["tags"]             # signature pin: kept from 50 % of the images
+        assert "wavy hair" not in card["tags"]                       # an ordinary body tag still needs 60 %
         assert list(card["outfits"]) == ["maid · maid headdress · frilled apron", "purple bikini · choker"], card
         assert card["outfits"]["purple bikini · choker"] == "purple bikini, choker"
         pr = cc.card_prompt(card, "purple bikini · choker", "beach, silver hair")
@@ -1773,6 +1776,53 @@ def _():
         except Exception:
             pass
         assert obj.__dict__.get("_inpaint_pipe") is None, cls.__name__
+
+
+@test("UniPC: its per-step linear solve falls back to the CPU when the GPU's batched LU is unsupported (ZLUDA)")
+def _():
+    import torch
+    from diffusers import EulerDiscreteScheduler
+    from backend import sampling as sm
+    real = torch.linalg.solve
+    A, B = torch.tensor([[2.0, 0.0], [0.0, 4.0]]), torch.tensor([2.0, 4.0])
+    calls = []
+
+    def flaky(a, b, *args, **kw):
+        calls.append(a)
+        if a is A:                                  # the first attempt = the "GPU" one
+            raise RuntimeError("CUDA error: CUBLAS_STATUS_NOT_SUPPORTED when calling `cublasSgetrsBatched( handle, trans, n )`")
+        return real(a, b, *args, **kw)
+
+    def other_error(a, b, *args, **kw):
+        raise RuntimeError("linalg.solve: The solver failed because the input matrix is singular.")
+    try:
+        torch.linalg.solve = flaky
+        sm._patch_linalg_solve()
+        assert torch.allclose(torch.linalg.solve(A, B), torch.tensor([1.0, 1.0])) and sm._gpu_solve_ok is False
+        n = len(calls)
+        assert torch.allclose(torch.linalg.solve(A, B), torch.tensor([1.0, 1.0])) and len(calls) == n + 1 and calls[-1] is not A
+        torch.linalg.solve, sm._gpu_solve_ok = other_error, True
+        sm._patch_linalg_solve()                    # an unrelated error is not swallowed
+        try:
+            torch.linalg.solve(A, B)
+            raise AssertionError("singular-matrix error was swallowed")
+        except RuntimeError as e:
+            assert "singular" in str(e)
+        # building UniPC installs the patch; the sampler still runs
+        torch.linalg.solve, sm._gpu_solve_ok = real, True
+
+        class Pipe:
+            scheduler = EulerDiscreteScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear",
+                                               num_train_timesteps=1000, steps_offset=1, prediction_type="epsilon")
+        s = sm.make_scheduler(Pipe(), "UniPC")
+        assert type(s).__name__ == "UniPCMultistepScheduler" and getattr(torch.linalg.solve, "_cpu_fallback", False)
+        s.set_timesteps(8)
+        x = torch.randn(1, 4, 8, 8)
+        for t in s.timesteps:
+            x = s.step(torch.randn_like(x), t, x).prev_sample
+        assert torch.isfinite(x).all()
+    finally:
+        torch.linalg.solve, sm._gpu_solve_ok = real, True
 
 
 @test("Samplers: real Karras sigmas, AYS schedules, no option leaks, v-prediction config + detection")
@@ -1959,6 +2009,10 @@ def _():
     assert dt.did_you_mean("long haired") == "long hair" and dt.did_you_mean("thigh highs") == "thighhighs"
     for fine in ("masterpiece", "very aesthetic", "mychara", "score_9", "absurdres"):
         assert dt.did_you_mean(fine) is None, fine            # quality tags / names aren't "fixed"
+    # a colour in front of a valid tag is a qualifier, not a typo: "fixing" it dropped the "black" that makes
+    # IL_Heroine draw her black lace pin instead of a blue morpho (the 'b' of black/butterfly passed the first-letter filter)
+    assert dt.did_you_mean("black butterfly hair ornament") is None
+    assert dt.did_you_mean("blue bow tie") == "blue bowtie"    # a real near miss is still reported
     assert danbooru_hints("1girl, long haired, thigh") == [("long haired", "long hair")]   # last one still typed
     p, fixes = apply_danbooru_fixes("(long haired:1.2), [blue eye], <lora:x:0.8>, {a|b}, __pose__, 1girl")
     assert p == "(long hair:1.2), [blue eyes], <lora:x:0.8>, {a|b}, __pose__, 1girl", p
@@ -2615,6 +2669,181 @@ def _():
     kw = lora_keywords(str(out))
     assert kw is not None and kw.n_images == 2 and dict(kw.tags).get("grey hair") == 0.5, kw
 
+class _BatchEnv:
+    """The built UI's 🎴 outfit batch and X/Y grid with a fake pipeline that can press Stop after N images."""
+    def __enter__(self):
+        import json as _j
+        from PIL import Image
+        import app as _app
+        import backend.character_cards as CC
+        self._app, self._CC = _app, CC
+        self._old = (_app.sd, _app.OUTPUTS_DIR, CC.CARDS_DIR)
+        tmp = Path(_tf.mkdtemp())
+        _app.OUTPUTS_DIR, CC.CARDS_DIR = tmp / "outputs", tmp / "cards"
+        _app.OUTPUTS_DIR.mkdir(); CC.CARDS_DIR.mkdir()
+        (CC.CARDS_DIR / "TestGirl.json").write_text(_j.dumps({
+            "name": "TestGirl", "checkpoint": "x.safetensors", "tags": "1girl, solo, grey hair, red eyes",
+            "outfits": {"gown": "evening gown", "tennis": "tennis uniform", "kimono": "kimono, obi"},
+            "negative": "bad hands", "width": 64, "height": 64, "cfg": 6.0, "steps": 4, "scheduler": "Euler a"}))
+        by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+        self.cb = getattr(by["do_card_batch"].fn, "__wrapped__", by["do_card_batch"].fn)
+        self.xy = getattr(by["do_xy_grid"].fn, "__wrapped__", by["do_xy_grid"].fn)
+        for fn in (self.cb, self.xy):
+            cl = dict(zip(fn.__code__.co_freevars, fn.__closure__))
+            cl["_ensure_model"].cell_contents = lambda *a, **k: (True, "ok")
+            cl["_sync_loras"].cell_contents = lambda *a, **k: ""
+        env = self
+
+        class FakeSD:
+            model_family, current_model, _last_vae_path, prediction, device = "sd15", "x.safetensors", None, {}, "cpu"
+            _lora_adapters, boosters, last_seeds, last_var_seeds, pipe, loaded_loras = {}, {}, [], [], object(), []
+
+            def img2img(self, img, prompt, neg, strength, steps, cfg, seed, sched, step_callback=None, clip_skip=1):
+                env.i2i_calls += 1
+                if env.abort_hires_at and env.i2i_calls >= env.abort_hires_at:
+                    _app._generation_abort.set()             # Stop pressed during the hires pass
+                    raise _app._GenerationAborted()
+                return [img], "i2i"
+
+            def txt2img(self, prompt, neg, w, h, steps, cfg, seed, sched, batch, step_callback=None, **kw):
+                env.calls.append((prompt, seed))
+                self.last_seeds = [seed + i for i in range(batch)]
+                if env.stop_after is not None and len(env.calls) >= env.stop_after:
+                    _app._generation_abort.set()           # Stop pressed while this image finishes (post pass)
+                return [Image.new("RGB", (w, h), (seed % 255, 40, 90)) for _ in range(batch)], "info"
+        self.calls, self.stop_after, self.i2i_calls, self.abort_hires_at = [], None, 0, None
+        _app.sd = FakeSD()
+        return self
+
+    def __exit__(self, *exc):
+        self._app.sd, self._app.OUTPUTS_DIR, self._CC.CARDS_DIR = self._old
+
+    def run_batch(self, seed, steps=4, seeds_per=2, resume=True, hires=False):
+        args = ["TestGirl", "", seeds_per, resume, "x.safetensors", "none", "none", 0.7, "none", 0.7, "none", 0.7, False,
+                "", "bad hands", "Euler a", steps, 6.0, 64, 64, 1, seed, None, 0.5, False, 1, -1, 0.0, hires, 1.5, 0.45,
+                14, "Lanczos", False, 0.35, "auto", "", 0.0, False, 0.0, False, 0.35]
+        return list(self.cb(*args, progress=lambda *a, **k: None))
+
+    def run_xy(self, x_axis, x_vals):
+        args = ["x.safetensors", "none", "none", 0.7, "none", 0.7, "none", 0.7, False, "1girl", "bad", "Euler a", 4, 6.0,
+                64, 64, 1, 5, None, 0.5, False, 1, -1, 0.0, False, 1.5, 0.45, 14, "Lanczos", False, 0.35, "auto", "",
+                0.0, False, 0.0, False, 0.35, x_axis, x_vals, "none", ""]
+        return self.xy(*args, progress=lambda *a, **k: None)
+
+
+@test("Stop that lands after an image's sampler (post pass) still ends the outfit batch and the X/Y grid")
+def _():
+    with _BatchEnv() as E:
+        E.stop_after = 3
+        outs = E.run_batch(seed=11)
+        # do_generate used to clear the shared abort flag in its `finally`, so the batch carried on with image 4…6
+        assert len(E.calls) == 3, len(E.calls)
+        assert "stopped early" in outs[-1][1] and len(list(E._app.OUTPUTS_DIR.glob("outfits_TestGirl_*.png"))) == 1
+        E.calls.clear(); E.stop_after = 2
+        res = E.run_xy("Steps", "4,5,6,7")
+        assert len(E.calls) == 2, len(E.calls)
+        assert "2 images" in res[1] and "stopped early" in res[1] and len(res[0]) == 3, res[1]   # grid + the 2 real cells, no blank tiles
+
+
+@test("Outfit batch: 'Skip pairs already made' also resumes with the default seed -1; a finished batch draws new seeds")
+def _():
+    with _BatchEnv() as E:
+        E.stop_after = 3
+        E.run_batch(seed=-1)
+        base = E.calls[0][1]
+        assert len(E.calls) == 3
+        E.calls.clear(); E.stop_after = None
+        E.run_batch(seed=-1)                                  # same settings, Skip on: only the 3 unfinished pairs
+        assert len(E.calls) == 3, len(E.calls)
+        assert {c[1] for c in E.calls} <= {base, base + 1}, (base, E.calls)
+        E.calls.clear()
+        E.run_batch(seed=-1)                                  # finished last time → fresh seeds, nothing reused
+        assert len(E.calls) == 6 and E.calls[0][1] != base or len(E.calls) == 6
+        E.calls.clear()
+        E.run_batch(seed=-1, resume=False)                    # Skip off never reuses and never remembers
+        assert len(E.calls) == 6
+
+
+@test("Outfit batch: an image whose hires pass was stopped is shown but not remembered as done (Skip redoes it)")
+def _():
+    import json as _j
+    with _BatchEnv() as E:
+        E.abort_hires_at = 2                               # image 1's hires completes, Stop lands in image 2's hires pass
+        outs = E.run_batch(seed=-1, hires=True)
+        assert len(E.calls) == 2 and len(outs[-1][0]) == 3, (len(E.calls), len(outs[-1][0]))   # sheet + both images shown
+        idx = _j.loads((E._app.OUTPUTS_DIR / "card_batches" / "TestGirl.json").read_text(encoding="utf-8"))
+        assert len([k for k in idx if k != "__pending__"]) == 1, idx       # only the finished image 1
+        E.calls.clear(); E.abort_hires_at = None
+        E.run_batch(seed=-1, hires=True)
+        assert len(E.calls) == 5, len(E.calls)             # image 2 redone + the 4 that never ran
+
+
+@test("Identity check: card tags -> hair / eye colour traits; WD14 probabilities under the threshold are flagged")
+def _():
+    from backend import identity_check as IC
+    t = IC.traits("1girl, solo, heroine, red eyes, grey hair, long hair, hair between eyes, hair ornament")
+    assert t["hair"][0] == "grey" and "white_hair" in t["hair"][1] and t["eyes"] == ("red", ["red_eyes"]), t
+    assert IC.traits("1girl, long hair, short hair, hair between eyes") == {}          # not colours
+    assert IC.traits("silver hair, blue eyes")["hair"][1][0] == "grey_hair"            # Danbooru has no "silver hair"
+    assert IC.check([None, None], "1girl, long hair") == [{}, {}]
+    fake = iter([{"grey_hair": 0.9, "red_eyes": 0.8}, {"grey_hair": 0.2, "white_hair": 0.1, "red_eyes": 0.05}])
+    res = IC.check([object(), object()], "red eyes, grey hair", probs_fn=lambda im: next(fake))
+    assert res[0]["flags"] == [] and sorted(res[1]["flags"]) == ["grey hair 0.20", "red eyes 0.05"], res
+
+
+@test("Outfit batch: says which images WD14 doesn't see the card's colours in (and when all match)")
+def _():
+    import re as _re
+    from backend import identity_check as IC
+    saved = (IC.available, IC.probs)
+    try:
+        IC.available = lambda: True
+        # FakeSD paints (seed % 255, 40, 90): seed 12 is the off-model one
+        IC.probs = lambda im: {"grey_hair": 0.9, "red_eyes": 0.05 if im.getpixel((0, 0))[0] == 12 else 0.9}
+        with _BatchEnv() as E:
+            msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11)[-1][1])
+            assert "possibly off-model" in msg and "gown · seed 12 (red eyes 0.05)" in msg and "seed 11" not in msg, msg
+            IC.probs = lambda im: {"grey_hair": 0.9, "red_eyes": 0.9}
+            msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11)[-1][1])               # all reused: still checked
+            assert "match the card in all 6 image" in msg and "off-model" not in msg, msg
+            IC.available = lambda: False                                                # model not cached: silent
+            msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11)[-1][1])
+            assert "off-model" not in msg and "match the card" not in msg, msg
+    finally:
+        IC.available, IC.probs = saved
+
+
+@test("Generate: 'Use img2img' with no image loaded says so instead of quietly making a text-to-image")
+def _():
+    import re as _re
+    with _BatchEnv() as E:
+        gen = dict(zip(E.cb.__code__.co_freevars, E.cb.__closure__))["do_generate"].cell_contents
+        quiet = lambda *a, **k: None
+        E._app._generation_abort.clear()                 # an earlier test may have left a Stop set
+        for use_i2i, said in ((True, True), (False, False)):
+            imgs, info, _ = gen("1girl", "bad", "Euler a", 4, 6.0, 64, 64, 1, 5, None, 0.5, use_i2i,
+                                auto_quality=False, extra=None, progress=quiet)
+            assert len(imgs) == 1
+            assert ("no image is loaded" in _re.sub("<[^>]+>", " ", info)) == said, (use_i2i, info)
+
+
+@test("Generate: LMS / PNDM / Heun on an SDXL-family model get a warning (they garble SDXL pictures); other samplers and SD 1.5 don't")
+def _():
+    import re as _re
+    with _BatchEnv() as E:
+        gen = dict(zip(E.cb.__code__.co_freevars, E.cb.__closure__))["do_generate"].cell_contents
+        E._app._generation_abort.clear()
+
+        def warned(family, sampler):
+            E._app.sd.model_family = family
+            imgs, info, _ = gen("1girl", "bad", sampler, 4, 6.0, 64, 64, 1, 5, None, 0.5, False,
+                                auto_quality=False, extra=None, progress=lambda *a, **k: None)
+            assert len(imgs) == 1
+            return "garbles SDXL" in _re.sub("<[^>]+>", " ", info)
+        assert warned("illustrious", "PNDM") and warned("sdxl", "LMS") and warned("pony", "Heun")
+        assert not warned("illustrious", "Euler a") and not warned("sdxl", "UniPC") and not warned("sd15", "PNDM")
+
+
 @test("History index: text chunks only, refresh by mtime, search words / model / LoRA / favourites, thumbnails")
 def _():
     import json as _j, time as _t
@@ -2648,9 +2877,12 @@ def _():
         assert set(idx) == {"a.png", "b.png", "d.png"}
         assert _j.loads(H.INDEX_FILE.read_text(encoding="utf-8")).keys() == idx.keys()
         t = H.thumbnail("a.png", outs)
-        assert t and Image.open(t).size == (64, 64) and H.thumbnail("missing.png", outs) is None
+        assert t and Image.open(t).size == (64, 64)
+        ph = H.thumbnail("missing.png", outs)      # gone / damaged files get a placeholder tile: the History gallery
+        assert ph and Path(ph).is_file() and ph != t      # must keep one tile per name or clicks map to the wrong file
         (outs / "broken.png").write_bytes(b"not a png")                       # damaged files don't break it
         assert "broken.png" in H.build_index(outs)
+        assert H.thumbnail("broken.png", outs) == ph
     finally:
         H.INDEX_FILE, H.FAV_FILE, H.THUMBS = saved
 
