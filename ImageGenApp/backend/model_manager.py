@@ -125,6 +125,45 @@ def checkpoint_arch(path: str) -> str | None:
     return _ARCH_CACHE[key]
 
 
+_VAE_FAMILY: dict = {}
+
+
+def vae_family(path: str) -> str | None:
+    """'sdxl' / 'sd1' for a VAE file (or a checkpoint's built-in VAE), None if it can't be told.
+    Both VAEs have identical tensor shapes — an SD 1.5 VAE loads into SDXL without an error and decodes
+    garbage — but their quant_conv bias differs by an order of magnitude: |b| ≈ 43.8 for every SDXL VAE
+    here (base, Pony, Illustrious, NoobAI), 4.4–6.4 for SD 1.x ones (ft-mse, anything, orangemix …).
+    Reads just that tensor from the file (no mmap of a 6 GB checkpoint)."""
+    import json as _j, struct
+    import numpy as np
+    p = Path(str(path))
+    key = (str(p), p.stat().st_mtime if p.is_file() else 0)
+    if key in _VAE_FAMILY:
+        return _VAE_FAMILY[key]
+    fam = None
+    try:
+        if p.suffix.lower() == ".safetensors":
+            with open(p, "rb") as f:
+                n = struct.unpack("<Q", f.read(8))[0]
+                hdr = _j.loads(f.read(n))
+                name = next((k for k in ("quant_conv.bias", "first_stage_model.quant_conv.bias",
+                                         "vae.quant_conv.bias") if k in hdr), None)
+                if name:
+                    info = hdr[name]
+                    a, b = info["data_offsets"]
+                    f.seek(8 + n + a)
+                    raw = f.read(b - a)
+                    if info["dtype"] == "BF16":
+                        t = (np.frombuffer(raw, np.uint16).astype(np.uint32) << 16).view(np.float32)
+                    else:
+                        t = np.frombuffer(raw, {"F16": np.float16, "F32": np.float32}[info["dtype"]]).astype(np.float32)
+                    fam = "sdxl" if float(np.linalg.norm(t)) > 20 else "sd1"
+    except Exception:
+        fam = None
+    _VAE_FAMILY[key] = fam
+    return fam
+
+
 def list_checkpoints() -> list[str]:
     return _scan(CHECKPOINTS_DIR)
 

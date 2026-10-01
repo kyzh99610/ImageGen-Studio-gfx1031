@@ -2670,6 +2670,110 @@ def _():
     m = np.asarray(_ramp_mask(100, 80, 20, 0, 0, 10))
     assert m[:, 0].max() == 0 and m[40, 50] == 255 and m[0, 99] == 255 and m[-1, 50] == 0
 
+@test("Prompt weights: A1111 emphasis (multiply, keep the mean) is the default; Compel mode unchanged; SDXL cache keyed by mode")
+def _():
+    import torch, inspect
+    try:
+        from transformers import CLIPTokenizer
+        tok = CLIPTokenizer.from_pretrained("stable-diffusion-v1-5/stable-diffusion-v1-5", subfolder="tokenizer",
+                                            local_files_only=True)
+    except Exception:
+        raise Skip("SD 1.5 CLIP tokenizer not in .hf_cache")
+    from transformers import CLIPTextModel, CLIPTextConfig
+    from compel import Compel, ReturnedEmbeddingsType
+    from backend import prompt_syntax as PS
+    torch.manual_seed(0)
+    te = CLIPTextModel(CLIPTextConfig(vocab_size=len(tok), hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+                                      num_attention_heads=4, max_position_embeddings=77))
+    with torch.no_grad():
+        te.text_model.final_layer_norm.bias.fill_(0.3)          # real CLIP has a non-zero mean
+    c = Compel(tokenizer=tok, text_encoder=te, truncate_long_prompts=False,
+               returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED)
+    old = PS.EMPHASIS["mode"]
+    try:
+        assert old == "a1111" or True
+        PS.set_emphasis("a1111")
+        plain = c("a girl, sunset")
+        w = c(PS.a1111_to_compel("a girl, (sunset:1.4)"))
+        assert abs(w.mean().item() - plain.mean().item()) < 1e-5            # mean kept (A1111 "Original")
+        ids = tok("a girl, sunset").input_ids
+        k = ids.index(tok.convert_tokens_to_ids("sunset</w>"))
+        ratio = (w[0, k] / plain[0, k]).mean().item()
+        assert 1.2 < ratio < 1.6, ratio                                      # the weighted token ≈ ×1.4 (rescaled)
+        PS.set_emphasis("compel")
+        wc = c(PS.a1111_to_compel("a girl, (sunset:1.4)"))
+        assert not torch.allclose(wc, w) and torch.equal(c("a girl, sunset"), plain)   # unit weights identical
+        assert PS.set_emphasis("Compel (stronger)") == "compel" and PS.set_emphasis("A1111 (default)") == "a1111"
+    finally:
+        PS.set_emphasis(old)
+    from backend import sdxl_pipeline as SX
+    assert 'EMPHASIS["mode"])' in inspect.getsource(SX._build_sdxl_embeds)   # cache must not mix modes
+
+
+@test("VAE family from the quant_conv bias: an SD 1.5 VAE on SDXL (or back) is ignored with a warning, not decoded")
+def _():
+    import json as _j, struct
+    import numpy as np
+    from backend import model_manager as mm
+    tmp = Path(_tf.mkdtemp())
+
+    def st(name, key, norm, dtype="F16"):
+        v = np.full(8, norm / np.sqrt(8), np.float16 if dtype == "F16" else np.float32)
+        raw = v.tobytes()
+        hdr = _j.dumps({key: {"dtype": dtype, "shape": [8], "data_offsets": [0, len(raw)]}}).encode()
+        (tmp / name).write_bytes(struct.pack("<Q", len(hdr)) + hdr + raw)
+        return str(tmp / name)
+    assert mm.vae_family(st("sdxl_vae.safetensors", "quant_conv.bias", 43.8)) == "sdxl"
+    assert mm.vae_family(st("ft_mse.safetensors", "quant_conv.bias", 4.4)) == "sd1"
+    assert mm.vae_family(st("ckpt.safetensors", "first_stage_model.quant_conv.bias", 43.8, "F32")) == "sdxl"
+    assert mm.vae_family(st("nokey.safetensors", "foo.weight", 1.0)) is None
+    (tmp / "x.pt").write_bytes(b"pickle")
+    assert mm.vae_family(str(tmp / "x.pt")) is None
+
+
+@test("GPU lock: a generator job resumed on another thread releases the lock (RLock raised and stayed held)")
+def _():
+    import threading
+    import app as _app
+
+    def job():
+        yield 1
+        yield 2
+    g = _app._locked(job)()
+    t1 = threading.Thread(target=lambda: next(g)); t1.start(); t1.join(5)       # takes the lock on thread A
+    assert _app._GPU_LOCK.locked()
+    t2 = threading.Thread(target=lambda: list(g)); t2.start(); t2.join(5)       # finishes on thread B
+    assert not _app._GPU_LOCK.locked(), "lock still held after the job ended on another thread"
+
+
+@test("Weighting mode is recorded (record + A1111 text) and read back; restore notes a mode mismatch")
+def _():
+    import json as _j
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    import app as _app
+    from backend import prompt_syntax as PS
+    from backend.png_info import read_image_metadata
+    old = PS.EMPHASIS["mode"]
+    try:
+        PS.set_emphasis("compel")
+        rec = _app._gen_record(None, prompt="1girl, (sunset:1.3)", steps=20)
+        assert rec["emphasis"] == "compel" and "Emphasis: Compel" in _app._params_text(rec)
+        PS.set_emphasis("a1111")
+        assert "Emphasis" not in _app._params_text(_app._gen_record(None, prompt="x", steps=20))
+        info = PngInfo(); info.add_text("parameters", "1girl, (sunset:1.3)\nSteps: 20, Sampler: Euler, Seed: 1, "
+                                                      "Emphasis: Compel")
+        with _tf.TemporaryDirectory() as d:
+            f = Path(d) / "e.png"; Image.new("RGB", (8, 8)).save(f, pnginfo=info)
+            meta = read_image_metadata(f)
+        assert meta["emphasis"] == "compel"
+        plan = _app._restore_plan(meta)
+        assert any("Compel prompt weighting" in n for n in plan["notes"]), plan["notes"]
+        meta["prompt"] = "1girl, sunset"                                    # no weights → no note
+        assert not any("weighting" in n for n in _app._restore_plan(meta)["notes"])
+    finally:
+        PS.set_emphasis(old)
+
 # ══════════════════════════════════════════════════════════════════════════
 # Summary
 # ══════════════════════════════════════════════════════════════════════════

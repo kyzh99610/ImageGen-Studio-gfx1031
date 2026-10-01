@@ -96,6 +96,62 @@ def _patch_compel_fragment() -> None:
 _patch_compel_fragment()
 
 
+# How "(tag:1.3)" weights act on the text embedding.
+#   "a1111"  — A1111's default ("Original" emphasis): each token's embedding × its weight, then the chunk is rescaled
+#              so its mean is what it was unweighted. Civitai prompts are written for this.
+#   "compel" — Compel's own: empty + (z − empty) × w, no renormalisation, and weights < 1 blend toward the prompt
+#              without that tag. Measured (SD 1.5, 5 coloured scenes, scene tags at 1.3): background colour in the
+#              character's hair +15 over unweighted with Compel — far stronger than the same prompt in A1111.
+EMPHASIS = {"mode": "a1111"}
+
+
+def set_emphasis(mode: str) -> str:
+    EMPHASIS["mode"] = "compel" if str(mode).lower().startswith("compel") else "a1111"
+    return EMPHASIS["mode"]
+
+
+def _patch_compel_emphasis() -> None:
+    try:
+        from compel import embeddings_provider as EP
+    except Exception:
+        return
+    if getattr(EP.EmbeddingsProvider, "_imagegen_emphasis", False):
+        return
+    orig = EP.EmbeddingsProvider.get_embeddings_for_weighted_prompt_fragments
+
+    def get_embeddings_for_weighted_prompt_fragments(self, text_batch, fragment_weights_batch,
+                                                     should_return_tokens=False, device="cpu"):
+        if EMPHASIS["mode"] != "a1111" or all(all(w == 1 for w in ws) for ws in fragment_weights_batch):
+            return orig(self, text_batch, fragment_weights_batch, should_return_tokens=should_return_tokens,
+                        device=device)
+        import torch
+        batch_z = batch_tokens = None
+        n = self.max_token_count
+        for fragments, weights in zip(text_batch, fragment_weights_batch):
+            tokens, w, mask = self.get_token_ids_and_expand_weights(fragments, weights, device=device)
+            zs = []
+            for s in range(0, tokens.shape[0], n):
+                ids = tokens[s:s + n].unsqueeze(0)
+                m = mask[s:s + n].unsqueeze(0) if mask is not None else None
+                z = self._encode_token_ids_to_embeddings(ids, m)
+                cw = w[s:s + n]
+                if bool((cw != 1).any()):
+                    before = z.float().mean()
+                    z = z * cw.reshape(1, -1, 1).to(z)
+                    z = z * (before / z.float().mean()).to(z)
+                zs.append(z)
+            z = torch.cat(zs, dim=1)                         # [1, tokens, dim], as Compel's own method
+            batch_z = z if batch_z is None else torch.cat([batch_z, z], dim=1)
+            batch_tokens = tokens.unsqueeze(0) if batch_tokens is None else torch.cat([batch_tokens, tokens.unsqueeze(0)], dim=1)
+        return (batch_z, batch_tokens) if should_return_tokens else batch_z
+
+    EP.EmbeddingsProvider.get_embeddings_for_weighted_prompt_fragments = get_embeddings_for_weighted_prompt_fragments
+    EP.EmbeddingsProvider._imagegen_emphasis = True
+
+
+_patch_compel_emphasis()
+
+
 def a1111_to_compel(prompt: str) -> str:
     """Convert A1111-style emphasis to Compel weights (no-op for prompts without brackets)."""
     if not prompt:

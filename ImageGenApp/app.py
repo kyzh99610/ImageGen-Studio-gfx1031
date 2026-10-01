@@ -147,6 +147,13 @@ import torch  # noqa: E402,F401
 preload_tokenizer()
 from backend.lora_keywords import chips_for, lora_keywords
 
+try:                                   # Settings → Prompt weights (saved choice)
+    import json as _j0
+    from backend.prompt_syntax import set_emphasis as _set_emphasis
+    _set_emphasis(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("emphasis", "a1111"))
+except Exception:
+    pass
+
 # ── Singleton service objects (created once at startup) ────────────────────────
 sd       = SDPipeline()       # active pipeline — swapped to SDXLPipeline when SDXL model loaded
 _sd15    = sd                 # keep reference for quick switch-back
@@ -167,8 +174,11 @@ _generation_abort = threading.Event()
 _autoloop_active  = threading.Event()   # set = looping, clear = stopped
 # One GPU job at a time. Gradio's shared queue slot alone isn't enough: a Stop with `cancels=`
 # cancelled the asyncio task and handed the slot to the next job while the stopped job's thread
-# was still loading / sampling (audit F-02b). This lock is held for the whole job, in its thread.
-_GPU_LOCK = threading.RLock()
+# was still loading / sampling (audit F-02b). This lock is held for the whole job.
+# A plain Lock, not an RLock: Gradio steps generator jobs (Auto-Loop, outfit batch) on pool threads, so
+# the thread that releases it may not be the one that took it — an RLock then raises "cannot release
+# un-acquired lock" and stays held, hanging every later GPU job. No GPU job calls another one.
+_GPU_LOCK = threading.Lock()
 
 
 def gpu_job(fn):
@@ -1561,7 +1571,7 @@ def _build_generate_tab():
         # here used to swallow a Stop pressed while the model was loading.
         if not _from_generate:
             _generation_abort.set()
-        vae = None if (not vae_path or vae_path == "none") else vae_path
+        vae, vae_warn = _effective_vae(model_path, vae_path)
         msg = sd.load_model(model_path, vae)
         if not _from_generate:
             _generation_abort.clear()
@@ -1615,7 +1625,7 @@ def _build_generate_tab():
             res_hint = "<br>📐 SD 1.5 — use <b>512×512</b> or <b>512×768</b>."
 
         color = "#a6e3a1" if "✅" in msg else "#f38ba8"
-        status_html = f'<p style="color:{color};">{msg}{lora_status}{res_hint}</p>'
+        status_html = f'<p style="color:{color};">{msg}{lora_status}{res_hint}{vae_warn}</p>'
         # Refresh user preset dropdown for the new model family
         return status_html, gr.update(choices=_list_user_presets())
 
@@ -2569,6 +2579,24 @@ def _build_generate_tab():
     def _norm_vae(v):
         return None if (not v or v == "none") else v
 
+    def _effective_vae(model_path, vae_path):
+        """(VAE to load, warning): a VAE of the other family (an SD 1.5 VAE with an SDXL checkpoint or the
+        other way round) loads without an error but decodes garbage — the checkpoint's own VAE is used then.
+        The dropdown keeps its value across model switches, so this happened silently."""
+        from backend.model_manager import vae_family
+        from backend.sd_pipeline import _is_sdxl
+        vae = _norm_vae(vae_path)
+        if not vae or not model_path:
+            return vae, ""
+        fam = vae_family(vae)
+        want = "sdxl" if _is_sdxl(model_path) else "sd1"
+        if fam and fam != want:
+            return None, (f'<br><span style="color:#f9e2af;">⚠ {html.escape(Path(str(vae)).name)} is an '
+                          f'{"SDXL" if fam == "sdxl" else "SD 1.5"} VAE and this is an '
+                          f'{"SDXL" if want == "sdxl" else "SD 1.5"} checkpoint — using the checkpoint\'s own VAE '
+                          f'(a mismatched VAE decodes garbage). Set VAE to none or pick a matching one.</span>')
+        return vae, ""
+
     def _load_desc(model_path) -> str:
         """What's about to happen when this checkpoint loads (a HF repo not yet cached downloads first)."""
         gb = _hf_download_gb(model_path)
@@ -2588,7 +2616,7 @@ def _build_generate_tab():
         if not model_path:
             return False, '<p style="color:#f38ba8;">❌ Pick a checkpoint first.</p>'
         if (sd.pipe is not None and sd.current_model == model_path
-                and _norm_vae(sd._last_vae_path) == _norm_vae(vae_path)):
+                and _norm_vae(sd._last_vae_path) == _effective_vae(model_path, vae_path)[0]):
             return True, gr.update()
         if progress is not None:
             progress(0, desc=_load_desc(model_path))
@@ -5633,6 +5661,22 @@ def _build_settings_tab():
     with gr.Tab("⚙️ Settings"):
         with gr.Row():
             with gr.Column():
+                from backend.prompt_syntax import EMPHASIS as _EMPH, set_emphasis as _set_emph
+                gr.Markdown("### ⚖️ Prompt weights")
+                emph_rb = gr.Radio(
+                    ["A1111 (default)", "Compel (stronger)"],
+                    value="Compel (stronger)" if _EMPH["mode"] == "compel" else "A1111 (default)",
+                    label="How (tag:1.2) weights are applied",
+                    info="A1111 = like A1111 / Forge / Civitai (weight, then keep the overall strength). Compel = "
+                         "the app's old behaviour: a weighted tag counts ~5× more — weighted background / colour "
+                         "tags bleached their colour into the character. Saved for the next start.")
+                emph_status = gr.HTML("")
+
+                def on_emphasis(choice):
+                    mode = _set_emph("compel" if str(choice).startswith("Compel") else "a1111")
+                    _save_pref("emphasis", mode)
+                    return f'<p style="color:#a6e3a1;font-size:13px;">✅ Prompt weights: {mode}</p>'
+                emph_rb.change(on_emphasis, [emph_rb], [emph_status])
                 gr.Markdown("### 🖥 GPU")
 
                 # ── GPU picker ──────────────────────────────────────────────
@@ -6134,6 +6178,13 @@ def _restore_plan(meta: dict) -> dict:
     plan["freeu"] = bool(meta.get("freeu"))
     plan["cfg_rescale"] = float(_num(meta.get("cfg_rescale"), 0.0))
     plan["mode"] = rec.get("mode") or ("img2img" if meta.get("strength") is not None else "txt2img")
+    # weighted prompts look different under the other weighting mode: say so (images from before the
+    # A1111 mode existed were made with Compel's)
+    from backend.prompt_syntax import EMPHASIS
+    made = meta.get("emphasis") or (rec.get("emphasis") if rec else None) or ("compel" if rec else "a1111")
+    if made != EMPHASIS["mode"] and re.search(r"\([^()]*:\s*\d*\.?\d+\s*\)|\(\(|\[", str(meta.get("prompt") or "")):
+        plan["notes"].append(f"made with {'Compel' if made == 'compel' else 'A1111'} prompt weighting — switch "
+                             f"Settings → Prompt weights to reproduce it exactly")
     plan["exact"] = bool(rec)
     return plan
 
@@ -6274,11 +6325,31 @@ def _booster_record(pipe, ex: dict) -> dict:
     return out
 
 
+_PREFS_FILE = SETTINGS_DIR / "_prefs.json"
+
+
+def _load_prefs() -> dict:
+    try:
+        return _json.loads(_PREFS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_pref(key: str, value) -> None:
+    prefs = _load_prefs(); prefs[key] = value
+    try:
+        _PREFS_FILE.write_text(_json.dumps(prefs, indent=1), encoding="utf-8")
+    except OSError as e:
+        print(f"[Prefs] could not save {key}: {e}")
+
+
 def _gen_record(pipe, **settings) -> dict:
     """Everything needed to make an image again: settings + the exact model, VAE and LoRA
     files (name, AutoV2 hash when known) that were loaded in `pipe`."""
     from backend.model_hash import autov2, hash_later
     rec = {"app": "ImageGen Studio", "format": 2}   # 2: Karras samplers use Karras sigmas
+    from backend.prompt_syntax import EMPHASIS
+    rec["emphasis"] = EMPHASIS["mode"]               # how (tag:1.2) weights were applied
     rec.update({k: v for k, v in settings.items() if v is not None})
     if pipe is not None:
         mp = str(getattr(pipe, "current_model", "") or "")
@@ -6320,6 +6391,8 @@ def _params_text(rec: dict) -> str:
         parts.append(f"Face detail: denoise {fd['denoise']:g} ({fd['detector']})")
     if (rec.get("hand_detail") or {}).get("denoise") is not None:
         parts.append(f"Hand detail: denoise {_num(rec['hand_detail']['denoise'], 0.35):g}")
+    if rec.get("emphasis") == "compel":
+        parts.append("Emphasis: Compel")
     if rec.get("pag_scale"):
         parts.append(f"PAG scale: {rec['pag_scale']:g}")
     if rec.get("freeu"):

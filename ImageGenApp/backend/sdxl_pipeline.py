@@ -74,7 +74,7 @@ def _get_igpu_device() -> str | None:
     return _igpu_dev
 
 
-_SDXL_EMBED_CACHE: dict[tuple[str, str, str], dict] = {}
+_SDXL_EMBED_CACHE: dict[tuple, dict] = {}
 
 
 def _clear_embed_cache():
@@ -94,7 +94,8 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
 
     # Check embedding cache to avoid recomputing identical prompts (saves 7s on CPU)
     model_key = str(getattr(pipe, "_model_name_or_path", ""))
-    cache_key = (prompt.strip(), neg_prompt.strip(), model_key)
+    from backend.prompt_syntax import EMPHASIS      # the weighting mode changes the embeddings too
+    cache_key = (prompt.strip(), neg_prompt.strip(), model_key, EMPHASIS["mode"])
     if cache_key in _SDXL_EMBED_CACHE:
         cached = _SDXL_EMBED_CACHE[cache_key]
         print(f"[SDXL Compel] Embedding cache hit! Reusing precomputed prompt embeddings (0.0s) ✓")

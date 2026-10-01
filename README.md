@@ -112,6 +112,9 @@ window, shows a loading screen while it starts, and frees the GPU when you close
   resumable. **🗂 History** tab: search every output by prompt words, model, LoRA or seed, ⭐ favourites, one click
   back to its exact settings. **✨ SD detail pass** in the Upscale tab: tiled low-denoise redraw with your model,
   beyond what hires fix can reach.
+- **Prompt weights like A1111:** `(tag:1.3)` is applied the A1111 way, so Civitai prompts don't flood background
+  colours onto the character (the old, 2–5× stronger behaviour is a setting); a VAE of the wrong family is ignored
+  with a warning.
 - **Safe to click around:** one GPU job at a time (Generate, X/Y grid, Auto-Loop, Bridge, LoRA buttons can't collide);
   Stop or an out-of-memory error during hires / face / hand detail keeps the finished images.
 - **Faster, cleaner sampling:** DPM++ 2M **AYS** (Align Your Steps: ~25-step quality in 10–12 steps, about 2×
@@ -188,7 +191,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 114 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload).
+That runs 118 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload).
 
 ## Credits and licenses
 
