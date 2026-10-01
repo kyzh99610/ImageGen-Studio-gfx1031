@@ -25,6 +25,19 @@ from config import MODELS_DIR
 ANIME_CASCADE = MODELS_DIR / "detectors" / "lbpcascade_animeface.xml"
 _ANIME_URL = "https://raw.githubusercontent.com/nagadomi/lbpcascade_animeface/master/lbpcascade_animeface.xml"
 _ANIME_SHA256 = "9376d30ac38db6bda2a68b88b3b76bbd7e6aa33af47f7f5c76bc88ca75f1ce30"
+# deepghs anime face detector (YOLOv8n, MIT, 12 MB ONNX; F1 0.94 at conf 0.278 per its threshold.json).
+# The LBP cascade found a test character's face (bangs over one eye) in only 16 of 28 generations.
+_YOLO_REPO, _YOLO_FILE = "deepghs/anime_face_detection", "face_detect_v1.4_n/model.onnx"
+_YOLO_SHA256 = "fd860b650a4377046842c3cd80d01b0b408bdfbdb4acee5759630f82c6ef04a9"
+# its threshold.json says 0.278 (best F1 on its test set); on this app's outputs anime faces
+# scored 0.81–0.88 and fox / panda photos 0.38–0.51, so a stricter cut keeps animals out
+_YOLO_CONF = 0.55
+_yolo = {}
+# deepghs anime hand detector (YOLOv8s, OpenRAIL, 44 MB ONNX; F1 0.79 at 0.395 per its threshold.json)
+_HAND_REPO, _HAND_FILE = "deepghs/anime_hand_detection", "hand_detect_v1.0_s/model.onnx"
+_HAND_SHA256 = "408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0"
+_HAND_CONF = 0.45
+_hand_yolo = {}
 _cascades: dict = {}
 
 
@@ -101,16 +114,37 @@ def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, nega
         embeds = _embeds(sdp, pipe, prompt, negative, clip_skip)
         cb = {}
         if step_callback is not None:
+            eff = max(1, int(int(steps) * float(denoise)))   # the steps the inpaint pass really runs
+
             def _cb(p, i, t, kw):
-                step_callback(i + 1, steps)
+                step_callback(min(i + 1, eff), eff)
                 return kw
             cb = {"callback_on_step_end": _cb}
         from backend.sampling import run_pipe      # FreeU / CFG rescale as in the main pass
-        with torch.inference_mode():
-            lat = run_pipe(sdp, pipe, "inpaint", **embeds, image=crop.resize((rw, rh), Image.LANCZOS),
-                           mask_image=crop_mask.resize((rw, rh), Image.NEAREST), width=rw, height=rh,
-                           strength=float(denoise), num_inference_steps=int(steps), guidance_scale=float(cfg),
-                           generator=generator, output_type="latent", **cb).images
+        # The SDXL inpaint pipeline encodes the crop itself and, because the SDXL VAE config says
+        # force_upcast, casts the whole VAE to fp32 first: with native (non-cuDNN) convs a 512 px fp32
+        # tile needs a 1.12 GiB scratch buffer, which failed on every face-detail pass with 3 GB free.
+        # Encode in fp16 unless this checkpoint's VAE really needs fp32 (then 256 px tiles).
+        vae = pipe.vae
+        saved_vae = (vae.config.get("force_upcast"), getattr(vae, "tile_sample_min_size", None),
+                     getattr(vae, "tile_latent_min_size", None))
+        if xl and saved_vae[0] is not None:
+            need32 = bool(getattr(sdp, "_vae_needs_fp32", False))
+            vae.register_to_config(force_upcast=need32)
+            if need32 and saved_vae[1]:
+                vae.tile_sample_min_size, vae.tile_latent_min_size = 256, 32
+        try:
+            with torch.inference_mode():
+                lat = run_pipe(sdp, pipe, "inpaint", **embeds, image=crop.resize((rw, rh), Image.LANCZOS),
+                               mask_image=crop_mask.resize((rw, rh), Image.NEAREST), width=rw, height=rh,
+                               strength=float(denoise), num_inference_steps=int(steps), guidance_scale=float(cfg),
+                               generator=generator, output_type="latent", **cb).images
+        finally:
+            if xl and saved_vae[0] is not None:
+                vae.register_to_config(force_upcast=saved_vae[0])
+                if saved_vae[1]:
+                    vae.tile_sample_min_size, vae.tile_latent_min_size = saved_vae[1], saved_vae[2]
+            vae = None
         result = sdp._decode_latents(pipe.vae, lat)[0].resize((cw, ch), Image.LANCZOS)
     finally:
         pipe = embeds = lat = cb = None
@@ -180,13 +214,95 @@ def _confirm_hits(image: Image.Image, box, kind: str) -> int:
                if bx1 <= x + w / 2 <= bx2 and by1 <= y + h / 2 <= by2)
 
 
+def _onnx_session(cache: dict, repo: str, file: str, sha256: str, what: str, fallback: str):
+    """An ONNX detector from the HF hub (downloaded once, checksum-checked, ORT CPU), or None."""
+    import time
+    # a failed download is retried after 5 minutes (it used to stay off until a restart, and the
+    # hand pass then said "no hands found"; audit F-18)
+    if "sess" in cache and (cache["sess"] is not None or time.time() - cache.get("failed_at", time.time()) < 300):
+        return cache["sess"]
+    sess = None
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(repo, file)
+        if hashlib.sha256(Path(path).read_bytes()).hexdigest() != sha256:
+            print(f"[Detail] {what} model didn't match its checksum — {fallback}")
+        else:
+            import onnxruntime as ort
+            opts = ort.SessionOptions(); opts.log_severity_level = 3
+            sess = ort.InferenceSession(path, sess_options=opts, providers=["CPUExecutionProvider"])
+    except Exception as e:
+        print(f"[Detail] {what} model unavailable ({e}) — {fallback}")
+    cache["sess"] = sess
+    if sess is None:
+        cache["failed_at"] = time.time()
+    else:
+        cache.pop("failed_at", None)
+    return sess
+
+
+def _yolo_session():
+    """The ONNX face detector, or None (then the cascades are used)."""
+    return _onnx_session(_yolo, _YOLO_REPO, _YOLO_FILE, _YOLO_SHA256, "anime face", "using the cascade")
+
+
+def _yolo_faces(image: Image.Image, conf: float = _YOLO_CONF, side: int = 640) -> list[tuple[int, int, int, int]]:
+    """Face boxes from the YOLO detector (empty if it isn't available)."""
+    return [b for b, _s in _yolo_run(_yolo_session(), image, conf, side)]
+
+
+def _yolo_run(sess, image: Image.Image, conf: float, side: int = 640) -> list[tuple[tuple[int, int, int, int], float]]:
+    """(box, score) from a one-class YOLOv8 ONNX export; empty without a session."""
+    import cv2
+    if sess is None:
+        return []
+    W, H = image.size
+    k = side / max(W, H)
+    nw, nh = max(32, round(W * k / 32) * 32), max(32, round(H * k / 32) * 32)
+    x = np.asarray(image.convert("RGB").resize((nw, nh), Image.BILINEAR), dtype=np.float32) / 255.0
+    out = sess.run(None, {sess.get_inputs()[0].name: x.transpose(2, 0, 1)[None]})[0][0]
+    out = out.T if out.shape[0] == 5 else out  # YOLOv8 export: (4 box + 1 class, anchors) → (anchors, 5)
+    out = out[out[:, 4] >= conf]
+    if not len(out):
+        return []
+    sx, sy = W / nw, H / nh
+    boxes = [[float((cx - w / 2) * sx), float((cy - h / 2) * sy), float(w * sx), float(h * sy)]
+             for cx, cy, w, h in out[:, :4]]
+    idx = cv2.dnn.NMSBoxes(boxes, out[:, 4].astype(float).tolist(), conf, 0.5)
+    res = []
+    for i in (np.array(idx).reshape(-1) if len(idx) else []):
+        bx, by, bw, bh = boxes[int(i)]
+        res.append(((max(0, int(bx)), max(0, int(by)), min(W, int(bx + bw)), min(H, int(by + bh))),
+                    float(out[int(i), 4])))
+    return res
+
+
 def detect_faces(image: Image.Image, mode: str = "auto", max_faces: int = 4,
                  min_frac: float = 0.03) -> list[tuple[int, int, int, int]]:
-    """Face boxes (x1, y1, x2, y2), biggest first. mode: auto / anime / photo."""
+    """Face boxes (x1, y1, x2, y2), biggest first. mode: auto / anime / photo.
+    Anime / auto: the YOLO anime face detector; the cascades below are photo mode, and the
+    fallback when the model can't be downloaded."""
     import cv2
-    gray = cv2.equalizeHist(np.array(image.convert("L")))
     W, H = image.size
     min_px = max(24, int(min(W, H) * min_frac))
+    if mode in ("auto", "anime") and _yolo_session() is not None:
+        # the model is the only detector here: when it sees no face there is none — the cascade
+        # fallback found lighthouses, water and leaves in pictures without people
+        found = [b for b in _yolo_faces(image) if b[2] - b[0] >= min_px]
+        if not found:
+            return []
+        if found:
+            found.sort(key=lambda b: -(b[2] - b[0]) * (b[3] - b[1]))
+            keep = []
+            for b in found:       # same overlap / tiny-box rules as the cascade path
+                if any(_iou(b, k) >= 0.3 or (k[0] <= (b[0] + b[2]) / 2 <= k[2] and k[1] <= (b[1] + b[3]) / 2 <= k[3])
+                       for k in keep):
+                    continue
+                if keep and (b[2] - b[0]) < 0.45 * (keep[0][2] - keep[0][0]):
+                    continue
+                keep.append(b)
+            return keep[: max(0, int(max_faces))]
+    gray = cv2.equalizeHist(np.array(image.convert("L")))
     boxes = []
     for kind in (["anime", "photo"] if mode == "auto" else [mode]):
         c = _cascade(kind)
@@ -229,6 +345,8 @@ def face_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, den
     faces = detect_faces(image, mode, max_faces)
     if not faces:
         return image, 0
+    from backend.sampling import uniform_variant
+    scheduler = uniform_variant(scheduler)   # see sampling._UNIFORM
     W, H = image.size
     out = image
     for n, (x1, y1, x2, y2) in enumerate(faces):
@@ -243,3 +361,115 @@ def face_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, den
                                 scheduler=scheduler, clip_skip=clip_skip, padding=int(max(fw, fh) * 0.5),
                                 min_context=0, feather=max(3, fw // 20), step_callback=step_callback)
     return out, len(faces)
+
+
+# ── Hands ─────────────────────────────────────────────────────────────────────
+def _hand_session():
+    return _onnx_session(_hand_yolo, _HAND_REPO, _HAND_FILE, _HAND_SHA256, "anime hand", "hand detail is off")
+
+
+def hand_detector_available() -> bool:
+    return _hand_session() is not None
+
+
+def detect_hands(image: Image.Image, max_hands: int = 6, conf: float = _HAND_CONF,
+                 min_frac: float = 0.02) -> list[tuple[int, int, int, int]]:
+    """Hand boxes (x1, y1, x2, y2), biggest first; empty when the detector isn't available.
+    Gloved hands count; so do some hand-shaped things (ship turrets scored 0.78) — the hand
+    pass keeps its denoise low so such a box is only touched up, not turned into a hand."""
+    W, H = image.size
+    min_px = max(12, int(min(W, H) * min_frac))
+    found = [b for b, _s in _yolo_run(_hand_session(), image, conf)
+             if min(b[2] - b[0], b[3] - b[1]) >= min_px]
+    found.sort(key=lambda b: -(b[2] - b[0]) * (b[3] - b[1]))
+    keep = []
+    for b in found:
+        if any(_iou(b, k) >= 0.3 or (k[0] <= (b[0] + b[2]) / 2 <= k[2] and k[1] <= (b[1] + b[3]) / 2 <= k[3])
+               for k in keep):
+            continue
+        keep.append(b)
+    return keep[: max(0, int(max_hands))]
+
+
+def hand_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, denoise: float = 0.35,
+                steps: int = 20, cfg: float = 7.0, seed: int = -1, scheduler: str = "DPM++ 2M Karras",
+                clip_skip: int = 1, hand_prompt: str = "", max_hands: int = 6,
+                step_callback=None) -> tuple[Image.Image, int]:
+    """Re-draw each detected hand at native resolution. Returns (image, hands fixed)."""
+    hands = detect_hands(image, max_hands)
+    if not hands:
+        return image, 0
+    from backend.sampling import uniform_variant
+    scheduler = uniform_variant(scheduler)   # see sampling._UNIFORM
+    W, H = image.size
+    out = image
+    for n, (x1, y1, x2, y2) in enumerate(hands):
+        hw, hh = x2 - x1, y2 - y1
+        # a rounded box (an ellipse would clip fingertips in the corners) plus a small margin
+        mx, my = int(hw * 0.12), int(hh * 0.12)
+        mask = Image.new("L", (W, H), 0)
+        ImageDraw.Draw(mask).rounded_rectangle([x1 - mx, y1 - my, x2 + mx, y2 + my],
+                                               radius=max(2, min(hw, hh) // 4), fill=255)
+        p = f"{prompt}, {hand_prompt}" if hand_prompt else prompt
+        out, _ = inpaint_region(sdp, out, mask, p, negative, steps=steps, cfg=cfg, denoise=denoise,
+                                seed=(seed + 101 + n) % 2**32 if seed is not None and seed >= 0 else -1,
+                                scheduler=scheduler, clip_skip=clip_skip, padding=int(max(hw, hh) * 0.6),
+                                min_context=0, feather=max(3, hw // 12), step_callback=step_callback)
+    return out, len(hands)
+
+
+# ── Tiled "SD upscale" detail pass ────────────────────────────────────────────
+def tile_boxes(W: int, H: int, tile: int, overlap: int) -> list[tuple[int, int, int, int]]:
+    """Overlapping tile boxes (x1, y1, x2, y2) of at most tile×tile covering W×H; edge tiles are shifted
+    inwards so every tile is full-size when the image is at least that big."""
+    def starts(n):
+        if n <= tile:
+            return [0]
+        step = tile - overlap
+        s = list(range(0, n - tile, step)) + [n - tile]
+        return sorted(set(s))
+    return [(x, y, min(W, x + tile), min(H, y + tile)) for y in starts(H) for x in starts(W)]
+
+
+def _ramp_mask(w: int, h: int, left: int, top: int, right: int, bottom: int) -> Image.Image:
+    """Alpha mask that fades in over `left`/`top`/`right`/`bottom` pixels (0 where it shouldn't fade)."""
+    a = np.ones((h, w), np.float32)
+    if left:
+        a[:, :left] *= np.linspace(0, 1, left, dtype=np.float32)[None, :]
+    if right:
+        a[:, w - right:] *= np.linspace(1, 0, right, dtype=np.float32)[None, :]
+    if top:
+        a[:top, :] *= np.linspace(0, 1, top, dtype=np.float32)[:, None]
+    if bottom:
+        a[h - bottom:, :] *= np.linspace(1, 0, bottom, dtype=np.float32)[:, None]
+    return Image.fromarray((a * 255).round().astype(np.uint8), "L")
+
+
+def tiled_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, denoise: float = 0.3,
+                 steps: int = 20, cfg: float = 7.0, seed: int = 0, scheduler: str = "DPM++ 2M Karras",
+                 clip_skip: int = 1, overlap: int = 96, step_callback=None) -> Image.Image:
+    """Re-draw an (already upscaled) image tile by tile at the model's native size with low denoise, blending
+    the overlaps — adds detail beyond what hires fix can reach (it stops at 1536 / 2048 px). Each tile gets
+    the whole prompt, so keep denoise low (0.25–0.35) or faces may appear in the scenery."""
+    from backend.sampling import uniform_variant
+    if sdp is None or sdp.pipe is None:
+        raise RuntimeError("No model loaded.")
+    image = image.convert("RGB")
+    W, H = image.size
+    native = 1024 if getattr(sdp, "is_sdxl", False) else 512
+    tile = min(native, W, H) // 8 * 8
+    ov = max(0, min(int(overlap), tile // 3))
+    boxes = tile_boxes(W, H, tile, ov)
+    out = image.copy()
+    scheduler = uniform_variant(scheduler)     # denoise means what it says (see sampling._UNIFORM)
+    for k, (x1, y1, x2, y2) in enumerate(boxes):
+        crop = out.crop((x1, y1, x2, y2))      # tiles see the already-refined neighbours they overlap
+        cw, ch = crop.size
+        res, _ = sdp.img2img(crop, prompt, negative, denoise, steps, cfg, (seed + k) % 2**32, scheduler,
+                             step_callback=(lambda s, t, k=k: step_callback(k, len(boxes), s, t))
+                             if step_callback else None, clip_skip=clip_skip)
+        tile_img = res[0].resize((cw, ch), Image.LANCZOS) if res[0].size != (cw, ch) else res[0]
+        mask = _ramp_mask(cw, ch, ov if x1 > 0 else 0, ov if y1 > 0 else 0,
+                          ov if x2 < W else 0, ov if y2 < H else 0)
+        out.paste(tile_img, (x1, y1), mask)
+    return out

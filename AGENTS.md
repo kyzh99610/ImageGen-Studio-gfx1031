@@ -4,7 +4,7 @@ Single source of truth for AI assistants (Copilot, Gemini, Claude, Codex…) wor
 `CLAUDE.md`, `GEMINI.md` and `.github/copilot-instructions.md` only point here — edit this file, not them.
 User-facing docs: `README.md` (install + gfx1031 background) and `ImageGenApp/README.md` (app features).
 
-**Last updated: 2026-09-29**
+**Last updated: 2026-09-30** — audit fixes (GPU job lock, Stop keeps images, SDE seeds, VAE change, kaomoji, secrets out of /config), hand detail, outfit batch, History tab, tiled SD detail pass, GPU smoke test
 
 ---
 
@@ -26,8 +26,9 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── run_zluda.bat <script.py>  ← run any script under the launch.bat ZLUDA environment
 │   ├── install.bat / requirements.txt
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
+│   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 92-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 114-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -69,7 +70,8 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 87 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 109 pass + 5 skip on machines without a Ryzen AI NPU
+ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
 
@@ -198,6 +200,40 @@ regeneration measured 0.63/255.
   hands/chairs/bodies in anime images and confirmed them itself — and uses Haar-confirmed boxes only when nothing is
   anime-confirmed (photos). A 505 px false box used to set the size bar and hide 4 real grid faces. Turned heads are
   often missed.
+- **YOLO anime face detector (2026-09-28)**: `deepghs/anime_face_detection` `face_detect_v1.4_n/model.onnx` (MIT,
+  12 MB, SHA-256 pinned, ORT CPU ~50 ms). Output `(1, 5, anchors)` (cx, cy, w, h, score) → transpose, conf ≥ 0.55,
+  cv2 NMS 0.5, same overlap / 45 % size rules. In auto / anime mode it is the only detector when available (no
+  cascade fallback: that found lighthouses, water and leaves in pictures without people); photo mode and a missing
+  model use the cascades above. Why: the LBP cascade found a test character's face (bangs over one eye) in 16 of 28
+  generations (minNeighbors 2 → 27/28 but 8 false boxes that the hit-count confirmation couldn't separate); YOLO:
+  28/28, both 4-face grids, no false boxes on 100 other outputs; anime faces score 0.81–0.88, fox photos 0.38–0.51
+  (hence 0.55, not the model's own 0.278).
+- **SDXL inpaint VAE encode (2026-09-28):** `StableDiffusionXLInpaintPipeline` encodes the crop itself and, since the
+  SDXL VAE config has `force_upcast`, casts the *shared* VAE to fp32 first — with native convs a 512 px fp32 tile
+  wanted a 1.12 GiB scratch buffer and **every face-detail pass failed with OOM** (3 GB free) once the YOLO detector
+  made it run on every image. `inpaint_region` sets `force_upcast` to `sdp._vae_needs_fp32` for the call (fp32 VAEs
+  get 256 px tiles) and restores config + tile sizes in `finally`. `_face_pass` used to report such a failure as
+  "no faces found": it now prints the traceback and shows "Face detail failed on N image(s): …".
+- **Hand detail (2026-09-30)**: `detect_hands()` = `deepghs/anime_hand_detection` `hand_detect_v1.0_s/model.onnx`
+  (OpenRAIL, 44 MB, SHA-256 pinned, ORT CPU ~0.1 s), conf 0.45, overlap rule as faces, no size-vs-main rule (hands
+  vary). On 32 outputs ~90 % of boxes were hands (gloved ones too); **ship turrets scored 0.78** — neither the distance
+  to the face (real hands reach 4.6 face heights; the turrets were at 1.4) nor a zoomed second look (turrets 0.67–0.83,
+  some gloved hands 0.0) separates them, so the pass relies on low denoise: on a battleship-deck scene and a
+  no-humans battleship scene no turret was boxed/changed. `hand_detail()`: rounded-box mask (+12 %, an ellipse clips
+  fingertips), crop ≈ 2.2× the hand, seed + 101 + n, runs **before** the face pass. SDXL ~25 s per hand, SD 1.5 ~5 s. UI: "✋ Also re-draw hands" + "Hand denoise" (default 0.35) in the face accordion;
+  extra keys `hd_on` / `hd_denoise` appended after `cfg_rescale` everywhere (positional API: 38 args); record
+  `hand_detail {denoise}`, A1111 "Hand detail: denoise X". It cleans up fingers; it can't reliably fix a finger count.
+- **Detail passes use the evenly spaced sampler** (`sampling.uniform_variant`: DPM++ 2M Karras/AYS → DPM++ 2M, Euler
+  AYS → Euler, DPM++ SDE Karras → DPM++ SDE). With the real Karras / AYS schedules (since the sampler fix) img2img
+  starts at much lower noise, so face detail at 0.35 hardly changed a face: SDXL, same image, face 9.7/255 and hand
+  9.0 (AYS) vs 16.3 / 21.3 (plain DPM++ 2M); after the change AYS gives 14.1. Pixels outside the face/hand zones:
+  exactly 0 (SDXL is deterministic now). Face-detail images made before 2026-09-30 re-generate slightly differently.
+- Face detection audit (2026-09-30): 400 outputs → 391 one face, 3 real two-face images, 6 none (blurred / faceless
+  / turned away); boxes tight on 24 sampled. Hard cases (SD 1.5): back view, profile, hand over face, upside-down
+  (refined upside-down, correct), extreme close-up, tiny far figure, 2girls (2), head out of frame (the visible chin
+  is boxed — harmless), sunglasses, eyes closed, mirror selfie: all correct; no-humans scenery 0 faces / 0 hands.
+- **CPU VAE decode is always tiled (SDXL):** the untiled fallback of 832×1216 needed several GB of extra RAM next to
+  the ~10 GB the app holds with a LoRA snapshot and crashed the process (0xC0000005 in `alloc_cpu`).
 - `face_detail()`: per face an elliptical mask (face + 15–20 % margin), crop ≈ 2× the face, denoise 0.4 →
   small faces redrawn at ~native/2 px. SD 1.5 full-body 512×768: 1 face in 5.9 s, 1.8 % of pixels changed.
 - Generate tab: "✨ Face detail" runs after hires fix on txt2img *and* img2img results; "🖌 Inpaint" accordion
@@ -283,6 +319,31 @@ the list has no aliases.
 - Face detail runs ~half the main steps (`ceil(max(10, steps × 0.5) / denoise)`): SDXL A/B at 1024² — 0.8× (~22
   effective steps) ~45 s per face, 0.5× (~14) ~28 s, faces no worse.
 
+### Saved settings, format 2
+`_save_generation_settings(…, model, vae, lora_slots, auto_quality, extra, example)` stores what the UI shows (not the
+loaded model): checkpoint, VAE, the 3 LoRA slots with weights, auto-quality, every `_clean_extra` key, and the file
+name of the selected gallery image (`example_image`). Load restores all of it (LoRAs matched by file stem; old files'
+`loras` names + optional `lora_weights` still fill the slots) and `settings_dd.change` shows the example image. The
+`_EXTRA_KEYS` order must match `_settings_extra` (the 17 extra controls).
+
+### Outfit batch, History tab, SD detail pass, trainer CLIP skip (2026-09-30, from the audit's suggestions)
+- **🎴 Generate every outfit** (`do_card_batch`, a `gpu_job` generator): card outfits × N seeds with the *current*
+  UI settings (press 🎴 Load first), `card_prompt(card, outfit, scene)` per row, the same seeds per outfit, contact
+  sheet via `_xy_grid`. Resume index `outputs/card_batches/<card>.json`: sha1(settings + prompt + seed) → file;
+  reused when the file still exists. Measured: 2 outfits × 2 seeds 78 s, rerun 1 s.
+- **🗂 History** (`backend/history.py`, `_build_history_tab`): index `settings/_history_index.json` keyed by name +
+  mtime from an *unloaded* `Image.open` (decoding every PNG took 61 s for 2155 files, text chunks 7.7 s), favourites
+  `settings/_favourites.json`, JPEG thumbnails `outputs/.thumbs/`. "Open in PNG Info" sets `png_input` and switches
+  to the `pnginfo` tab (its Send to Generate does the restore; programmatic image sets don't fire `.upload`).
+- **✨ SD detail pass** (`detail_tools.tiled_detail`, Upscale tab): tiles of native size (512 / 1024), overlap ≤ 96 px,
+  shifted inwards at the edges, per-tile seed + k, linear blend ramps only on inner edges, plain sampler variant.
+  Uses the image's own prompt / seed / CLIP skip from its metadata. SD 1.5 512×768 → 1024×1536 (6 tiles): 25 s, no
+  seams, no extra faces at 0.3.
+- **Trainer:** `TrainingConfig.clip_skip` (default 2, SD 1.5 only) trains on `final_layer_norm(hidden_states[-2])`
+  — the tensor Compel's PENULTIMATE_HIDDEN_STATES_NORMALIZED gives at generation; LoRA metadata now carries
+  `ss_tag_frequency`, `ss_dataset_dirs`, `ss_num_train_images`, `ss_sd_model_name`, `ss_clip_skip`, so the app's
+  own LoRAs get keyword chips and coverage.
+
 ### Hires fix, variations, CLIP skip, X/Y grid, batch folders
 - **Hires fix** (`app._hires_pass`): txt2img at the entered size → `_upscale_to()` (Lanczos, or Real-ESRGAN ×2/×4 then
   Lanczos) → `sd.img2img(strength=denoise, steps=ceil(hires_steps/denoise))` with each image's own seed. Long side capped
@@ -324,10 +385,23 @@ the safetensors header (768 SD1 / 1024 SD2 / 2048 SDXL) so mismatches are refuse
 `model_manager.checkpoint_arch()` does the same for checkpoints (SDXL files without "xl" in the name).
 LyCORIS LoHa (`hada_w*`, incl. Tucker `hada_t*`) / LoKr (`lokr_*`) can't be loaded by diffusers 0.36: `backend/lycoris.py`
 rebuilds ΔW per layer and adds it to the kohya-named Linear/Conv2d weight (undone by the usual snapshot restore).
+SDXL LyCORIS files name UNet layers the original LDM/SGM way (`lora_unet_input_blocks_4_1_…`, `middle_block_…`,
+`output_blocks_…`) — `lycoris._sgm_blocks()` derives those aliases from the UNet's own blocks. Before 2026-09-28 they
+matched nothing and only the text-encoder part of an SDXL LoHa was applied (264 of 1052 layers, logged as "788 unmatched").
+SDXL lineage: `app._sdxl_lineage()` reads `ss_sd_model_name` from a LoRA header ("290640" = Pony V6's Civitai id);
+`_compat_line` warns for Pony ↔ Illustrious/NoobAI pairs — they load and run, but Illustrious character LoRAs on Pony
+checkpoints gave a character another face and red horns.
 A failed LoRA load drops that slot and reloads the rest; weights were verified bit-identical afterwards.
 Dropdown labels come from `app._checkpoint_choices()` / `_lora_choices()` ("SDXL · file"); values stay full paths,
 and code that matches models by filename must use `list_checkpoints()`, not the labels.
-Fuse+unload via PEFT, restore from a CPU snapshot taken lazily on first `load_lora()`.
+Fuse+unload via PEFT, restore from a snapshot (`backend/lora_snapshot.py`): only layers a LoRA touches are copied
+(before the fuse; LyCORIS via `before_change`), then spilled to 512 MB safetensors chunks in
+`%TEMP%\imagegen_lora_snapshots` (stale PIDs cleaned up). The old full in-RAM snapshot (6.8 GB for SDXL) plus
+`from_single_file`'s copy-on-write mmap of the next checkpoint exhausted the Windows **commit limit** (RAM + pagefile)
+and an SDXL→SDXL switch with a LoRA died with 0xC0000005 (`faulthandler` in app.py shows such crashes now).
+Text encoders run in **fp32 for the encode only** (cast back to fp16 after): fp16 GPU text encoding under ZLUDA was
+nondeterministic (Δ up to 0.03 in the embeddings → 7–12/255 in the image). A ~10/255 difference right after the first
+fuse / a fresh load remains (GPU memory layout; the weights are byte-identical).
 CUDA/ZLUDA fuses **on the GPU**: `Module.cpu()` on the 5 GB SDXL UNet crashes inside ZLUDA (access violation).
 DirectML still round-trips to CPU. Same-seed output differs run-to-run by ~0.4–0.7/255 (native convs aren't
 bit-deterministic), so compare LoRA restore results against that noise floor.
@@ -495,6 +569,32 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
     actually free VRAM". Found by the 2026-09-27 regression run (`VRAM: … held` after SD 1.5 ↔ SDXL switches).
 21. **"DPM++ 2M Karras" wasn't Karras** (no `use_karras_sigmas`) → see "Samplers, AYS, …"; old records map to
     "DPM++ 2M". Same section: FreeU crashed under ZLUDA (cuFFT) → CPU FFT fallback.
+22. **Two GPU jobs at once crashed the process** (2026-09-30): Gradio 4 limits concurrency *per event*, so Generate
+    ran while an X/Y grid (or Auto-Loop / Bridge / Inpaint …) was running; both loaded models / fused LoRAs on the same
+    pipelines → access violation in safetensors `load_file`. `app._serialize_gpu_events()` puts every function in
+    `_GPU_FNS` into one queue slot (`concurrency_id="gpu"`, limit 1); Stop, typing helpers, CPU taggers stay free.
+    A renamed GPU callback fails the test (`_GPU_FNS` names must exist).
+23. **Audit round (2026-09-30)** — a separate session audited the repo (report: 33 findings); fixed with tests:
+    **GPU jobs** — `app.gpu_job` marks handlers (the LoRA Apply/Remove/Clear buttons and Train → Prepare were outside
+    the group) and `_serialize_gpu_events` runs every GPU handler under `_GPU_LOCK` (an RLock held for the whole job,
+    generators until they finish). Stop buttons have **no `cancels=`**: a cancelled Gradio task released the queue slot
+    while its thread still ran, and the next job started beside it. Stop sets `_generation_abort`; the job ends at its
+    next step / phase check. **`--cpu`** deadlocked at start (torch imported first on two threads) → `import torch`
+    before `preload_tokenizer()`. **VAE-only change** returned "Already loaded" → `load_model(vae_path=KEEP_VAE)`
+    default, an explicit different VAE reloads. **Stop / OOM during hires, hand or face detail** now keeps and saves the
+    previous stage's images (`_post_pass`). **DPM++ SDE (Karras)** ignored the seed (torchsde Brownian tree seeded from
+    the global RNG) → `sampling._seed_sde_noise` passes the per-image seeds (`noise_sampler_seed` list). **PNDM** gets
+    `skip_prk_steps` (SDXL configs lacked it: errors below 4 steps). **Kaomoji**: `>_<` / `:<` opened a bracket in
+    `split_tags`; Compel read `+_+` as `+_` ×1.1 → `prompt_syntax._TRAILING_SIGN` escapes such signs and a patched
+    Compel `Fragment` unescapes them. **Secrets**: stored Civitai / HF keys are no longer component values (Gradio
+    serves those in `/config`); `civitai_client.scrub` removes `token=` from errors. Also: X/Y descending ranges /
+    zero steps, cleared number boxes (Auto-Loop flag stuck), progress bars (hires stuck at 0, detail at 38 %), gallery
+    state after X/Y / Inpaint / Auto-Loop, same-name Civitai versions (+ version-keyed `.part`), save-name sanitising,
+    LoRA info panel "SD 1.x", v-pred false positives, detector download retried after 5 min, img2img 0-step edge,
+    inpaint records without "Recreate", record-only PNGs, OCR language combos, `_fit_init_image` slivers, dataset
+    prep (same stems, alpha, EXIF), companion-TI scan (header-only, `weights_only=True`), SmartSplit notes what it
+    skips, ESRGAN DML session released before the hires img2img, Electron second instance / announced port, sampler
+    fallback recorded as what ran.
 
 ## Troubleshooting
 

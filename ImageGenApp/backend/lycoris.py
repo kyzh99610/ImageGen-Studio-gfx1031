@@ -23,16 +23,71 @@ _PREFIXES = (
 )
 
 
+# diffusers ResNet layer → original (LDM/SGM) name inside a res block
+_RESNET = {"norm1": "in_layers.0", "conv1": "in_layers.2", "time_emb_proj": "emb_layers.1",
+           "norm2": "out_layers.0", "conv2": "out_layers.3", "conv_shortcut": "skip_connection"}
+
+
+def _sgm_blocks(unet) -> dict[str, str]:
+    """diffusers UNet block path → original LDM/SGM block path (input_blocks.4.1 …).
+    kohya names SDXL layers this way (lora_unet_input_blocks_4_1_transformer_blocks_0_attn1_to_q);
+    SD 1.x files use the diffusers names instead. Derived from the UNet's own blocks."""
+    m = {"conv_in": "input_blocks.0.0", "time_embedding.linear_1": "time_embed.0",
+         "time_embedding.linear_2": "time_embed.2", "add_embedding.linear_1": "label_emb.0.0",
+         "add_embedding.linear_2": "label_emb.0.2", "conv_norm_out": "out.0", "conv_out": "out.2",
+         "mid_block.resnets.0": "middle_block.0", "mid_block.attentions.0": "middle_block.1",
+         "mid_block.resnets.1": "middle_block.2"}
+    i = 1
+    for b, blk in enumerate(getattr(unet, "down_blocks", [])):
+        att = getattr(blk, "attentions", None)
+        for j in range(len(blk.resnets)):
+            m[f"down_blocks.{b}.resnets.{j}"] = f"input_blocks.{i}.0"
+            if att:
+                m[f"down_blocks.{b}.attentions.{j}"] = f"input_blocks.{i}.1"
+            i += 1
+        if getattr(blk, "downsamplers", None):
+            m[f"down_blocks.{b}.downsamplers.0.conv"] = f"input_blocks.{i}.0.op"
+            i += 1
+    i = 0
+    for b, blk in enumerate(getattr(unet, "up_blocks", [])):
+        att = getattr(blk, "attentions", None)
+        for j in range(len(blk.resnets)):
+            m[f"up_blocks.{b}.resnets.{j}"] = f"output_blocks.{i}.0"
+            if att:
+                m[f"up_blocks.{b}.attentions.{j}"] = f"output_blocks.{i}.1"
+            i += 1
+        if getattr(blk, "upsamplers", None):
+            m[f"up_blocks.{b}.upsamplers.0.conv"] = f"output_blocks.{i - 1}.{2 if att else 1}.conv"
+    return m
+
+
+def _sgm_name(name: str, blocks: dict[str, str]) -> str | None:
+    parts = name.split(".")
+    for n in range(len(parts), 0, -1):
+        sgm = blocks.get(".".join(parts[:n]))
+        if sgm is not None:
+            rest = parts[n:]
+            if ".resnets." in ".".join(parts[:n]) + "." and rest and rest[0] in _RESNET:
+                rest = [_RESNET[rest[0]]] + rest[1:]
+            return ".".join([sgm] + rest)
+    return None
+
+
 def _module_map(pipe) -> dict[str, torch.nn.Module]:
-    """kohya layer name (lora_unet_down_blocks_0_…_to_k) → module with a .weight."""
+    """kohya layer name (lora_unet_down_blocks_0_…_to_k, or the SGM form
+    lora_unet_input_blocks_4_1_… used for SDXL) → module with a .weight."""
     out = {}
     for prefix, attr in _PREFIXES:
         root = getattr(pipe, attr, None)
         if root is None:
             continue
+        blocks = _sgm_blocks(root) if attr == "unet" else None
         for name, mod in root.named_modules():
             if isinstance(mod, (torch.nn.Linear, torch.nn.Conv2d)):
                 out[prefix + name.replace(".", "_")] = mod
+                sgm = _sgm_name(name, blocks) if blocks else None
+                if sgm:
+                    out.setdefault(prefix + sgm.replace(".", "_"), mod)
     return out
 
 
@@ -85,8 +140,9 @@ def _delta(g: dict[str, torch.Tensor]) -> tuple[torch.Tensor, float]:
 
 
 @torch.no_grad()
-def apply_lycoris(pipe, path: str, weight: float) -> tuple[int, int]:
+def apply_lycoris(pipe, path: str, weight: float, before_change=None) -> tuple[int, int]:
     """Fuse a LoHa/LoKr file into pipe's UNet/text encoders at `weight`.
+    before_change(param) is called for each weight right before it is modified (snapshots).
     Returns (layers applied, layers with no matching module)."""
     from safetensors.torch import load_file
     sd = load_file(str(path), device="cpu")
@@ -109,6 +165,8 @@ def apply_lycoris(pipe, path: str, weight: float) -> tuple[int, int]:
             raise ValueError(
                 f"{Path(path).name} doesn't fit this model ({layer}: {tuple(d.shape)} vs "
                 f"{tuple(w.shape)}) — it was made for a different base model.")
+        if before_change is not None:
+            before_change(w)
         w.add_((d.reshape(w.shape) * (scale * weight)).to(device=w.device, dtype=w.dtype))
         applied += 1
     if applied == 0:
