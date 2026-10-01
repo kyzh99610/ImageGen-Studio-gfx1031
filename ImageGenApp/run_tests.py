@@ -800,6 +800,45 @@ def _():
     print("    LoHa (plain + Tucker), LoKr, unmatched layers and wrong-model refusal OK")
 
 
+@test("LyCORIS on SDXL: kohya's SGM layer names (input_blocks_4_1_…) reach the UNet")
+def _():
+    # SDXL LoHa/LoKr files name UNet layers the original way; these used to match nothing, so only
+    # the text-encoder half of such a file was applied (788 of 1052 layers silently skipped)
+    import types
+    from accelerate import init_empty_weights
+    from diffusers import UNet2DConditionModel
+    from backend.lycoris import _module_map
+    with init_empty_weights():
+        unet = UNet2DConditionModel(
+            down_block_types=("DownBlock2D", "CrossAttnDownBlock2D", "CrossAttnDownBlock2D"),
+            up_block_types=("CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "UpBlock2D"),
+            block_out_channels=(320, 640, 1280), layers_per_block=2, cross_attention_dim=2048,
+            transformer_layers_per_block=(1, 2, 10), attention_head_dim=(5, 10, 20), use_linear_projection=True,
+            addition_embed_type="text_time", addition_time_embed_dim=256, projection_class_embeddings_input_dim=2816)
+    mm = _module_map(types.SimpleNamespace(unet=unet))
+    u = unet
+    expect = {
+        "input_blocks_1_0_in_layers_2": u.down_blocks[0].resnets[0].conv1,
+        "input_blocks_3_0_op": u.down_blocks[0].downsamplers[0].conv,
+        "input_blocks_4_0_skip_connection": u.down_blocks[1].resnets[0].conv_shortcut,
+        "input_blocks_4_1_transformer_blocks_0_attn1_to_q": u.down_blocks[1].attentions[0].transformer_blocks[0].attn1.to_q,
+        "input_blocks_8_1_transformer_blocks_9_ff_net_2": u.down_blocks[2].attentions[1].transformer_blocks[9].ff.net[2],
+        "middle_block_0_emb_layers_1": u.mid_block.resnets[0].time_emb_proj,
+        "middle_block_1_proj_in": u.mid_block.attentions[0].proj_in,
+        "middle_block_2_out_layers_3": u.mid_block.resnets[1].conv2,
+        "output_blocks_2_2_conv": u.up_blocks[0].upsamplers[0].conv,
+        "output_blocks_5_2_conv": u.up_blocks[1].upsamplers[0].conv,
+        "output_blocks_8_0_skip_connection": u.up_blocks[2].resnets[2].conv_shortcut,
+        "time_embed_2": u.time_embedding.linear_2, "label_emb_0_0": u.add_embedding.linear_1, "out_2": u.conv_out,
+    }
+    for k, mod in expect.items():
+        assert mm.get("lora_unet_" + k) is mod, k
+    assert mm["lora_unet_down_blocks_1_attentions_0_proj_in"] is u.down_blocks[1].attentions[0].proj_in
+    n_sgm = sum(1 for k in mm if k.startswith(("lora_unet_input_blocks", "lora_unet_middle_block", "lora_unet_output_blocks")))
+    assert n_sgm > 700, n_sgm
+    print(f"    {n_sgm} SGM-named SDXL UNet layers mapped; diffusers names still work")
+
+
 @test("ROCm runtime + rocBLAS kernels are chosen per GPU architecture")
 def _():
     import tempfile
@@ -1453,8 +1492,9 @@ def _():
     from backend.png_info import read_image_metadata as rd
     # the relative-size filter drops tiny false hits next to a real face
     boxes = [(100, 100, 300, 300), (10, 10, 40, 40), (400, 100, 560, 260)]
-    orig, orig_hits = dt._cascade, dt._confirm_hits
+    orig, orig_hits, orig_yolo = dt._cascade, dt._confirm_hits, dict(dt._yolo)
     try:
+        dt._yolo["sess"] = None                     # the cascade path (fallback / photo mode)
         class Fake:
             def __init__(self, found): self.found = found
             def detectMultiScale(self, *a, **k):
@@ -1480,8 +1520,28 @@ def _():
         assert dt.detect_faces(Image.new("RGB", (640, 480)), "auto") == [(100, 100, 300, 300)]
         dt._cascade = lambda kind: None
         assert dt.detect_faces(Image.new("RGB", (64, 64))) == []
+        # the YOLO anime face model: boxes decoded from (1, 5, anchors), scaled back to the image,
+        # low scores dropped, overlaps merged; when it runs and sees nothing, no cascade fallback
+        class YoloSess:
+            def __init__(self, rows): self.rows = rows
+            def get_inputs(self):
+                class I: name = "images"
+                return [I()]
+            def run(self, _o, feed):
+                x = feed["images"]
+                assert x.shape == (1, 3, 640, 480) and x.dtype == np.float32 and x.max() <= 1.0, x.shape
+                return [np.array(self.rows, dtype=np.float32).T[None]]
+        # 480×640 input for a 960×1280 image → scale 2
+        dt._yolo["sess"] = YoloSess([[100, 100, 60, 60, 0.9], [102, 101, 58, 62, 0.85], [300, 400, 50, 50, 0.3]])
+        dt._cascade = lambda kind: Fake([(0, 0, 500, 500)])     # must not be used
+        got = dt.detect_faces(Image.new("RGB", (960, 1280)), "auto")
+        assert got == [(140, 140, 260, 260)], got
+        dt._yolo["sess"] = YoloSess([[300, 400, 50, 50, 0.3]])
+        assert dt.detect_faces(Image.new("RGB", (960, 1280)), "anime") == []
+        assert dt.detect_faces(Image.new("RGB", (960, 1280)), "photo") != []    # photo mode = the cascade
     finally:
         dt._cascade, dt._confirm_hits = orig, orig_hits
+        dt._yolo.clear(); dt._yolo.update(orig_yolo)
     # the real confirmation: an empty picture has no face hits
     assert dt._confirm_hits(Image.new("RGB", (300, 300), (200, 180, 160)), (100, 100, 200, 200), "anime") == 0
     # face_detail with no faces returns the image unchanged, without touching the model
@@ -1682,42 +1742,6 @@ def _():
         wd._session, wd._labels = old
 
 
-@test("LoRA restore survives a textual inversion that grew the token table; A1111 'Schedule type' restores")
-def _():
-    import torch
-    from types import SimpleNamespace
-    from backend.sd_pipeline import SDPipeline
-    from backend.sdxl_pipeline import SDXLPipeline
-    for cls in (SDPipeline, SDXLPipeline):
-        te = torch.nn.Sequential(torch.nn.Embedding(10, 4), torch.nn.Linear(4, 4))
-        te2 = torch.nn.Sequential(torch.nn.Embedding(10, 4))
-        unet = torch.nn.Linear(4, 4)
-        sdp = cls.__new__(cls)
-        sdp.pipe = SimpleNamespace(unet=unet, text_encoder=te, text_encoder_2=te2)
-        sdp._clean_unet_state = sdp._clean_te_state = sdp._clean_te2_state = None
-        sdp._snapshot_clean_state()
-        clean = te[0].weight.detach().clone()
-        with torch.no_grad():                  # a fused LoRA changes weights …
-            unet.weight.add_(1); te[1].weight.add_(1); te[0].weight.add_(1)
-        te[0].weight = torch.nn.Parameter(torch.cat([te[0].weight.data, torch.full((1, 4), 7.0)]))  # … a TI adds a row
-        sdp._restore_clean_state()             # raised "size of tensor a (11) must match (10)" before
-        assert torch.equal(te[0].weight[:10], clean) and torch.equal(te[0].weight[10], torch.full((4,), 7.0))
-        assert torch.equal(unet.weight, sdp._clean_unet_state["weight"])
-    from PIL import Image
-    from PIL.PngImagePlugin import PngInfo
-    from backend.png_info import read_image_metadata
-    import tempfile
-    for text, want in (("Sampler: DPM++ 2M, Schedule type: Karras", "DPM++ 2M Karras"),
-                       ("Sampler: Euler, Schedule type: Align Your Steps", "Euler AYS"),
-                       ("Sampler: DPM++ 2M Karras, Schedule type: Karras", "DPM++ 2M Karras"),
-                       ("Sampler: Euler a, Schedule type: Automatic", "Euler a")):
-        info = PngInfo(); info.add_text("parameters", f"1girl\nSteps: 20, {text}, CFG scale: 7, Seed: 1")
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "a.png"
-            Image.new("RGB", (8, 8)).save(p, pnginfo=info)
-            assert read_image_metadata(p)["sampler"] == want, (text, read_image_metadata(p)["sampler"])
-
-
 @test("Unload frees text encoders: pyparsing's packrat cache no longer pins Compel frames; inpaint pipe dropped")
 def _():
     import gc, weakref
@@ -1915,9 +1939,9 @@ def _():
     assert rec["format"] == 2 and rec["pag_scale"] == 2.5 and rec["freeu"] is True and rec["cfg_rescale"] == 0.7, rec
     assert "PAG scale: 2.5" in params and "FreeU: on" in params and "CFG rescale: 0.7" in params
     ups = _app._plan_extra_updates(_app._restore_plan(rd(f)))
-    assert ups[-3:] == [2.5, True, 0.7], ups
+    assert ups[12:15] == [2.5, True, 0.7], ups
     ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
-    assert ups0[-3:] == [0.0, False, 0.0]                          # none recorded → off
+    assert ups0[12:15] == [0.0, False, 0.0]                        # none recorded → off
     ex = _app._clean_extra(dict(pag_scale="99", freeu="yes", cfg_rescale=-3))
     assert ex["pag_scale"] == 6.0 and ex["freeu"] is True and ex["cfg_rescale"] == 0.0
     assert "PAG scale" in _app._XY_AXES and _app._xy_values("PAG scale", "0, 2.5") == ([0.0, 2.5], "")
@@ -1939,6 +1963,712 @@ def _():
     p, fixes = apply_danbooru_fixes("(long haired:1.2), [blue eye], <lora:x:0.8>, {a|b}, __pose__, 1girl")
     assert p == "(long hair:1.2), [blue eyes], <lora:x:0.8>, {a|b}, __pose__, 1girl", p
 
+
+@test("Saved settings (format 2): LoRA slots + weights, VAE, auto-quality, hires / face detail / boosters")
+def _():
+    import app as _app
+    tmp = Path(_tf.mkdtemp())
+    old = _app.SETTINGS_DIR
+    try:
+        _app.SETTINGS_DIR = tmp
+        msg = _app._save_generation_settings(
+            "p", "n", "DPM++ 2M AYS", 12, 6, 832, 1216, 1, 42, "my set",
+            model="C:/models/ck.safetensors", vae="none",
+            lora_slots=[("C:/l/IL_A.safetensors", 0.75), ("none", 0.7), ("D:/x/B.safetensors", "1.2")],
+            auto_quality=True, extra=dict(pag_scale=2, fd_on=True, fd_denoise=0.35, hires_on="yes", freeu=0))
+        assert msg.startswith("✅"), msg
+        d = json.loads((tmp / "my set.json").read_text(encoding="utf-8"))
+        assert d["format"] == 2 and d["lora_slots"] == [["IL_A.safetensors", 0.75], ["none", 0.7], ["B.safetensors", 1.2]]
+        assert d["loras"] == ["IL_A", "B"] and d["vae"] == "none" and d["auto_quality"] is True
+        assert d["model"].endswith("ck.safetensors")
+        ex = d["extra"]
+        assert ex["pag_scale"] == 2.0 and ex["fd_on"] is True and ex["hires_on"] is True and ex["freeu"] is False
+        assert set(ex) == set(_app._clean_extra({})), sorted(ex)
+        # an old-style call (no UI extras) still writes the old fields only
+        _app._save_generation_settings("p", "n", "Euler a", 20, 7, 512, 512, 1, 1, "old style")
+        d2 = json.loads((tmp / "old style.json").read_text(encoding="utf-8"))
+        assert "lora_slots" not in d2 and "extra" not in d2 and d2["prompt"] == "p"
+    finally:
+        _app.SETTINGS_DIR = old
+
+
+@test("SDXL inpaint / face detail: no fp32 VAE upcast unless needed (it ran out of GPU memory), settings restored")
+def _():
+    from PIL import Image
+    from diffusers import EulerDiscreteScheduler
+    from backend import detail_tools as dt, sampling as sm
+
+    class VAE:
+        def __init__(self):
+            self.config = {"force_upcast": True}; self.tile_sample_min_size = 512; self.tile_latent_min_size = 64
+        def register_to_config(self, **k): self.config = dict(self.config, **k)
+
+    class Pipe:
+        def __init__(self, unet): self.unet = unet; self.vae = VAE(); self.scheduler = EulerDiscreteScheduler()
+        text_encoder_2 = object()
+
+    class Host:
+        is_sdxl = True; device = "cpu"; dtype = None; boosters = {}; prediction = {}
+        def _decode_latents(self, vae, lat): return [Image.new("RGB", (1024, 1024))]
+    seen = []
+
+    class R:
+        images = None
+
+    def fake_run(sdp, pipe, kind, **k):
+        seen.append((pipe.vae.config["force_upcast"], pipe.vae.tile_sample_min_size))
+        if len(seen) == 3:
+            raise RuntimeError("boom")
+        return R()
+    unet = object()
+    h = Host(); h.pipe = Pipe(unet); h._inpaint_pipe = h.pipe
+    img = Image.new("RGB", (832, 1216)); mask = Image.new("L", (832, 1216)); mask.paste(255, (300, 200, 500, 400))
+    orig = (dt._embeds, sm.run_pipe)
+    try:
+        dt._embeds = lambda *a, **k: {}
+        sm.run_pipe = fake_run
+        h._vae_needs_fp32 = False
+        dt.inpaint_region(h, img, mask, "x", steps=4, denoise=0.4, seed=1)
+        h._vae_needs_fp32 = True
+        dt.inpaint_region(h, img, mask, "x", steps=4, denoise=0.4, seed=1)
+        try:
+            dt.inpaint_region(h, img, mask, "x", steps=4, denoise=0.4, seed=1)
+        except RuntimeError:
+            pass
+    finally:
+        dt._embeds, sm.run_pipe = orig
+    assert seen[0] == (False, 512) and seen[1] == (True, 256), seen
+    v = h.pipe.vae
+    assert v.config["force_upcast"] is True and (v.tile_sample_min_size, v.tile_latent_min_size) == (512, 64)
+
+
+@test("LoRA restore snapshot: only touched layers, spilled to disk (no RAM held), exact restore, files removed")
+def _():
+    import torch
+    from backend.lora_snapshot import Snapshot, param_snapshotter
+
+    class Pipe:
+        def __init__(self):
+            torch.manual_seed(0)
+            self.unet = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8)).half()
+            self.text_encoder = torch.nn.Linear(4, 4).half()
+    pipe = Pipe()
+    clean = {k: v.clone() for k, v in pipe.unet.state_dict().items()}
+    clean_te = {k: v.clone() for k, v in pipe.text_encoder.state_dict().items()}
+    snap = Snapshot()
+    snapper = param_snapshotter(pipe, snap)
+    with torch.no_grad():                      # "slot 1" changes layer 0 and the text encoder
+        for prm in (pipe.unet[0].weight, pipe.text_encoder.weight):
+            snapper(prm); prm.add_(1.0)
+        snapper(pipe.unet[0].weight); pipe.unet[0].weight.add_(1.0)     # twice: still the clean copy
+    assert set(snap.mem["unet"]) == {"0.weight"} and set(snap.mem["text_encoder"]) == {"weight"}
+    snap.spill()
+    assert not any(snap.mem.values()) and len(snap.files) == 1 and snap.files[0][0].exists()
+    with torch.no_grad():                      # "slot 2" (after the spill) changes layer 1
+        snapper(pipe.unet[1].bias); pipe.unet[1].bias.add_(2.0)
+        snapper(pipe.unet[0].weight)          # already on disk → not copied again (it's dirty now)
+    assert set(snap.mem["unet"]) == {"1.bias"}
+    assert snap.restore(pipe) == 3
+    for k, v in pipe.unet.state_dict().items():
+        assert torch.equal(v, clean[k]), k
+    assert torch.equal(pipe.text_encoder.weight, clean_te["weight"])
+    files = [f for f, _ in snap.files]
+    snap.close()
+    assert all(not f.exists() for f in files)
+
+
+@test("SDXL LoRA lineage (Pony vs Illustrious) from training metadata; mismatch warning")
+def _():
+    import struct
+    import app as _app
+    tmp = Path(_tf.mkdtemp())
+
+    def lora(name, meta):
+        hdr = {"lora_unet_down_blocks_0.lora_down.weight": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]},
+               "__metadata__": meta}
+        raw = json.dumps(hdr).encode()
+        (tmp / name).write_bytes(struct.pack("<Q", len(raw)) + raw + b"\0\0")
+        return str(tmp / name)
+    assert _app._sdxl_lineage(lora("a.safetensors", {"ss_sd_model_name": "ponyDiffusionV6XL_v6.safetensors"}), True) == "pony"
+    assert _app._sdxl_lineage(lora("b.safetensors", {"ss_sd_model_name": "290640.safetensors"}), True) == "pony"
+    assert _app._sdxl_lineage(lora("c.safetensors", {"ss_sd_model_name": "noobaiVPred10.safetensors"}), True) == "illustrious"
+    assert _app._sdxl_lineage(lora("d.safetensors", {"ss_sd_model_name": "Illustrious-XL-v0.1.safetensors"}), True) == "illustrious"
+    assert _app._sdxl_lineage(lora("e.safetensors", {"ss_sd_model_name": "sd_xl_base_1.0.safetensors"}), True) is None
+    assert _app._sdxl_lineage(lora("f.safetensors", {"ss_sd_model_name": "12906400.safetensors"}), True) is None
+    assert _app._sdxl_lineage(str(tmp / "missing.safetensors"), True) is None
+
+
+@test("LoRA restore survives a textual inversion that grew the token table; A1111 'Schedule type' restores")
+def _():
+    import torch, tempfile
+    from types import SimpleNamespace
+    from backend.lora_snapshot import Snapshot
+    te = torch.nn.Sequential(torch.nn.Embedding(10, 4), torch.nn.Linear(4, 4))
+    pipe = SimpleNamespace(unet=torch.nn.Linear(4, 4), text_encoder=te, text_encoder_2=None)
+    for spill in (False, True):
+        snap = Snapshot()
+        for k, p in te.named_parameters():
+            snap.add("text_encoder", k, p.detach())
+        if spill:
+            snap.spill()
+        clean = te[0].weight.detach().clone()
+        with torch.no_grad():                      # a fused LoRA changes weights ...
+            te[0].weight.add_(1); te[1].weight.add_(1)
+        te[0].weight = torch.nn.Parameter(torch.cat([te[0].weight.data, torch.full((1, 4), 7.0)]))  # ... a TI adds a row
+        snap.restore(pipe)                         # raised "size of tensor a (11) must match (10)" before
+        assert torch.equal(te[0].weight[:10], clean) and torch.equal(te[0].weight[10], torch.full((4,), 7.0))
+        snap.close()
+        te[0].weight = torch.nn.Parameter(te[0].weight.data[:10].clone())
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    from backend.png_info import read_image_metadata
+    for text, want in (("Sampler: DPM++ 2M, Schedule type: Karras", "DPM++ 2M Karras"),
+                       ("Sampler: Euler, Schedule type: Align Your Steps", "Euler AYS"),
+                       ("Sampler: DPM++ 2M Karras, Schedule type: Karras", "DPM++ 2M Karras"),
+                       ("Sampler: Euler a, Schedule type: Automatic", "Euler a")):
+        info = PngInfo(); info.add_text("parameters", f"1girl\nSteps: 20, {text}, CFG scale: 7, Seed: 1")
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "a.png"
+            Image.new("RGB", (8, 8)).save(p, pnginfo=info)
+            assert read_image_metadata(p)["sampler"] == want, (text, read_image_metadata(p)["sampler"])
+
+
+@test("Hand detail: detector boxes (overlaps, tiny, max), pass skipped without hands, record + A1111 text restore")
+def _():
+    import numpy as np
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    import app as _app
+    from backend import detail_tools as dt
+    from backend.png_info import read_image_metadata
+
+    class Sess:                                      # a YOLOv8 export: (1, 5, anchors) at the 640 input
+        def __init__(self, rows): self.rows = np.array(rows, dtype=np.float32).T[None]
+        def get_inputs(self): return [type("I", (), {"name": "images"})()]
+        def run(self, _o, feed):
+            assert feed["images"].shape == (1, 3, 640, 480)   # 960x1280 → 480x640 (multiples of 32)
+            return [self.rows]
+    orig = dict(dt._hand_yolo)
+    try:
+        dt._hand_yolo["sess"] = Sess([[100, 100, 40, 40, 0.9],    # a hand
+                                      [102, 101, 38, 42, 0.8],    # the same hand again → dropped
+                                      [300, 400, 60, 50, 0.7],    # a second hand
+                                      [400, 100, 4, 4, 0.9],      # 8 px in the image → too small
+                                      [200, 500, 40, 40, 0.3]])   # below the threshold
+        got = dt.detect_hands(Image.new("RGB", (960, 1280)))
+        assert got == [(540, 750, 660, 850), (160, 160, 240, 240)], got     # biggest first, scaled ×2
+        assert dt.detect_hands(Image.new("RGB", (960, 1280)), max_hands=1) == [(540, 750, 660, 850)]
+        dt._hand_yolo["sess"] = None                 # no model → no hands (and no crash)
+        assert dt.detect_hands(Image.new("RGB", (960, 1280))) == []
+        img = Image.new("RGB", (64, 64))
+        out, n = dt.hand_detail(None, img, "x")      # no hands: image back, model untouched
+        assert out is img and n == 0
+    finally:
+        dt._hand_yolo.clear(); dt._hand_yolo.update(orig)
+    # detail passes run the evenly spaced sampler (Karras / AYS hardly changed a face at 0.35)
+    from backend.sampling import uniform_variant, SCHEDULERS
+    assert uniform_variant("DPM++ 2M AYS") == "DPM++ 2M" and uniform_variant("Euler AYS") == "Euler"
+    assert uniform_variant("DPM++ SDE Karras") == "DPM++ SDE" and uniform_variant("Euler a") == "Euler a"
+    assert all(uniform_variant(n) in SCHEDULERS for n in SCHEDULERS)
+    seen = {}
+    orig_inp, orig_df = dt.inpaint_region, dt.detect_faces
+    try:
+        dt.detect_faces = lambda *a, **k: [(10, 10, 30, 30)]
+        dt.inpaint_region = lambda sdp, im, mask, *a, **k: (seen.update(k), (im, 0))[1]
+        dt.face_detail(object(), Image.new("RGB", (64, 64)), "x", scheduler="DPM++ 2M AYS")
+        assert seen["scheduler"] == "DPM++ 2M", seen
+    finally:
+        dt.inpaint_region, dt.detect_faces = orig_inp, orig_df
+    ex = _app._clean_extra(dict(hd_on=1, hd_denoise=5))
+    assert ex["hd_on"] is True and ex["hd_denoise"] == 0.7
+    assert _app._clean_extra({})["hd_denoise"] == 0.35
+    # A1111 text + restore: the two hand controls come last
+    info = PngInfo(); info.add_text("parameters", "1girl\nSteps: 20, Sampler: Euler a, CFG scale: 7, Seed: 1, "
+                                    "Face detail: denoise 0.4 (auto), Hand detail: denoise 0.45")
+    with _tf.TemporaryDirectory() as d:
+        f = Path(d) / "h.png"
+        Image.new("RGB", (8, 8)).save(f, pnginfo=info)
+        meta = read_image_metadata(f)
+    assert meta["hand_detail"] == {"denoise": 0.45}, meta.get("hand_detail")
+    ups = _app._plan_extra_updates(_app._restore_plan(meta))
+    assert ups[-2:] == [True, 0.45] and ups[8] is True, ups
+    ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
+    assert ups0[-2] is False
+
+
+@test("GPU events share one queue slot (Generate during an X/Y grid crashed the process); Stop stays free")
+def _():
+    import app as _app
+    b = _app.build_app()
+    by = {}
+    for f in b.fns:
+        by.setdefault(getattr(f.fn, "__name__", "?"), []).append(f)
+    missing = [n for n in _app._GPU_FNS if n not in by]
+    assert not missing, f"GPU functions not wired to any event (renamed?): {missing}"
+    for n in _app._GPU_FNS:
+        assert all(f.concurrency_id == "gpu" and f.concurrency_limit == 1 for f in by[n]), n
+    for n in ("do_stop", "do_stop_loop", "do_train_stop", "on_prompt_tokens", "do_tag_complete"):
+        assert all(f.concurrency_id != "gpu" for f in by.get(n, [])), n
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Audit 2026-09-30 regressions (F-01 … F-33)
+# ══════════════════════════════════════════════════════════════════════════
+
+@test("--cpu start: importing the app under FORCE_CPU doesn't deadlock (torch vs the tokenizer thread)")
+def _():
+    import subprocess
+    env = dict(os.environ, FORCE_CPU="1", HF_HUB_OFFLINE="1")
+    r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, '.'); sys.argv = ['app.py']; import app; "
+                        "print('ok', app.sd.device)"], cwd=str(Path(__file__).parent), env=env,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+    assert r.returncode == 0 and "ok cpu" in r.stdout, (r.returncode, r.stderr[-800:])
+
+
+@test("GPU jobs: every handler that touches the pipelines is in the queue group, runs under the lock, no cancels=")
+def _():
+    import threading, time as _t
+    import app as _app
+    b = _app.build_app()
+    mutators = {"do_remove_lora", "do_remove_loras", "do_apply_lora", "_ensure_model", "_sync_loras", "do_load_model",
+                "do_generate", "_unload", "load_lora", "unload_loras", "remove_lora", "load_model", "_apply_slot"}
+    bad = []
+    for f in b.fns:
+        fn = getattr(f.fn, "__wrapped__", f.fn)
+        code = getattr(fn, "__code__", None)
+        if code is None:
+            continue
+        names = set(code.co_names) | set(code.co_freevars)
+        if names & mutators and f.concurrency_id != "gpu":
+            bad.append(getattr(fn, "__name__", "?"))
+    assert not bad, f"handlers that change the pipelines outside the GPU group: {bad}"
+    gpu_idx = {i for i, f in enumerate(b.fns) if f.concurrency_id == "gpu"}
+    cancelling = [d for d in b.dependencies if set(d.get("cancels") or []) & gpu_idx]
+    assert not cancelling, "a Stop with cancels= frees the GPU slot while the job's thread still runs"
+    # the lock: two jobs never overlap, generators hold it until they finish
+    spans = []
+
+    def job(tag):
+        t0 = _t.perf_counter(); _t.sleep(0.15); spans.append((t0, _t.perf_counter()))
+        return tag
+
+    def gen_job():
+        t0 = _t.perf_counter()
+        for i in range(3):
+            _t.sleep(0.05); yield i
+        spans.append((t0, _t.perf_counter()))
+    locked, locked_gen = _app._locked(job), _app._locked(gen_job)
+    th = [threading.Thread(target=locked, args=(i,)) for i in range(3)] + \
+         [threading.Thread(target=lambda: list(locked_gen())) for _ in range(2)]
+    [x.start() for x in th]; [x.join(10) for x in th]
+    spans.sort()
+    assert len(spans) == 5 and all(a[1] <= b_[0] + 1e-3 for a, b_ in zip(spans, spans[1:])), spans
+    import inspect
+    assert inspect.isgeneratorfunction(locked_gen) and not inspect.isgeneratorfunction(locked)
+
+
+@test("VAE-only change reloads (was 'Already loaded' with the old VAE); KEEP_VAE / same VAE don't")
+def _():
+    from backend.sd_pipeline import SDPipeline, KEEP_VAE
+    from backend.sdxl_pipeline import SDXLPipeline
+    for cls in (SDPipeline, SDXLPipeline):
+        p = cls()
+        p.current_model, p.pipe, p._last_vae_path = "D:/nowhere/m.safetensors", object(), None
+        assert p.load_model("D:/nowhere/m.safetensors").startswith("✅ Already")
+        assert p.load_model("D:/nowhere/m.safetensors", KEEP_VAE).startswith("✅ Already")
+        assert p.load_model("D:/nowhere/m.safetensors", "none").startswith("✅ Already")
+        assert p.load_model("D:/nowhere/m.safetensors", None).startswith("✅ Already")
+        p.current_model, p.pipe = "D:/nowhere/m.safetensors", object()
+        r = p.load_model("D:/nowhere/m.safetensors", "D:/nowhere/vae.safetensors")
+        assert not r.startswith("✅ Already"), r
+
+
+def _app_closures():
+    """do_generate / _hires_pass / _detail_pass from the built UI (nested functions)."""
+    import app as _app
+    b = _app.build_app()
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in b.fns}
+    xy = getattr(by["do_xy_grid"].fn, "__wrapped__", by["do_xy_grid"].fn)
+    cl = dict(zip(xy.__code__.co_freevars, xy.__closure__))
+    dg = cl["do_generate"].cell_contents
+    gcl = dict(zip(dg.__code__.co_freevars, dg.__closure__))
+    return _app, dg, gcl["_hires_pass"].cell_contents
+
+
+@test("Stop / OOM during hires keeps and saves the base images; hires progress counts the real steps")
+def _():
+    from PIL import Image
+    _app, dg, hires_pass = _app_closures()
+
+    class FakeSD:
+        model_family, current_model, _last_vae_path, prediction, device = "sd15", "x.safetensors", None, {}, "cpu"
+        _lora_adapters, boosters, last_seeds, last_var_seeds, pipe = {}, {}, [], [], object()
+
+        def __init__(self, fail=None): self.fail, self.calls = fail, []
+
+        def txt2img(self, prompt, neg, w, h, steps, cfg, seed, sched, batch, step_callback=None, **kw):
+            self.last_seeds = [seed + i for i in range(batch)]
+            return [Image.new("RGB", (w, h), (i * 40, 0, 0)) for i in range(batch)], "info"
+
+        def img2img(self, img, prompt, neg, strength, steps, cfg, seed, sched, step_callback=None, clip_skip=1):
+            self.calls.append((steps, strength))
+            if self.fail:
+                raise self.fail
+            for i in range(int(steps * strength)):
+                step_callback and step_callback(i + 1, steps)
+            return [img], "i2i"
+    old_sd, old_out = _app.sd, _app.OUTPUTS_DIR
+    tmp = Path(_tf.mkdtemp())
+    try:
+        _app.OUTPUTS_DIR = tmp
+        for exc in (_app._GenerationAborted(), RuntimeError("HIP out of memory")):
+            for f in tmp.glob("*.png"):
+                f.unlink()
+            _app.sd = FakeSD(exc)
+            imgs, info, _ = dg("1girl", "", "Euler", 10, 7, 512, 512, 2, 100, None, 0.5, False, auto_quality=False,
+                               extra=dict(hires_on=True, hires_scale=1.5, hires_denoise=0.45, hires_steps=15))
+            assert len(imgs) == 2 and len(list(tmp.glob("*.png"))) == 2, (type(exc).__name__, len(imgs), info[:200])
+            assert "saved the images from before it" in info
+        _app.sd = FakeSD()
+        seen = []
+        ex = _app._clean_extra(dict(hires_on=True, hires_scale=1.5, hires_denoise=0.45, hires_steps=15))
+        hires_pass([Image.new("RGB", (64, 64))], [1], "p", "n", 7, "Euler", ex,
+                   lambda frac, desc="": seen.append(frac))
+        assert max(seen) == 1.0 and len(set(seen)) > 5, seen
+    finally:
+        _app.sd, _app.OUTPUTS_DIR = old_sd, old_out
+
+
+@test("Kaomoji: >_< / :< don't swallow the prompt; +_+ / -_- reach the text encoder unchanged")
+def _():
+    from backend.prompt_tools import split_tags, parse_tag, merge_prompts
+    from backend.prompt_syntax import a1111_to_compel, plain_prompt
+    from compel.prompt_parser import PromptParser
+    for k in (">_<", ":<", "+_+", "-_-", "^_^", "o_o", "x_x", ";)", ":>"):
+        assert split_tags(f"1girl, {k}, blush, smile") == ["1girl", k, "blush", "smile"], k
+    assert split_tags("<lora:a, b:0.5>, 1girl") == ["<lora:a, b:0.5>", "1girl"]
+    assert merge_prompts("1girl, >_<, blush", "blush, red hair") == "1girl, >_<, blush, red hair"
+    assert parse_tag("+_+")[1] == 1.0 and parse_tag("x++")[1] > 1.2 and parse_tag("hands-")[1] == 0.9
+
+    def flat(x, w=1.0):
+        if hasattr(x, "children"):
+            return [y for ch in x.children for y in flat(ch, w * getattr(x, "weight", 1))]
+        return [(x.text, round(w * x.weight, 3))]
+    pp = PromptParser()
+    parts = lambda t: [y for x in pp.parse_conjunction(a1111_to_compel(t)).prompts[0].children for y in flat(x)]
+    assert parts("1girl, +_+, -_-, blush") == [("1girl, +_+, -_-, blush", 1.0)]
+    assert ("+_+", 1.2) in parts("(+_+:1.2), smile") and ("-_-", 0.909) in parts("[-_-], smile")
+    assert ("detailed", 1.21) in parts("detailed++, x") and ("eyes", 1.1) in parts("(eyes)+")
+    assert parts(r"my_character \(series name\)") == [("my_character (series name)", 1.0)]
+    assert plain_prompt("1girl, +_+, blush") == "1girl, +_+, blush"
+
+
+def _tiny_sd(tok):
+    """A 16×16 random-weight SD pipeline behind the app's SDPipeline wrapper (CPU, fp32)."""
+    import torch
+    from transformers import CLIPTextModel, CLIPTextConfig
+    from diffusers import StableDiffusionPipeline, UNet2DConditionModel, AutoencoderKL, PNDMScheduler
+    from backend.sd_pipeline import SDPipeline
+    torch.manual_seed(0)
+    te = CLIPTextModel(CLIPTextConfig(vocab_size=len(tok), hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+                                      num_attention_heads=4, max_position_embeddings=77, projection_dim=32))
+    unet = UNet2DConditionModel(sample_size=8, in_channels=4, out_channels=4, layers_per_block=1,
+                                block_out_channels=(32, 64), down_block_types=("CrossAttnDownBlock2D", "DownBlock2D"),
+                                up_block_types=("UpBlock2D", "CrossAttnUpBlock2D"), cross_attention_dim=32,
+                                attention_head_dim=4, norm_num_groups=8)
+    vae = AutoencoderKL(in_channels=3, out_channels=3, down_block_types=("DownEncoderBlock2D",),
+                        up_block_types=("UpDecoderBlock2D",), block_out_channels=(32,), latent_channels=4,
+                        norm_num_groups=8, layers_per_block=1)
+    pipe = StableDiffusionPipeline(vae=vae, text_encoder=te, tokenizer=tok, unet=unet,
+                                   scheduler=PNDMScheduler(skip_prk_steps=True, steps_offset=1,
+                                                           beta_schedule="scaled_linear", beta_start=0.00085,
+                                                           beta_end=0.012),
+                                   safety_checker=None, feature_extractor=None, requires_safety_checker=False)
+    sdp = SDPipeline()
+    sdp.pipe, sdp.current_model, sdp.device, sdp.dtype = pipe, "tiny", "cpu", torch.float32
+    sdp._lora_adapters = {}
+    return sdp, pipe
+
+
+@test("Samplers on a tiny CPU pipeline: same seed → same image, batch image i == seed+i (DPM++ SDE too), PNDM at 1–3 steps")
+def _():
+    import torch, numpy as np
+    try:
+        from transformers import CLIPTokenizer
+        tok = CLIPTokenizer.from_pretrained("stable-diffusion-v1-5/stable-diffusion-v1-5", subfolder="tokenizer",
+                                            local_files_only=True)
+    except Exception:
+        raise Skip("SD 1.5 CLIP tokenizer not in .hf_cache")
+    sdp, pipe = _tiny_sd(tok)
+    arr = lambda im: np.asarray(im.convert("RGB"), dtype=np.int16)
+
+    def gen(**kw):
+        a = dict(prompt="1girl, red hair", negative_prompt="lowres", width=16, height=16, steps=6, cfg_scale=5.0,
+                 seed=42, scheduler="Euler", batch_size=1)
+        a.update(kw)
+        return sdp.txt2img(**a)[0]
+    from backend.sampling import SCHEDULERS
+    from diffusers import EulerDiscreteScheduler
+    for name in SCHEDULERS:
+        for steps in (1, 3, 8):
+            a, b = gen(scheduler=name, steps=steps, seed=7), gen(scheduler=name, steps=steps, seed=7)
+            assert np.abs(arr(a[0]) - arr(b[0])).max() <= 1, (name, steps, "same seed differs")
+        batch = gen(scheduler=name, steps=5, batch_size=2, seed=100)
+        single = gen(scheduler=name, steps=5, seed=101)
+        assert np.abs(arr(batch[1]) - arr(single[0])).max() <= 1, (name, "batch image 1 != seed+1")
+    # SDXL files start from an Euler config (no skip_prk_steps): PNDM must still run at few steps
+    pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
+    for steps in (1, 2, 3):
+        gen(scheduler="PNDM", steps=steps)
+
+
+
+@test("LoRA on a tiny CPU pipeline through diffusers + PEFT: apply / re-weight / remove / unload restore bit-exactly")
+def _():
+    import torch
+    from safetensors.torch import save_file
+    try:
+        from transformers import CLIPTokenizer
+        tok = CLIPTokenizer.from_pretrained("stable-diffusion-v1-5/stable-diffusion-v1-5", subfolder="tokenizer",
+                                            local_files_only=True)
+    except Exception:
+        raise Skip("SD 1.5 CLIP tokenizer not in .hf_cache")
+    sdp, pipe = _tiny_sd(tok)
+    tmp = Path(_tf.mkdtemp())
+
+    def make_lora(path, seed):
+        g = torch.Generator().manual_seed(seed)
+        sd_, expect, n = {}, {}, 0
+        for name, mod in pipe.unet.named_modules():
+            if isinstance(mod, torch.nn.Linear) and name.endswith(("attn1.to_q", "attn2.to_v")) and n < 3:
+                key = "lora_unet_" + name.replace(".", "_")
+                down = torch.randn(4, mod.in_features, generator=g) * 0.1
+                up = torch.randn(mod.out_features, 4, generator=g) * 0.1
+                sd_[key + ".lora_down.weight"], sd_[key + ".lora_up.weight"] = down, up
+                sd_[key + ".alpha"] = torch.tensor(4.0)
+                expect[name + ".weight"] = up @ down
+                n += 1
+        save_file(sd_, str(path))
+        return expect
+    orig = {n: p.detach().clone() for n, p in pipe.unet.named_parameters()}
+    ea, eb = make_lora(tmp / "a.safetensors", 1), make_lora(tmp / "b.safetensors", 2)
+
+    def check(slots):
+        now = dict(pipe.unet.named_parameters())
+        for n, p in orig.items():
+            want = p + sum(ex[n] * w for ex, w in slots if n in ex) if any(n in ex for ex, _ in slots) else p
+            assert (now[n].detach() - want).abs().max().item() < 1e-6, (n, slots)
+    try:
+        sdp.load_lora(str(tmp / "a.safetensors"), 0.8, slot=0); check([(ea, 0.8)])
+        sdp.load_lora(str(tmp / "b.safetensors"), 0.5, slot=1); check([(ea, 0.8), (eb, 0.5)])
+        sdp.load_lora(str(tmp / "a.safetensors"), 0.3, slot=0); check([(ea, 0.3), (eb, 0.5)])
+        sdp.remove_lora(0); check([(eb, 0.5)])
+        sdp.remove_lora(1)
+        assert all(torch.equal(p.detach(), orig[n]) for n, p in pipe.unet.named_parameters())
+        sdp.load_lora(str(tmp / "a.safetensors"), 0.8, slot=0); sdp.unload_loras()
+        assert all(torch.equal(p.detach(), orig[n]) for n, p in pipe.unet.named_parameters())
+    finally:
+        sdp._unload()
+
+
+@test("Small audit fixes: X/Y ranges, cleared boxes, init-image cap, save names, v-pred names, OCR langs, record-only PNG")
+def _():
+    import json as _j
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    import app as _app
+    from backend.sampling import detect_prediction
+    from backend.png_info import read_image_metadata
+    assert _app._xy_values("CFG", "9-5")[0] == [9.0, 8.0, 7.0, 6.0, 5.0]
+    assert _app._xy_values("CFG", "1-5:0")[0] == [] and _app._xy_values("CFG", "1-5:0")[1]
+    assert _app._xy_values("Steps", "4-10:2")[0] == [4, 6, 8, 10]
+    # steps 1 × strength 0.495 left 0 img2img steps
+    steps, *_rest = _app._clean_gen_args(1, 7, 512, 512, 1, 1, 0.495, img2img=True)
+    assert int(steps * 0.495) >= 1, steps
+    for sz, cap in (((1, 2000), 2048), ((32, 1280), 1280), ((10, 10), 2048), ((4000, 3000), 2048)):
+        out, _n = _app._fit_init_image(Image.new("RGB", sz), cap)
+        assert max(out.size) <= cap and min(out.size) >= 64, (sz, out.size)
+    for n, want in (("foo_v_predator.safetensors", False), ("kvpredx.safetensors", False),
+                    ("noobaiXLVpred10.safetensors", True), ("NoobAI-XL-Vpred-v1.0.safetensors", True),
+                    ("illustriousXL_vprediction.safetensors", True), ("ponyDiffusionV6XL.safetensors", False)):
+        assert detect_prediction(n)["v_pred"] is want, n
+    assert _app._ocr_langs("en+ch_sim+ja+ko") == ["en", "ch_sim"] and _app._ocr_langs("") == ["en"]
+    info = PngInfo(); info.add_itxt("imagegen", _j.dumps({"format": 2, "prompt": "1girl", "steps": 20, "seed": 7}))
+    with _tf.TemporaryDirectory() as d:
+        f = Path(d) / "r.png"
+        Image.new("RGB", (8, 8)).save(f, pnginfo=info)
+        m = read_image_metadata(f)
+    assert m["prompt"] == "1girl" and m["steps"] == 20 and m["seed"] == 7
+    # the VRAM bar with a cleared box (None) mustn't raise
+    import inspect
+    src = inspect.getsource(_app)
+    assert "int(_num(width, 512))" in src
+
+
+@test("Civitai: a same-name file of another size is another version (not '✅ Downloaded'); keys scrubbed from errors")
+def _():
+    from backend import civitai_client as C
+    tmp = Path(_tf.mkdtemp())
+    old_dirs = C._TYPE_TO_DIR
+    try:
+        C._TYPE_TO_DIR = dict(C._TYPE_TO_DIR, LORA=tmp)
+        (tmp / "Hero.safetensors").write_bytes(b"x" * 10)
+        cl = C.CivitaiClient()
+        v2 = {"id": 222, "files": [{"name": "Hero.safetensors", "primary": True, "sizeKB": 150000,
+                                    "downloadUrl": "http://127.0.0.1:1/x"}]}
+        ok, res = cl.download_model_version({"type": "LORA", "name": "Hero"}, v2)
+        assert not ok and (tmp / "Hero.safetensors").stat().st_size == 10, (ok, res)
+        assert not (tmp / "Hero.safetensors.part").exists()
+    finally:
+        C._TYPE_TO_DIR = old_dirs
+    s = C.scrub("Client error for url https://civitai.com/api/v1/models?limit=20&token=abcdef1234567890&x=1",
+                key="abcdef1234567890")
+    assert "abcdef" not in s and "token=***" in s
+
+
+@test("Dataset prep: same-stem files kept apart, transparency on white, EXIF rotation, honest counts")
+def _():
+    from PIL import Image
+    from backend.dataset_manager import prepare_dataset
+    src, out = Path(_tf.mkdtemp()), Path(_tf.mkdtemp())
+    Image.new("RGB", (64, 64), (255, 0, 0)).save(src / "a.jpg")
+    Image.new("RGB", (64, 64), (0, 0, 255)).save(src / "a.png")
+    Image.new("RGBA", (64, 64), (0, 0, 0, 0)).save(src / "s.png")
+    ex = Image.new("RGB", (40, 80), (0, 255, 0)); exif = ex.getexif(); exif[0x0112] = 6   # rotate 90° on display
+    ex.save(src / "r.jpg", exif=exif)
+    items = [dict(filename=n, path=str(src / n), bucket_w=64, bucket_h=64) for n in ("a.jpg", "a.png", "s.png", "r.jpg")]
+    items.append(dict(filename="missing.png", path=str(src / "missing.png"), bucket_w=64, bucket_h=64))
+    msg = prepare_dataset(items, out)
+    names = sorted(p.name for p in out.glob("*.png"))
+    assert names == ["a.png", "a_2.png", "r.png", "s.png"], names
+    assert Image.open(out / "a.png").getpixel((32, 32))[0] > 200 and Image.open(out / "a_2.png").getpixel((32, 32))[2] > 200
+    assert Image.open(out / "s.png").getpixel((32, 32)) == (255, 255, 255)
+    assert "Prepared 4" in msg and "1 failed" in msg, msg
+
+
+@test("Model info: SDXL LoRAs aren't labelled 'SD 1.x'; lineage from ss_sd_model_name")
+def _():
+    import json as _j, struct
+    import backend.model_manager as mm
+    tmp = Path(_tf.mkdtemp())
+
+    def lora(name, width, meta):
+        hdr = {"lora_unet_down_blocks_1_attentions_0_transformer_blocks_0_attn2_to_k.lora_down.weight":
+               {"dtype": "F16", "shape": [4, width], "data_offsets": [0, 8 * width]}, "__metadata__": meta}
+        raw = _j.dumps(hdr).encode()
+        (tmp / name).write_bytes(struct.pack("<Q", len(raw)) + raw + b"\0" * (8 * width))
+        return str(tmp / name)
+    for name, width, meta, want in (("x1.safetensors", 2048, {"ss_sd_model_name": "290640.safetensors"}, "Pony (SDXL)"),
+                                    ("x2.safetensors", 2048, {"ss_sd_model_name": "noobai.safetensors"}, "Illustrious (SDXL)"),
+                                    ("x3.safetensors", 2048, {}, "SDXL"), ("x4.safetensors", 768, {}, "SD 1.x")):
+        p = lora(name, width, meta)
+        assert mm._detect_sd_version(mm._read_sf_metadata(p), p) == want, (name, want)
+
+
+@test("Detectors: a failed download is retried after 5 minutes (was off until restart)")
+def _():
+    import time as _t
+    from backend import detail_tools as dt
+    calls = []
+    cache = {}
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **k):
+        if name == "huggingface_hub":
+            calls.append(1)
+            raise ImportError("offline")
+        return real_import(name, *a, **k)
+    builtins.__import__ = fake_import
+    try:
+        assert dt._onnx_session(cache, "r", "f", "0", "x", "y") is None and len(calls) == 1
+        assert dt._onnx_session(cache, "r", "f", "0", "x", "y") is None and len(calls) == 1   # cached for now
+        cache["failed_at"] = _t.time() - 301
+        assert dt._onnx_session(cache, "r", "f", "0", "x", "y") is None and len(calls) == 2   # retried
+    finally:
+        builtins.__import__ = real_import
+
+@test("LoRA trainer: CLIP skip 2 conditioning matches generation; tag frequency / dataset size saved for keyword chips")
+def _():
+    import json as _j, torch
+    from unittest.mock import patch
+    from transformers import CLIPTextModel, CLIPTextConfig
+    from backend import lora_trainer as LT
+    from backend.lora_keywords import lora_keywords
+    torch.manual_seed(0)
+    te = CLIPTextModel(CLIPTextConfig(vocab_size=100, hidden_size=16, intermediate_size=32, num_hidden_layers=3,
+                                      num_attention_heads=2, max_position_embeddings=16))
+    ids = torch.randint(0, 100, (1, 16))
+    enc = te(ids, output_hidden_states=True)
+    want = te.text_model.final_layer_norm(enc.hidden_states[-2])      # = Compel PENULTIMATE_..._NORMALIZED
+    assert torch.allclose(LT._sd1_hidden(te, enc, 2), want) and LT._sd1_hidden(te, enc, 1) is enc[0]
+    cfg = LT.TrainingConfig(base_model="x/base.safetensors", model_type="sd15", dataset_dir="d/myset",
+                            trigger_word="dunk", output_name="t")
+    out = Path(_tf.mkdtemp()) / "t.safetensors"
+    with patch("peft.get_peft_model_state_dict", return_value={}):
+        LT.save_lora(object(), None, out, cfg, ["dunk, 1girl, grey hair", "dunk, 1girl, red eyes"])
+    from safetensors import safe_open
+    with safe_open(str(out), "pt") as f:
+        meta = f.metadata()
+    assert _j.loads(meta["ss_tag_frequency"]) == {"myset": {"dunk": 2, "1girl": 2, "grey hair": 1, "red eyes": 1}}
+    assert _j.loads(meta["ss_dataset_dirs"])["myset"]["img_count"] == 2 and meta["ss_clip_skip"] == "2"
+    kw = lora_keywords(str(out))
+    assert kw is not None and kw.n_images == 2 and dict(kw.tags).get("grey hair") == 0.5, kw
+
+@test("History index: text chunks only, refresh by mtime, search words / model / LoRA / favourites, thumbnails")
+def _():
+    import json as _j, time as _t
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    from backend import history as H
+    tmp = Path(_tf.mkdtemp()); outs = tmp / "outputs"; outs.mkdir()
+    saved = (H.INDEX_FILE, H.FAV_FILE, H.THUMBS)
+    H.INDEX_FILE, H.FAV_FILE, H.THUMBS = tmp / "idx.json", tmp / "fav.json", outs / ".thumbs"
+    try:
+        def png(name, prompt, model, lora, seed):
+            info = PngInfo()
+            info.add_text("parameters", f"{prompt}\nNegative prompt: bad\nSteps: 20, Sampler: Euler a, CFG scale: 7, "
+                                        f"Seed: {seed}, Size: 64x64, Model: {model}, LoRAs: {lora}:0.8")
+            Image.new("RGB", (64, 64), (seed % 255, 0, 0)).save(outs / name, pnginfo=info)
+        png("a.png", "1girl, heroine, black bikini, beach", "meina.safetensors", "Heroine_v1", 1)
+        png("b.png", "1girl, heroine, white dress", "wai.safetensors", "IL_Heroine", 2)
+        _t.sleep(0.05)
+        png("c.png", "landscape, mountains", "wai.safetensors", "none_lora", 3)
+        idx = H.build_index(outs)
+        assert set(idx) == {"a.png", "b.png", "c.png"} and idx["a.png"]["model"] == "meina"
+        assert idx["b.png"]["loras"] == ["IL_Heroine"] and idx["a.png"]["seed"] == 1
+        assert H.search(idx, "heroine bikini") == ["a.png"]
+        assert H.search(idx, "", model="wai") == ["c.png", "b.png"]            # newest first
+        assert H.search(idx, "heroine", lora="IL_Heroine") == ["b.png"]
+        assert H.toggle_favourite("b.png") is True and H.search(idx, "", favs_only=True) == ["b.png"]
+        assert H.toggle_favourite("b.png") is False and H.search(idx, "", favs_only=True) == []
+        (outs / "c.png").unlink()
+        png("d.png", "1girl, maid", "meina.safetensors", "Heroine_v1", 4)
+        idx = H.build_index(outs)
+        assert set(idx) == {"a.png", "b.png", "d.png"}
+        assert _j.loads(H.INDEX_FILE.read_text(encoding="utf-8")).keys() == idx.keys()
+        t = H.thumbnail("a.png", outs)
+        assert t and Image.open(t).size == (64, 64) and H.thumbnail("missing.png", outs) is None
+        (outs / "broken.png").write_bytes(b"not a png")                       # damaged files don't break it
+        assert "broken.png" in H.build_index(outs)
+    finally:
+        H.INDEX_FILE, H.FAV_FILE, H.THUMBS = saved
+
+
+@test("Tiled SD detail: tiles cover the image with overlap, full-size where possible; blend ramps only inside")
+def _():
+    import numpy as np
+    from backend.detail_tools import tile_boxes, _ramp_mask
+    for W, H, t, ov in ((1024, 1536, 512, 96), (1664, 2432, 1024, 96), (600, 500, 496, 96), (512, 512, 512, 96)):
+        boxes = tile_boxes(W, H, t, ov)
+        cover = np.zeros((H, W), bool)
+        for x1, y1, x2, y2 in boxes:
+            assert 0 <= x1 < x2 <= W and 0 <= y1 < y2 <= H
+            assert (x2 - x1) == min(t, W) and (y2 - y1) == min(t, H), (W, H, (x1, y1, x2, y2))
+            cover[y1:y2, x1:x2] = True
+        assert cover.all(), (W, H)
+    m = np.asarray(_ramp_mask(100, 80, 20, 0, 0, 10))
+    assert m[:, 0].max() == 0 and m[40, 50] == 255 and m[0, 99] == 255 and m[-1, 50] == 0
 
 # ══════════════════════════════════════════════════════════════════════════
 # Summary

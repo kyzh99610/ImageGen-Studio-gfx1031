@@ -106,8 +106,14 @@ window, shows a loading screen while it starts, and frees the GPU when you close
 - **Hires fix** (small pass → upscale → re-draw details: SDXL 832×1216 → 1248×1824 fits in 12 GB), **variation
   seeds** ("more like this"), **CLIP skip 2** for SD 1.5 anime models, and an **X/Y grid** to compare CFG / steps /
   sampler / LoRA weight / prompt words side by side.
-- **✨ Face detail** (ADetailer-style: faces redrawn at full resolution) and **🖌 Inpaint** (paint an area,
-  redraw only that part with your model and LoRAs).
+- **✨ Face detail and ✋ hand detail** (ADetailer-style: YOLO anime face / hand detectors, each redrawn at full
+  resolution with low denoise) and **🖌 Inpaint** (paint an area, redraw only that part with your model and LoRAs).
+- **🎴 Generate every outfit** of a character card × N seeds (same seeds per outfit) with a labelled contact sheet;
+  resumable. **🗂 History** tab: search every output by prompt words, model, LoRA or seed, ⭐ favourites, one click
+  back to its exact settings. **✨ SD detail pass** in the Upscale tab: tiled low-denoise redraw with your model,
+  beyond what hires fix can reach.
+- **Safe to click around:** one GPU job at a time (Generate, X/Y grid, Auto-Loop, Bridge, LoRA buttons can't collide);
+  Stop or an out-of-memory error during hires / face / hand detail keeps the finished images.
 - **Faster, cleaner sampling:** DPM++ 2M **AYS** (Align Your Steps: ~25-step quality in 10–12 steps, about 2×
   faster), real Karras samplers, **PAG**, FreeU, CFG rescale, and automatic setup for **v-prediction**
   checkpoints (NoobAI-XL v-pred). Danbooru tag autocomplete and spelling hints.
@@ -128,7 +134,8 @@ window, shows a loading screen while it starts, and frees the GPU when you close
 - **Upscale** (Real-ESRGAN on the GPU via DirectML, or Lanczos), **Watermark Remover** (OCR + LaMa inpainting)
 - **PNG Info:** reads A1111 / Forge / Civitai (PNG and JPEG) and NovelAI metadata, and sends the settings to Generate
 - **Civitai Hub:** search, filter, and download with resume support
-- **LoRA training** (SD 1.5 / SDXL, kohya-compatible output)
+- **LoRA training** (SD 1.5 / SDXL, kohya-compatible output, CLIP skip 2 for SD 1.5, tag statistics saved so the
+  keyword chips work on your own LoRAs)
 - **VRAM estimate** before you generate, and a warning when Windows spills VRAM into system RAM (it doesn't raise
   out-of-memory, it just gets ~20× slower)
 - Bilingual in-app help (English / 中文)
@@ -181,7 +188,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 92 CPU tests; NPU tests skip without a Ryzen AI NPU. For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py`.
+That runs 114 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload).
 
 ## Credits and licenses
 

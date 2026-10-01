@@ -25,8 +25,8 @@ from config import (
     DEFAULT_NEGATIVE, get_torch_dtype,
 )
 from backend.sd_pipeline import (
-    _strip_lora_layers, _restore_param, _load_scheduler, _make_generator, _make_generators, _seed_label, _gpu_vae_decode, _vram_reset, _vram_spill_note,
-    _is_sdxl, _model_family, _load_embeddings, _load_companion_ti, SCHEDULER_MAP,
+    _strip_lora_layers, _load_scheduler, _make_generator, _make_generators, _seed_label, _gpu_vae_decode, _vram_reset, _vram_spill_note,
+    _is_sdxl, _model_family, _load_embeddings, _load_companion_ti, SCHEDULER_MAP, KEEP_VAE, vae_key,
 )
 
 _LORA_ADAPTER = "sdxl_lora"
@@ -112,12 +112,14 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
             print("[SDXL] Text encoder is on DML — cannot use Compel, truncating to 77 tokens")
             return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt)}
 
-        # ── On the CPU, cast TEs to float32 (fp16 matmuls are slow there) ──
-        # On the GPU fp16 gives identical embeddings (cosine 1.00000) and skips a
-        # 2.8 GB fp32 copy of the encoders plus ~3 s of first-run kernel compilation.
-        on_cpu = te_device == "cpu"
-        te1_was_half = on_cpu and (pipe.text_encoder.dtype == torch.float16)
-        te2_was_half = on_cpu and (pipe.text_encoder_2.dtype == torch.float16)
+        # ── Encode in float32, then cast the TEs back (fp16→fp32→fp16 is lossless) ──
+        # On the CPU fp16 matmuls are slow. On the GPU (ZLUDA) fp16 encoding is NOT
+        # deterministic: the same prompt encoded twice differed by up to 0.03, which made the
+        # same seed differ by 7–12/255 whenever the embedding cache was cleared (new session,
+        # LoRA change). fp32 gave bit-identical embeddings every time, ~0.5 s more per new
+        # prompt (cached after that); the fp32 copy (+1.6 GB) exists only during the encode.
+        te1_was_half = pipe.text_encoder.dtype == torch.float16
+        te2_was_half = pipe.text_encoder_2.dtype == torch.float16
         if te1_was_half:
             pipe.text_encoder.float()
         if te2_was_half:
@@ -142,6 +144,8 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
             pipe.text_encoder.half()
         if te2_was_half:
             pipe.text_encoder_2.half()
+        if "cuda" in te_device:
+            torch.cuda.empty_cache()        # give the fp32 copy's memory back before denoising
 
         # Cast embeddings to float16 to match pipeline expectations
         pos = pos.half()
@@ -165,7 +169,7 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
         _SDXL_EMBED_CACHE[cache_key] = {k: v.clone() for k, v in res.items()}
         return res
     except Exception as e:
-        # Safety: restore TEs to float16 even on error (only the CPU path casts them)
+        # Safety: restore TEs to float16 even on error
         try:
             if pipe.text_encoder.dtype == torch.float32 and pipe.unet.dtype == torch.float16:
                 pipe.text_encoder.half()
@@ -510,8 +514,10 @@ def _cpu_vae_decode(vae, latents) -> list[Image.Image]:
     # CPU needs float32
     vae.cpu().float()
 
-    # Adaptive tiling: only tile when latent is large (>160x160, i.e. >1280x1280 image) or batch > 2
-    need_tiling = (h > 160 or w > 160 or b > 2)
+    # Always tiled: the GPU path decodes SDXL tiled anyway, and an untiled CPU decode of 832×1216
+    # needs several GB of extra RAM — next to the 10 GB the app holds with a LoRA snapshot it once
+    # exhausted memory and crashed the process (access violation inside the CPU allocator).
+    need_tiling = True
     if need_tiling:
         vae.enable_tiling()
         vae.enable_slicing()
@@ -774,12 +780,14 @@ class SDXLPipeline:
         self._vae_needs_fp32 = False  # set when this model's VAE overflows in fp16
 
     # ── Model loading ──────────────────────────────────────────────────────────
-    def load_model(self, model_path_or_id: str, vae_path: str | None = None) -> str:
+    def load_model(self, model_path_or_id: str, vae_path=KEEP_VAE) -> str:
         import torch
         from diffusers import StableDiffusionXLPipeline, AutoencoderKL
 
-        if model_path_or_id == self.current_model:
+        if model_path_or_id == self.current_model and self.pipe is not None and (
+                vae_path is KEEP_VAE or vae_key(vae_path) == vae_key(self._last_vae_path)):
             return f"✅ Already loaded: {Path(model_path_or_id).name}"
+        vae_path = vae_key(vae_path)
 
         self.device = _device()
         self.dtype = get_torch_dtype(self.device)
@@ -868,6 +876,9 @@ class SDXLPipeline:
         self._inpaint_pipe = None
         self._pag_pipes = None
         self.prediction = {}
+        if getattr(self, "_snap", None) is not None:
+            self._snap.close()
+        self._snap = None
         self.current_model = None
         self.loaded_loras = []
         self._lora_adapters = {}
@@ -883,57 +894,36 @@ class SDXLPipeline:
 
     # ── Snapshot / restore for LoRA ────────────────────────────────────────────
     def _snapshot_clean_state(self):
+        """Start LoRA-restore snapshots for a clean model; they fill lazily with only the weights
+        a LoRA changes (backend/lora_snapshot). The old full copy held 6.8 GB of RAM and, with a
+        small pagefile, the next checkpoint load ran Windows out of commit and crashed."""
         if self.pipe is None:
             return
         import torch
-        with torch.no_grad():
-            self._clean_unet_state = {
-                n: p.detach().cpu().clone()
-                for n, p in self.pipe.unet.named_parameters()
-            }
-            if self.pipe.text_encoder is not None:
-                self._clean_te_state = {
-                    n: p.detach().cpu().clone()
-                    for n, p in self.pipe.text_encoder.named_parameters()
-                }
-            if hasattr(self.pipe, "text_encoder_2") and self.pipe.text_encoder_2 is not None:
-                self._clean_te2_state = {
-                    n: p.detach().cpu().clone()
-                    for n, p in self.pipe.text_encoder_2.named_parameters()
-                }
-        total = sum(v.numel() for v in self._clean_unet_state.values()) / 1e6
-        # Save fingerprint for comparison during generation
+        from backend.lora_snapshot import Snapshot
+        if getattr(self, "_snap", None) is not None:
+            self._snap.close()
+        self._snap = Snapshot()
+        # markers only ("snapshots started"): nothing may keep the RAM part alive after a spill
+        self._clean_unet_state, self._clean_te_state, self._clean_te2_state = {}, None, None
         self._clean_fingerprint = []
-        for n, v in self._clean_unet_state.items():
-            if 'attn1.to_q.weight' in n:
-                self._clean_fingerprint.append(v.float().norm().item())
-                if len(self._clean_fingerprint) >= 2:
-                    break
-        print(f"[SDXL LoRA] Snapshot saved ({total:.0f}M UNet params on CPU)")
+        # CLIP-L in full (246 MB, to disk): load_lora_weights itself rewrites its (unused) last layer
+        # in some checkpoints before anything is fused — only a copy taken now restores it exactly
+        if getattr(self.pipe, "text_encoder", None) is not None:
+            for n, p in self.pipe.text_encoder.named_parameters():
+                self._snap.add("text_encoder", n, p)
+            self._snap.spill()
+        with torch.no_grad():
+            for n, p in self.pipe.unet.named_parameters():
+                if 'attn1.to_q.weight' in n:
+                    self._clean_fingerprint.append(p.detach().float().norm().item())
+                    if len(self._clean_fingerprint) >= 2:
+                        break
 
     def _restore_clean_state(self):
-        if self.pipe is None or not self._clean_unet_state:
+        if self.pipe is None or getattr(self, "_snap", None) is None:
             return
-        import torch
-        with torch.no_grad():
-            restored, missed = 0, 0
-            for name, param in self.pipe.unet.named_parameters():
-                if name in self._clean_unet_state:
-                    _restore_param(param, self._clean_unet_state[name])
-                    restored += 1
-                else:
-                    missed += 1
-            if missed:
-                print(f"[SDXL LoRA] WARNING: {missed} UNet params not in snapshot (restored {restored})")
-
-            if self._clean_te_state and self.pipe.text_encoder is not None:
-                for name, param in self.pipe.text_encoder.named_parameters():
-                    if name in self._clean_te_state:
-                        _restore_param(param, self._clean_te_state[name])
-            if self._clean_te2_state and getattr(self.pipe, "text_encoder_2", None) is not None:
-                for name, param in self.pipe.text_encoder_2.named_parameters():
-                    if name in self._clean_te2_state:
-                        _restore_param(param, self._clean_te2_state[name])
+        self._snap.restore(self.pipe)
 
     # ── LoRA management ────────────────────────────────────────────────────────
     def load_lora(self, lora_path: str, weight: float = 0.8, slot: int = 0) -> str:
@@ -1032,7 +1022,9 @@ class SDXLPipeline:
                 from backend.model_manager import lycoris_kind
                 if lycoris_kind(path):   # LoHa / LoKr: diffusers can't load these, fuse ourselves
                     from backend.lycoris import apply_lycoris
-                    n, skipped = apply_lycoris(self.pipe, path, weight)
+                    from backend.lora_snapshot import param_snapshotter
+                    n, skipped = apply_lycoris(self.pipe, path, weight,
+                                               before_change=param_snapshotter(self.pipe, self._snap))
                     self.loaded_loras.append(name_str)
                     print(f"[SDXL LoRA] Slot {slot+1}: {name_str} (LyCORIS, {n} layers"
                           f"{f', {skipped} unmatched' if skipped else ''}) fused at ×{weight:.2f}")
@@ -1048,10 +1040,17 @@ class SDXLPipeline:
                         ) from None
                     raise
 
+                from backend.lora_snapshot import snapshot_wrapped
+                snapshot_wrapped(self.pipe, self._snap)   # clean copies of what fuse changes
                 self.pipe.fuse_lora(lora_scale=weight)
                 self._purge_peft()
                 self.loaded_loras.append(name_str)
                 print(f"[SDXL LoRA] Slot {slot+1}: {name_str} fused at ×{weight:.2f}")
+            if self._snap is not None:
+                t_sp = time.time()
+                self._snap.spill()          # restore copies → temp file, off the RAM
+                print(f"[SDXL LoRA] Restore snapshot {self._snap.size_gb():.2f} GB on disk "
+                      f"({time.time() - t_sp:.1f}s)")
 
             # ── Verify fusion (only warn on failure) ──
             diffs = []
@@ -1064,16 +1063,6 @@ class SDXLPipeline:
             if diffs and sum(diffs) / len(diffs) < 1e-6:
                 print("[SDXL LoRA] ⚠ WARNING: UNet weights appear UNCHANGED after fusion!")
 
-            if self._clean_te2_state and self.pipe.text_encoder_2 is not None:
-                te_diffs = []
-                for n, p in self.pipe.text_encoder_2.named_parameters():
-                    if n in self._clean_te2_state and 'self_attn.q_proj.weight' in n:
-                        d = (p.detach().cpu().float() - self._clean_te2_state[n].float()).norm().item()
-                        te_diffs.append(d)
-                        if len(te_diffs) >= 3:
-                            break
-                if te_diffs and sum(te_diffs) / len(te_diffs) < 1e-6:
-                    print("[SDXL LoRA] ⚠ WARNING: TE2 weights appear UNCHANGED after fusion!")
 
         finally:
             # ALWAYS restore model to original device, even on failure

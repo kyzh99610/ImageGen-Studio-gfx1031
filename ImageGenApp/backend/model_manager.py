@@ -194,12 +194,19 @@ def _detect_sd_version(meta: dict, path: str) -> str:
                 return "FLUX"
         except Exception:
             pass
-    # 2) Checkpoint tensor names (authoritative for SD1/SD2 vs SDXL)
-    hdr = checkpoint_arch(path)
+    # 2) Tensor names (authoritative for SD1/SD2 vs SDXL) — LoRAs via their cross-attention width
+    #    (checkpoint_arch alone is None for LoRAs, and 7 of 22 SDXL LoRAs showed "SD 1.x"; F-16)
+    hdr = checkpoint_arch(path) or lora_arch(path)
     if hdr == "sd1":
         return "SD 1.x"
     if hdr == "sd2":
         return "SD 2.x"
+    if hdr == "sdxl":          # the base a LoRA was trained on names its lineage
+        base = str(meta.get("ss_sd_model_name", "")).lower()
+        if "pony" in base or re.search(r"(^|\D)290640(\D|$)", base):
+            return "Pony (SDXL)"
+        if any(x in base for x in ("illustrious", "noob", "wai")):
+            return "Illustrious (SDXL)"
     # 3) Safetensors metadata / filename (also tells Pony / Illustrious apart)
     arch = (meta.get("modelspec.architecture") or
             meta.get("ss_base_model_version") or "").lower()

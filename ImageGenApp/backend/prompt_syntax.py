@@ -62,6 +62,40 @@ def _parse(s: str, i: int, closer: str | None) -> tuple[str, int, bool]:
     return "".join(buf), i, closer is None
 
 
+# Compel reads "+"/"-" right after a word as a weight ("word+" = ×1.1), so the Danbooru kaomoji
+# "+_+" and "-_-" became the text "+_" / "-_" with a weight (audit F-08). A sign that ends a
+# non-word (the char before it isn't a letter, digit, ")" or another sign) is escaped here, and the
+# patched Fragment below drops the backslash again. Compel's own "word++" keeps working.
+_TRAILING_SIGN = re.compile(r"(?<=[^A-Za-z0-9)+\-\\])([+-]+)(?=\s|[,.)\]\"=:]|$)")
+
+
+def _protect_trailing_signs(prompt: str) -> str:
+    if "+" not in prompt and "-" not in prompt:
+        return prompt
+    return _TRAILING_SIGN.sub(lambda m: "".join("\\" + c for c in m.group(1)), prompt)
+
+
+def _patch_compel_fragment() -> None:
+    """Compel unescapes only backslash-( ) " in fragment text; drop the backslash of + / - too."""
+    try:
+        from compel import prompt_parser as P
+    except Exception:
+        return
+    if getattr(P.Fragment, "_imagegen_unescape", False):
+        return
+    orig = P.Fragment.__init__
+
+    def __init__(self, text, weight=1):
+        orig(self, text, weight)
+        if "\\" in self.text:
+            self.text = self.text.replace("\\+", "+").replace("\\-", "-")
+    P.Fragment.__init__ = __init__
+    P.Fragment._imagegen_unescape = True
+
+
+_patch_compel_fragment()
+
+
 def a1111_to_compel(prompt: str) -> str:
     """Convert A1111-style emphasis to Compel weights (no-op for prompts without brackets)."""
     if not prompt:
@@ -79,6 +113,7 @@ def a1111_to_compel(prompt: str) -> str:
                   "use the LoRA slots (Generate tab) to apply LoRAs")
             prompt = _EXTRA_NET.sub("", prompt)
             prompt = re.sub(r"\s*,\s*(,\s*)+", ", ", prompt).strip().strip(",").strip()
+    prompt = _protect_trailing_signs(prompt)
     if "(" not in prompt and "[" not in prompt:
         return prompt
     try:

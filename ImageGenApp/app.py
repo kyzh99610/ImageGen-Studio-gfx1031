@@ -100,6 +100,10 @@ os.chdir(_APP_DIR)   # also set cwd so relative paths in config.py resolve corre
 # config first: it sets HF_HOME (and the ZLUDA env), and huggingface_hub — imported by gradio —
 # reads its cache location only once, at import time.
 import config  # noqa: F401
+# Native crashes (access violations inside torch / safetensors / ZLUDA) otherwise end the process
+# with no Python traceback at all — this prints where Python was when it happened.
+import faulthandler
+faulthandler.enable(all_threads=True)
 import gradio as gr
 from PIL import Image, ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -115,7 +119,7 @@ from config import (
 from backend.hardware_detector import get_profile, GPUInfo, NPUInfo
 from backend.sd_pipeline    import SDPipeline, SCHEDULER_MAP
 from backend.upscaler       import Upscaler
-from backend.civitai_client import CivitaiClient
+from backend.civitai_client import CivitaiClient, scrub as _civ_scrub
 from backend.model_manager  import (
     list_checkpoints, list_loras, list_vaes, list_upscalers,
     model_dir_summary, short_name, get_model_info,
@@ -136,6 +140,10 @@ from backend.sdxl_pipeline import SDXLPipeline
 from backend.png_info import read_png_info, format_png_info_html
 from backend.prompt_tools import (merge_prompts, tidy_prompt, token_report_html, insert_after_quality,
                                   preload_tokenizer, tokenizer_ready)
+# torch must be imported on this thread first: the preload thread imports transformers → torch, and
+# two first imports of torch at once deadlock (_DeadlockError). On the GPU paths config already did
+# it; with FORCE_CPU (--cpu) nothing had, and the app died at start-up.
+import torch  # noqa: E402,F401
 preload_tokenizer()
 from backend.lora_keywords import chips_for, lora_keywords
 
@@ -157,6 +165,33 @@ _smartsplit_pipe:   SmartSplitPipeline | None   = None
 # ── Generation abort flag ──────────────────────────────────────────────────────
 _generation_abort = threading.Event()
 _autoloop_active  = threading.Event()   # set = looping, clear = stopped
+# One GPU job at a time. Gradio's shared queue slot alone isn't enough: a Stop with `cancels=`
+# cancelled the asyncio task and handed the slot to the next job while the stopped job's thread
+# was still loading / sampling (audit F-02b). This lock is held for the whole job, in its thread.
+_GPU_LOCK = threading.RLock()
+
+
+def gpu_job(fn):
+    """Mark `fn` as a GPU job; `_serialize_gpu_events` puts it in the shared queue slot and runs it
+    under `_GPU_LOCK` (generators hold the lock until they finish)."""
+    fn._gpu_job = True
+    return fn
+
+
+def _locked(fn):
+    import functools, inspect
+    if inspect.isgeneratorfunction(fn):
+        @functools.wraps(fn)
+        def gen(*a, **k):
+            with _GPU_LOCK:
+                yield from fn(*a, **k)
+        return gen
+
+    @functools.wraps(fn)
+    def run(*a, **k):
+        with _GPU_LOCK:
+            return fn(*a, **k)
+    return run
 
 class _GenerationAborted(Exception):
     """Raised inside generation callbacks to cleanly stop an in-progress run."""
@@ -318,6 +353,32 @@ _TAG_CATEGORIES: dict[str, list[str]] = {
 }
 
 
+def _sdxl_lineage(path: str, is_lora: bool) -> str | None:
+    """'pony' / 'illustrious' for an SDXL file when its metadata or name says so."""
+    import re as _re
+    if not is_lora:
+        try:
+            from backend.sd_pipeline import _model_family
+            fam = _model_family(path)
+            return fam if fam in ("pony", "illustrious") else None
+        except Exception:
+            return None
+    try:
+        import json as _j, struct as _st
+        with open(path, "rb") as f:
+            n = _st.unpack("<Q", f.read(8))[0]
+            meta = (_j.loads(f.read(n)) if 2 < n < 100 << 20 else {}).get("__metadata__") or {}
+    except Exception:
+        meta = {}
+    base = " ".join(str(meta.get(k, "")) for k in ("ss_sd_model_name", "modelspec.title", "ss_base_model")).lower()
+    # "290640" is Pony Diffusion V6 XL's Civitai version id (trainers often keep the download name)
+    if "pony" in base or _re.search(r"(^|\D)290640(\D|$)", base):
+        return "pony"
+    if any(x in base for x in ("illustrious", "noob", "wai")):
+        return "illustrious"
+    return None
+
+
 def _infer_base(name: str) -> str:
     """Infer SD base model type from Civitai sidecar JSON or filename heuristics."""
     import json, re
@@ -352,6 +413,12 @@ def _infer_base(name: str) -> str:
     arch = (lora_arch if in_loras else checkpoint_arch)(str(name))
     if arch in ("sd1", "sd2"):
         return {"sd1": "sd15", "sd2": "sd2"}[arch]
+    # 2b) SDXL lineage (Pony vs Illustrious/NoobAI): a LoRA's training metadata names the base
+    #     it was trained on; checkpoints go through the pipeline's own family detection
+    if arch == "sdxl":
+        lineage = _sdxl_lineage(str(name), in_loras)
+        if lineage:
+            return lineage
     # 3) Filename heuristics (for sdxl: tells Pony / Illustrious apart)
     n = Path(name).stem.lower()
     if "flux" in n:
@@ -376,6 +443,13 @@ def _infer_base(name: str) -> str:
 # User prompt presets & generation settings persistence
 # ═════════════════════════════════════════════════════════════════════════════
 import json as _json
+
+def _ocr_langs(langs_str) -> list[str]:
+    """EasyOCR language list: English plus at most one other script (it refuses ch_sim with ja/ko)."""
+    langs = [l.strip() for l in str(langs_str or "en").replace("+", " ").split() if l.strip()] or ["en"]
+    other = [l for l in langs if l != "en"][:1]
+    return (["en"] if "en" in langs or not other else []) + other
+
 
 def _safe_name(name) -> str:
     """A preset / settings name usable as a file name: no folders ("../x"), no characters
@@ -439,22 +513,39 @@ def _delete_user_preset(name: str, model_family: str | None = None) -> str:
 
 
 def _save_generation_settings(prompt, neg_prompt, scheduler, steps, cfg,
-                              width, height, batch, seed, name="") -> str:
-    """Save all current generation settings to a JSON file."""
+                              width, height, batch, seed, name="", model=None, vae=None,
+                              lora_slots=None, auto_quality=None, extra=None, example=None) -> str:
+    """Save all current generation settings to a JSON file (format 2: + checkpoint / VAE /
+    LoRA slots with weights / auto-quality / hires, face detail, boosters… as set in the UI)."""
     sname = _safe_name(name) or "last_settings"
     # casefold: Windows file names aren't case-sensitive, so "API_KEYS" is api_keys.json
     if sname.casefold() in _RESERVED_SETTINGS or sname.startswith("_"):
         return f"❌ '{sname}' is a reserved name — choose another."
     steps, cfg, width, height, batch, seed, _, _ = _clean_gen_args(steps, cfg, width, height, batch, seed)
+    slots = [[Path(str(l)).name if l and l != "none" else "none", round(float(_num(w, 0.8)), 3)]
+             for l, w in (lora_slots or [])][:3]
     data = {
+        "format": 2,
         "prompt": prompt or "", "negative_prompt": neg_prompt or "",
         "scheduler": scheduler, "steps": steps, "cfg_scale": cfg,
         "width": width, "height": height,
         "batch_size": batch, "seed": seed,
-        "model": getattr(sd, "current_model", "") or "",
+        "model": str(model or getattr(sd, "current_model", "") or ""),
         "model_family": getattr(sd, "model_family", ""),
-        "loras": getattr(sd, "loaded_loras", []),
+        # older readers: the names of the LoRAs in use
+        "loras": [Path(n).stem for n, _ in slots if n != "none"] if lora_slots is not None
+        else getattr(sd, "loaded_loras", []),
     }
+    if lora_slots is not None:
+        data["lora_slots"] = slots
+    if vae is not None:
+        data["vae"] = Path(str(vae)).name if vae and vae != "none" else "none"
+    if auto_quality is not None:
+        data["auto_quality"] = bool(auto_quality)
+    if extra is not None:
+        data["extra"] = _clean_extra(extra)
+    if example:
+        data["example_image"] = Path(str(example)).name
     f = SETTINGS_DIR / f"{sname}.json"
     f.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return f"✅ Settings saved as '{sname}'"
@@ -571,7 +662,11 @@ def _clean_gen_args(steps, cfg, width, height, batch, seed, strength=0.75, img2i
         fixes.append(f"seed {seed_i} → {seed_i % 2**32}")
         seed_i %= 2**32
     if img2img and int(steps_c * strength_c) < 1:
-        need = min(150, -(-100 // int(round(strength_c * 100))))   # ceil(1 / strength)
+        # ceil(1 / strength) on the real strength (the rounded one left 0 steps at 1 × 0.495)
+        import math
+        need = min(150, max(1, math.ceil(1 / max(strength_c, 1e-3))))
+        while int(need * strength_c) < 1 and need < 150:
+            need += 1
         fixes.append(f"steps {steps_c} → {need} (img2img runs steps × strength of them)")
         steps_c = need
     return steps_c, cfg_c, size[0], size[1], batch_c, seed_i, strength_c, fixes
@@ -633,6 +728,8 @@ def _clean_extra(extra: dict | None) -> dict:
         "pag_scale": min(6.0, max(0.0, _num(e.get("pag_scale"), 0.0))),
         "freeu": bool(e.get("freeu")),
         "cfg_rescale": min(1.0, max(0.0, _num(e.get("cfg_rescale"), 0.0))),
+        "hd_on": bool(e.get("hd_on")),
+        "hd_denoise": min(0.7, max(0.1, _num(e.get("hd_denoise"), 0.35))),
     }
 
 
@@ -675,15 +772,20 @@ def _xy_values(axis: str, text: str) -> tuple[list, str]:
         try:
             if m:
                 a, b, st = float(m.group(1)), float(m.group(2)), float(m.group(3) or 1)
-                x = a
-                while x <= b + 1e-9 and len(vals) < 64:
-                    vals.append(x); x += st
+                if st <= 0:
+                    return [], f"“{html.escape(v)}”: the step after “:” must be above 0 ({axis})."
+                # "9-5" counts down (it used to give no values and crash the grid after the model load)
+                x, sign = a, (1 if b >= a else -1)
+                while (x <= b + 1e-9 if sign > 0 else x >= b - 1e-9) and len(vals) < 64:
+                    vals.append(x); x += sign * st
             else:
                 vals.append(float(v))
         except ValueError:
             return [], f"“{html.escape(v)}” isn't a number ({axis})."
     if axis in ("Steps", "Seed", "CLIP skip"):
         vals = [int(round(v)) for v in vals]
+    if not vals:
+        return [], f"No values for {axis}."
     return vals, ""
 
 
@@ -772,14 +874,21 @@ def _fit_init_image(img, max_side: int = 2048, min_side: int = 64):
     scale = 1.0
     if max(w, h) > max_side:
         scale = max_side / max(w, h)
-    elif min(w, h) < min_side:
+    if min(w, h) * scale < min_side:
         scale = min_side / max(1, min(w, h))
     if scale == 1.0:
         return img, []
     nw, nh = max(8, round(w * scale)), max(8, round(h * scale))
     out = img.resize((nw, nh), _Image.LANCZOS)
+    note = f"init image {w}×{h} → {nw}×{nh}"
+    # a sliver (1×2000) can't meet both limits: lifting its short side used to make it 64×128000
+    if max(nw, nh) > max_side:
+        cw, ch = min(nw, max_side), min(nh, max_side)
+        x0, y0 = (nw - cw) // 2, (nh - ch) // 2
+        out = out.crop((x0, y0, x0 + cw, y0 + ch))
+        note += f", centre-cropped to {cw}×{ch}"
     out.info = dict(getattr(img, "info", {}) or {})
-    return out, [f"init image {w}×{h} → {nw}×{nh}"]
+    return out, [note]
 
 
 def _load_generation_settings(name: str):
@@ -958,6 +1067,13 @@ def _build_generate_tab():
                         card_save_btn = gr.Button("💾 Save current setup", size="sm")
                         card_build_btn = gr.Button("🧩 Build from LoRA slot 1", size="sm")
                     card_status = gr.HTML("")
+                    with gr.Row():
+                        card_batch_seeds = gr.Number(value=2, precision=0, minimum=1, maximum=8,
+                                                     label="Seeds per outfit", scale=1)
+                        card_batch_resume = gr.Checkbox(value=True, label="Skip pairs already made", scale=2,
+                                                        info="Same settings + outfit + seed → reuse the saved image")
+                    card_batch_btn = gr.Button("🎴▶ Generate every outfit (current settings, same seeds)",
+                                               size="sm", variant="secondary")
 
                 gr.Markdown("---")
                 refresh_btn = gr.Button("🔄 Refresh model lists")
@@ -1092,8 +1208,8 @@ def _build_generate_tab():
                                 _hires_ups, label="Hires upscaler",
                                 value=_ls.get("hires_upscaler") if _ls.get("hires_upscaler") in _hires_ups else "Lanczos",
                                 info="Lanczos is instant; Real-ESRGAN gives sharper line art (a few seconds more).")
-                        with gr.Accordion("✨ Face detail — re-draw faces at full resolution (ADetailer-style)",
-                                          open=bool(_ls.get("fd_on"))):
+                        with gr.Accordion("✨ Face & hand detail — re-draw faces / hands at full resolution "
+                                          "(ADetailer-style)", open=bool(_ls.get("fd_on") or _ls.get("hd_on"))):
                             fd_cb = gr.Checkbox(
                                 label="Enable face detail", value=bool(_ls.get("fd_on", False)),
                                 info="Finds faces and re-draws each one at the model's native size — small faces "
@@ -1110,6 +1226,16 @@ def _build_generate_tab():
                                                        value=_ls.get("fd_prompt", ""),
                                                        placeholder="e.g. detailed eyes, beautiful face",
                                                        info="Added to your prompt for the face pass only.")
+                            with gr.Row():
+                                hd_cb = gr.Checkbox(
+                                    label="✋ Also re-draw hands", value=bool(_ls.get("hd_on", False)),
+                                    info="Finds hands (anime hand detector; gloves count) and re-draws each one at "
+                                         "native size, before the faces. Cleans up smudged fingers — it can't "
+                                         "reliably fix a wrong finger count. ~5–15 s per hand.")
+                                hd_denoise_sl = gr.Slider(0.1, 0.7, value=_ls.get("hd_denoise", 0.35), step=0.05,
+                                                          label="Hand denoise",
+                                                          info="0.3 = touch-up · 0.45 = redraw fingers · higher "
+                                                               "can turn things near a hand into hands")
                         with gr.Accordion("🎚 Quality boosters — PAG, FreeU, CFG rescale",
                                           open=bool(_ls.get("pag_scale") or _ls.get("freeu"))):
                             with gr.Row():
@@ -1139,7 +1265,9 @@ def _build_generate_tab():
                         with gr.Accordion("🖼 Image-to-Image (optional)", open=False) as i2i_acc:
                             init_image  = gr.Image(label="Input Image", type="pil")
                             strength_sl = gr.Slider(0.1, 1.0, value=0.75, step=0.05, label="Denoise Strength",
-                                                    info="How much to change the input: 0.3 subtle · 0.5 restyle · 0.8+ mostly new.")
+                                                    info="How much to change the input: 0.3 subtle · 0.5 restyle · 0.8+ mostly new. "
+                                                         "Karras / AYS samplers change less at the same value (+0.15). "
+                                                         "Recolouring an outfit needs 🖌 Inpaint, not img2img.")
                             use_i2i_cb  = gr.Checkbox(label="Use img2img mode", value=False,
                                                       info="Start from the image above instead of pure noise.")
                             restore_cb  = gr.Checkbox(
@@ -1333,14 +1461,17 @@ def _build_generate_tab():
                         with gr.Accordion("⚙️ Save / Load Settings", open=False):
                             gr.HTML(
                                 '<p style="color:#a6adc8;font-size:13px;margin:0 0 6px;">'
-                                'Save all current generation parameters (prompt, neg, scheduler, '
-                                'steps, CFG, size, seed) and reload them later.</p>'
+                                'Saves the checkpoint, VAE, LoRA slots and weights, prompts, sampler, steps, '
+                                'CFG, size, seed, hires fix, face detail and boosters — and the image selected '
+                                'in the gallery as its example.</p>'
                             )
                             settings_dd = gr.Dropdown(
                                 label="Saved Settings",
                                 choices=_list_saved_settings(),
                                 interactive=True,
                             )
+                            settings_preview = gr.Image(label="Made with these settings", height=260,
+                                                        interactive=False, visible=False)
                             with gr.Row():
                                 settings_load_btn = gr.Button("📂 Load Settings", size="sm")
                             with gr.Row():
@@ -1523,37 +1654,54 @@ def _build_generate_tab():
         return ('<p style="color:#fab387;">⏹ Stopped. (If a model was loading, it finishes loading '
                 'and stays ready; a running generation ends after its current step.)</p>')
 
-    def _face_pass(imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress):
-        """Face detail on every image (same seed per image, low denoise)."""
+    def _detail_pass(kind, imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress):
+        """Face or hand detail on every image (same seed per image, low denoise)."""
         import math
-        from backend.detail_tools import face_detail
-        t0, out, found = time.time(), [], []
+        from backend.detail_tools import face_detail, hand_detail
+        face = kind == "face"
+        den = ex["fd_denoise"] if face else ex["hd_denoise"]
+        label, icon, what = ("Face", "✨", "face") if face else ("Hand", "✋", "hand")
+        t0, out, found, errors = time.time(), [], [], []
         # ~half the main steps actually run (ADetailer runs steps × denoise). SDXL A/B at 1024²:
         # 0.8× (~22 steps) ~45 s per face, 0.5× (~14) ~28 s, faces no worse
-        fsteps = min(150, math.ceil(max(10, int(steps) * 0.5) / ex["fd_denoise"]))
+        fsteps = min(150, math.ceil(max(10, int(steps) * 0.5) / den))
         for i, im in enumerate(imgs):
-            progress(0, desc=f"Face detail {i + 1}/{len(imgs)}: finding faces…")
+            if _generation_abort.is_set():
+                raise _GenerationAborted()
+            progress(0, desc=f"{label} detail {i + 1}/{len(imgs)}: finding {what}s…")
 
             def cb(step, total, i=i):
                 if _generation_abort.is_set():
                     raise _GenerationAborted()
-                progress(step / total, desc=f"Face detail {i + 1}/{len(imgs)}: step {step}/{total}")
+                progress(step / total, desc=f"{label} detail {i + 1}/{len(imgs)}: step {step}/{total}")
             try:
-                res, n = face_detail(sd, im, prompt, neg_prompt, denoise=ex["fd_denoise"], steps=fsteps, cfg=cfg,
-                                     seed=seeds[i] if i < len(seeds) else seeds[-1], scheduler=scheduler,
-                                     clip_skip=ex["clip_skip"], mode=ex["fd_mode"], face_prompt=ex["fd_prompt"],
-                                     step_callback=cb)
+                kw = dict(denoise=den, steps=fsteps, cfg=cfg, seed=seeds[i] if i < len(seeds) else seeds[-1],
+                          scheduler=scheduler, clip_skip=ex["clip_skip"], step_callback=cb)
+                if face:
+                    res, n = face_detail(sd, im, prompt, neg_prompt, mode=ex["fd_mode"], face_prompt=ex["fd_prompt"],
+                                         **kw)
+                else:
+                    res, n = hand_detail(sd, im, prompt, neg_prompt, **kw)
             except _GenerationAborted:
                 raise
             except Exception as e:
-                print(f"[FaceDetail] {e}")
+                import traceback
+                traceback.print_exc()
+                errors.append(str(e).splitlines()[0][:160] if str(e) else type(e).__name__)
                 res, n = im, 0
             if hasattr(im, "info"):
                 res.info = dict(im.info)
             out.append(res); found.append(n)
-        note = (f'<br>✨ Face detail: {sum(found)} face(s) re-drawn '
-                f'({", ".join(str(n) for n in found)}) · denoise {ex["fd_denoise"]:g} · {time.time() - t0:.1f}s'
-                if sum(found) else '<br>✨ Face detail: no faces found')
+        note = (f'<br>{icon} {label} detail: {sum(found)} {what}(s) re-drawn '
+                f'({", ".join(str(n) for n in found)}) · denoise {den:g} · {time.time() - t0:.1f}s'
+                if sum(found) else f'<br>{icon} {label} detail: no {what}s found' if not errors else '')
+        if not face and not sum(found) and not errors:
+            from backend.detail_tools import hand_detector_available
+            if not hand_detector_available():
+                note = "<br>✋ Hand detail skipped: the hand detector couldn't be downloaded (retried in 5 min)."
+        if errors:   # it used to say "no faces found" when the pass had failed
+            note += (f'<br><span style="color:#f38ba8;">{icon} {label} detail failed on {len(errors)} image(s): '
+                     f'{html.escape(errors[0])}</span>')
         return out, note
 
     def _hires_pass(imgs, seeds, prompt, neg_prompt, cfg, scheduler, ex, progress):
@@ -1564,22 +1712,32 @@ def _build_generate_tab():
         xl = sd.model_family in ("sdxl", "pony", "illustrious")
         cap = 2048 if xl else 1536
         steps2 = min(150, math.ceil(ex["hires_steps"] / ex["hires_denoise"]))   # img2img runs steps × denoise
-        out, size = [], None
+        out, size, ups = [], None, []
         for i, im in enumerate(imgs):
             w, h = im.size
             tw, th = w * ex["hires_scale"], h * ex["hires_scale"]
             f = min(1.0, cap / max(tw, th))
             tw, th = int(round(tw * f / 8)) * 8, int(round(th * f / 8)) * 8
             size = (w, h, tw, th)
+            if _generation_abort.is_set():      # Stop between phases, not only inside the sampler
+                raise _GenerationAborted()
             progress(0, desc=f"Hires fix {i + 1}/{len(imgs)}: upscaling to {tw}×{th}…")
-            up = _upscale_to(im, tw, th, ex["hires_upscaler"])
+            ups.append(_upscale_to(im, tw, th, ex["hires_upscaler"]))
+        # all upscales first, then free Real-ESRGAN's DirectML session before the big img2img passes
+        if ex["hires_upscaler"] != "Lanczos":
+            upscaler.release()
+        for i, up in enumerate(ups):
+            if _generation_abort.is_set():
+                raise _GenerationAborted()
 
             def cb(step, total, i=i):
                 if _generation_abort.is_set():
                     raise _GenerationAborted()
-                done = max(1, int(round(total * ex["hires_denoise"])))
-                k = step - (total - done)
-                progress(max(0, k) / done, desc=f"Hires fix {i + 1}/{len(imgs)}: step {max(0, k)}/{done}")
+                # img2img runs int(total × denoise) steps and diffusers numbers them from 1 within
+                # that slice (the old "step − (total − done)" stayed at 0 for the whole pass)
+                done = max(1, int(total * ex["hires_denoise"]))
+                k = min(max(0, step), done)
+                progress(k / done, desc=f"Hires fix {i + 1}/{len(imgs)}: step {k}/{done}")
             r, _ = sd.img2img(up, prompt, neg_prompt, ex["hires_denoise"], steps2, cfg,
                               seeds[i] if i < len(seeds) else seeds[-1], scheduler,
                               step_callback=cb, clip_skip=ex["clip_skip"])
@@ -1684,10 +1842,18 @@ def _build_generate_tab():
                     **({"prompt_template": template["prompt"],
                         "negative_template": template["negative"] or None} if template else {}),
                 ), pipe=sd)
+                # SmartSplit runs plain txt2img only: say which settings it didn't apply (audit F-27)
+                skipped = [lbl for lbl, on in (("hires fix", ex["hires_on"]), ("face detail", ex["fd_on"]),
+                                                ("hand detail", ex["hd_on"]), ("PAG", ex["pag_scale"] > 0),
+                                                ("FreeU", ex["freeu"]), ("CFG rescale", ex["cfg_rescale"] > 0),
+                                                ("CLIP skip", ex["clip_skip"] > 1),
+                                                ("variation seed", ex["var_strength"] > 0)) if on]
+                skip_note = (f'<br><span style="color:#fab387;">SmartSplit does not apply: {", ".join(skipped)} — '
+                             f'switch SmartSplit off in Settings to use them.</span>' if skipped else "")
                 info_html = (
                     f'<p style="color:#a6adc8;font-size:13px;">'
                     f'SmartSplit | Seed:{seed} | Steps:{steps} | {width}×{height}<br>'
-                    f'{_smartsplit_pipe.timing_html(timing)}{tags_note}</p>'
+                    f'{_smartsplit_pipe.timing_html(timing)}{skip_note}{tags_note}</p>'
                 )
                 return imgs or [], info_html, imgs or []
 
@@ -1712,30 +1878,62 @@ def _build_generate_tab():
                 )
             seeds = list(getattr(sd, "last_seeds", None) or [seed])
             var_seeds = list(getattr(sd, "last_var_seeds", None) or []) if ex["var_strength"] > 0 else []
-            hires_note = ""
+            hires_note = fd_note = hd_note = ""
+            # Stop / an error during a later pass keeps the images of the last finished stage (they
+            # used to be thrown away with the whole run — a 25 s base image lost to a hires OOM).
+            halted = ""
+
+            def _post_pass(label, run):
+                nonlocal imgs, halted
+                try:
+                    imgs, note = run()
+                    return note
+                except _GenerationAborted:
+                    halted = f"⏹ Stopped during {label}"
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    if "out of memory" in str(e).lower():
+                        import gc, torch
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    halted = f"❌ {label} failed ({html.escape(str(e).splitlines()[0][:140] if str(e) else type(e).__name__)})"
+                finally:
+                    sd.last_seeds = seeds        # the img2img passes overwrite them
+                return ""
+
             if ex["hires_on"] and imgs and not (use_i2i and init_img is not None):
                 # PAG shapes the composition in the first pass; in the hires pass it only cost time
                 # (1248×1824: ~130 s instead of ~75) and VRAM (peak 10.9 of 12 GB, batch 3)
                 _b = dict(getattr(sd, "boosters", None) or {})
                 sd.boosters = dict(_b, pag=0)
                 try:
-                    imgs, hires_note = _hires_pass(imgs, seeds, prompt, neg_prompt, cfg, scheduler, ex, progress)
+                    hires_note = _post_pass("hires fix", lambda: _hires_pass(
+                        imgs, seeds, prompt, neg_prompt, cfg, scheduler, ex, progress))
                 finally:
                     sd.boosters = _b
-                sd.last_seeds = seeds            # the hires img2img passes overwrote them
-            fd_note = ""
-            if ex["fd_on"] and imgs:
-                imgs, fd_note = _face_pass(imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress)
-                sd.last_seeds = seeds
-            info_html = f'<p style="color:#a6adc8;font-size:13px;">{info}{hires_note}{fd_note}{tags_note}</p>' 
+            # hands first: a hand next to the face (peace sign, chin rest) would otherwise be
+            # repainted over the finished face's edge
+            if ex["hd_on"] and imgs and not halted:
+                hd_note = _post_pass("hand detail", lambda: _detail_pass(
+                    "hand", imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress))
+            if ex["fd_on"] and imgs and not halted:
+                fd_note = _post_pass("face detail", lambda: _detail_pass(
+                    "face", imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress))
+            halt_note = (f'<br><span style="color:#fab387;">{halted} — saved the images from before it.</span>'
+                         if halted else "")
+            info_html = (f'<p style="color:#a6adc8;font-size:13px;">{info}{hires_note}{hd_note}{fd_note}'
+                         f'{halt_note}{tags_note}</p>')
             if use_i2i and init_img is not None and imgs:
                 width, height = imgs[0].size   # img2img keeps the input's size
             i2i = bool(use_i2i and init_img is not None)
             src = (getattr(init_img, "info", None) or {}).get("saved_path") if i2i else None
+            from backend.sampling import ran_as
             saved = _save_outputs(imgs, dict(
                 mode="img2img" if i2i else "txt2img",
                 prompt=prompt, negative_prompt=neg_prompt,
-                steps=steps, cfg_scale=cfg, seeds=seeds, scheduler=scheduler,
+                steps=steps, cfg_scale=cfg, seeds=seeds, scheduler=ran_as(scheduler),
                 width=width, height=height,
                 clip_skip=ex["clip_skip"] if ex["clip_skip"] > 1 else None,
                 **({"var_seeds": var_seeds, "var_strength": ex["var_strength"]} if var_seeds else {}),
@@ -1744,6 +1942,7 @@ def _build_generate_tab():
                    if hires_note else {}),
                 **({"face_detail": {"denoise": ex["fd_denoise"], "detector": ex["fd_mode"],
                                     "prompt": ex["fd_prompt"]}} if fd_note else {}),
+                **({"hand_detail": {"denoise": ex["hd_denoise"]}} if hd_note else {}),
                 **({"strength": strength, "source_image": Path(src).name if src else None} if i2i else {}),
                 **({"prompt_template": template["prompt"],
                     "negative_template": template["negative"] or None} if template else {}),
@@ -1791,13 +1990,14 @@ def _build_generate_tab():
         clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
         hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
         fd_on=False, fd_denoise=0.4, fd_mode="auto", fd_prompt="",
-        pag_scale=0.0, freeu=False, cfg_rescale=0.0,
+        pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35,
     ):
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
                                   hires_on=hires_on, hires_scale=hires_scale, hires_denoise=hires_denoise,
                                   hires_steps=hires_steps, hires_upscaler=hires_upscaler, fd_on=fd_on,
                                   fd_denoise=fd_denoise, fd_mode=fd_mode, fd_prompt=fd_prompt,
-                                  pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale))
+                                  pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale,
+                                  hd_on=hd_on, hd_denoise=hd_denoise))
         import random
         # Guard against double-start
         if _autoloop_active.is_set():
@@ -1806,13 +2006,19 @@ def _build_generate_tab():
             yield [], busy, busy, gr.update(), gr.update()
             return
 
+        # a cleared number box arrives as None (float(None) used to escape with the flag still set)
+        w1, w2, w3 = (_num(w, 0.8) for w in (w1, w2, w3))
+        max_batches, delay = _num(max_batches, 0), _num(delay, 0)
         # Mark the loop active *before* loading so Stop Loop works during the load too
         _autoloop_active.set()
         _generation_abort.clear()
         loading = '<p style="color:#89dceb;">⏳ Loading the selected model…</p>'
         yield [], loading, loading, gr.update(), gr.update()
-        ok, status = _ensure_model(model_path, vae_path)
-        err = "" if not ok else _sync_loras([(lora1, w1), (lora2, w2), (lora3, w3)])
+        try:
+            ok, status = _ensure_model(model_path, vae_path)
+            err = "" if not ok else _sync_loras([(lora1, w1), (lora2, w2), (lora3, w3)])
+        except Exception as e:
+            ok, status, err = True, None, html.escape(str(e) or type(e).__name__)
         if not ok or err or not _autoloop_active.is_set():
             _autoloop_active.clear()
             _generation_abort.clear()
@@ -1931,6 +2137,7 @@ def _build_generate_tab():
     _lora_out = [lora_status, active_loras_html]
 
     def _apply_slot(slot):
+        @gpu_job
         def _fn(model_path, vae_path, lora_path, weight, progress=gr.Progress()):
             ok, status = _ensure_model(model_path, vae_path, progress)
             if not ok:
@@ -1943,10 +2150,10 @@ def _build_generate_tab():
         _btn.click(_apply_slot(_slot), [model_dd, vae_dd, _dd, _w], _lora_out)
     # Removing a slot also clears its dropdown — otherwise the next Generate
     # (which syncs LoRAs to the dropdowns) would silently re-apply it.
-    remove_lora1_btn.click(lambda: (*do_remove_lora(0), "none"), [], _lora_out + [lora_dd])
-    remove_lora2_btn.click(lambda: (*do_remove_lora(1), "none"), [], _lora_out + [lora_dd2])
-    remove_lora3_btn.click(lambda: (*do_remove_lora(2), "none"), [], _lora_out + [lora_dd3])
-    remove_lora_btn.click(lambda: (*do_remove_loras(), "none", "none", "none"), [],
+    remove_lora1_btn.click(gpu_job(lambda: (*do_remove_lora(0), "none")), [], _lora_out + [lora_dd])
+    remove_lora2_btn.click(gpu_job(lambda: (*do_remove_lora(1), "none")), [], _lora_out + [lora_dd2])
+    remove_lora3_btn.click(gpu_job(lambda: (*do_remove_lora(2), "none")), [], _lora_out + [lora_dd3])
+    remove_lora_btn.click(gpu_job(lambda: (*do_remove_loras(), "none", "none", "none")), [],
                           _lora_out + [lora_dd, lora_dd2, lora_dd3])
 
     # ── Compatibility check ────────────────────────────────────────────────
@@ -1985,6 +2192,13 @@ def _build_generate_tab():
         mb_norm = "sdxl" if mb in _SDXL_FAMILY else mb
         lb_norm = "sdxl" if lb in _SDXL_FAMILY else lb
         key = (mb_norm, lb_norm)
+        # same architecture, different lineage: loads fine, but identities / concepts drift
+        # (Illustrious character LoRAs on Pony checkpoints gave the character another face and extra features)
+        if {mb, lb} == {"pony", "illustrious"}:
+            ml = _COMPAT_LABEL.get(mb, mb); ll = _COMPAT_LABEL.get(lb, lb)
+            return (f'<p style="color:#f9e2af;margin:4px 0;">{slot_txt}⚠️ {ll} LoRA on a {ml} checkpoint: it '
+                    f'loads and runs, but characters and concepts often come out wrong (different face, '
+                    f'extra features). Prefer a {ml} version of this LoRA or a {ll} checkpoint.</p>')
         if key in _COMPAT_NOTE:
             return (
                 f'<p style="color:#f38ba8;margin:4px 0;">{slot_txt}{_COMPAT_NOTE[key]}</p>'
@@ -2200,21 +2414,31 @@ def _build_generate_tab():
     user_delete_btn.click(do_delete_user_preset, [user_preset_dd], [user_preset_dd, user_preset_status])
 
     # ── Settings save/load wiring ─────────────────────────────────────────
-    def do_save_settings(prompt, neg, sched, steps, cfg, w, h, batch, seed, name):
-        status = _save_generation_settings(prompt, neg, sched, steps, cfg, w, h, batch, seed, name)
+    _EXTRA_KEYS = ["clip_skip", "var_seed", "var_strength", "hires_on", "hires_scale", "hires_denoise", "hires_steps",
+                   "hires_upscaler", "fd_on", "fd_denoise", "fd_mode", "fd_prompt", "pag_scale", "freeu", "cfg_rescale",
+                   "hd_on", "hd_denoise"]
+
+    def do_save_settings(prompt, neg, sched, steps, cfg, w, h, batch, seed, name,
+                         model, vae, l1, w1, l2, w2, l3, w3, auto_q, sel_img, imgs, *extras):
+        target = sel_img if sel_img is not None else (imgs[0] if imgs else None)
+        example = (getattr(target, "info", None) or {}).get("saved_path") if target is not None else None
+        status = _save_generation_settings(prompt, neg, sched, steps, cfg, w, h, batch, seed, name,
+                                           model=model, vae=vae, lora_slots=[(l1, w1), (l2, w2), (l3, w3)],
+                                           auto_quality=auto_q, extra=dict(zip(_EXTRA_KEYS, extras)),
+                                           example=example)
         if status.startswith("❌"):
             return gr.update(), status
         new_choices = _list_saved_settings()
-        sname = name.strip() or "last_settings"
+        sname = _safe_name(name.strip() or "last_settings")   # the file's real name (Load looks it up)
         return gr.update(choices=new_choices, value=sname), status
 
     def do_load_settings(name):
         updates = _load_generation_settings(name)
         if not name:
-            return updates + [gr.update(), ""]
+            return updates + [gr.update()] * (1 + 6 + 2 + len(_EXTRA_KEYS)) + [""]
         model_upd, notes = gr.update(), []
         try:
-            d = _json.loads((SETTINGS_DIR / f"{name}.json").read_text(encoding="utf-8"))
+            d = _json.loads((SETTINGS_DIR / f"{_safe_name(name)}.json").read_text(encoding="utf-8"))
         except Exception:
             d = {}
         saved_model = d.get("model") or ""
@@ -2227,22 +2451,81 @@ def _build_generate_tab():
                 notes.append(f"model <b>{Path(match).stem}</b>")
             else:
                 notes.append(f'⚠ model <b>{Path(saved_model).stem}</b> not found locally')
-        if d.get("loras"):
-            notes.append("LoRAs used: " + ", ".join(d["loras"]) + " — apply them in the LoRA slots")
+        # LoRA slots + weights (format 2), else the names older files list (+ "lora_weights" if any)
+        lora_ups = [gr.update()] * 6
+        slots = d.get("lora_slots")
+        if not isinstance(slots, list) and d.get("loras"):
+            lw = d.get("lora_weights") if isinstance(d.get("lora_weights"), dict) else {}
+            slots = [[n, next((v for k, v in lw.items() if Path(k).stem.lower() == Path(str(n)).stem.lower()), 0.8)]
+                     for n in d["loras"] if isinstance(n, str)]
+        if isinstance(slots, list):
+            local = list_loras()
+            vals, missing = [], []
+            for item in (slots + [["none", 0.8]] * 3)[:3]:
+                n, w = (item + [0.8])[:2] if isinstance(item, list) and item else ("none", 0.8)
+                if not n or n == "none":
+                    vals += ["none", gr.update()]
+                    continue
+                want = Path(str(n)).stem.lower()
+                path = next((pth for fn, pth in local if Path(fn).stem.lower() == want), None)
+                if path:
+                    vals += [path, min(1.5, max(0.1, float(_num(w, 0.8))))]
+                else:
+                    missing.append(Path(str(n)).stem); vals += ["none", gr.update()]
+            lora_ups = vals
+            used = [Path(str(v)).stem for v in vals[0::2] if isinstance(v, str) and v != "none"]
+            if used:
+                notes.append("LoRAs " + ", ".join(used))
+            if missing:
+                notes.append("⚠ LoRA not found: " + ", ".join(missing))
+        vae_upd = gr.update()
+        if d.get("vae"):
+            vae_upd = "none" if d["vae"] == "none" else next(
+                (pth for fn, pth in list_vaes() if fn.lower() == str(d["vae"]).lower()), gr.update())
+        aq_upd = bool(d["auto_quality"]) if isinstance(d.get("auto_quality"), bool) else gr.update()
+        extra_ups = [gr.update()] * len(_EXTRA_KEYS)
+        if isinstance(d.get("extra"), dict):
+            ex = _clean_extra(d["extra"])
+            extra_ups = [ex[k] for k in _EXTRA_KEYS]
+            on = [lbl for k, lbl in (("hires_on", "hires fix"), ("fd_on", "face detail"), ("hd_on", "hand detail"),
+                                        ("freeu", "FreeU")) if ex[k]]
+            if ex["pag_scale"]:
+                on.append(f"PAG {ex['pag_scale']:g}")
+            if on:
+                notes.append(", ".join(on))
         msg = f"✅ Loaded '{name}'" + (" · " + " · ".join(notes) if notes else "")
-        return updates + [model_upd, msg]
+        return updates + [model_upd, *lora_ups, vae_upd, aq_upd, *extra_ups, msg]
 
+    _settings_extra = [clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
+                       hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
+                       pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl]
     settings_save_btn.click(
         do_save_settings,
         [prompt_txt, neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl,
-         width_sl, height_sl, batch_sl, seed_num, settings_name_txt],
+         width_sl, height_sl, batch_sl, seed_num, settings_name_txt,
+         model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3, auto_quality_cb,
+         selected_gallery_image, last_generated_images, *_settings_extra],
         [settings_dd, settings_status],
     )
+
+    def on_settings_pick(name):
+        """Thumbnail of the image a saved setting made (its "example_image" in outputs/)."""
+        try:
+            d = _json.loads((SETTINGS_DIR / f"{_safe_name(name)}.json").read_text(encoding="utf-8")) if name else {}
+        except Exception:
+            d = {}
+        ex = Path(str(d.get("example_image") or "")).name if isinstance(d, dict) else ""
+        f = OUTPUTS_DIR / ex if ex else None
+        return gr.update(value=str(f), visible=True) if f and f.is_file() else gr.update(value=None, visible=False)
+
+    settings_dd.change(on_settings_pick, [settings_dd], [settings_preview])
     settings_load_btn.click(
         do_load_settings,
         [settings_dd],
         [prompt_txt, neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl,
-         width_sl, height_sl, batch_sl, seed_num, model_dd, settings_status],
+         width_sl, height_sl, batch_sl, seed_num, model_dd,
+         lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3, vae_dd, auto_quality_cb,
+         *_settings_extra, settings_status],
     )
 
     # ── Quick tag chips ────────────────────────────────────────────────────
@@ -2367,14 +2650,15 @@ def _build_generate_tab():
                        clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
                        hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
                        fd_on=False, fd_denoise=0.4, fd_mode="auto", fd_prompt="",
-                       pag_scale=0.0, freeu=False, cfg_rescale=0.0,
+                       pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35,
                        progress=gr.Progress()):
         _generation_abort.clear()          # a new run starts; Stop from here on counts
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
                                   hires_on=hires_on, hires_scale=hires_scale, hires_denoise=hires_denoise,
                                   hires_steps=hires_steps, hires_upscaler=hires_upscaler, fd_on=fd_on,
                                   fd_denoise=fd_denoise, fd_mode=fd_mode, fd_prompt=fd_prompt,
-                                  pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale))
+                                  pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale,
+                                  hd_on=hd_on, hd_denoise=hd_denoise))
         w1, w2, w3 = (_num(w, 0.8) for w in (w1, w2, w3))
         ok, status = _ensure_model(model_path, vae_path, progress)
         if _generation_abort.is_set():
@@ -2403,6 +2687,7 @@ def _build_generate_tab():
             hires_upscaler=extra["hires_upscaler"], fd_on=extra["fd_on"], fd_denoise=extra["fd_denoise"],
             fd_mode=extra["fd_mode"], fd_prompt=extra["fd_prompt"],
             pag_scale=extra["pag_scale"], freeu=extra["freeu"], cfg_rescale=extra["cfg_rescale"],
+            hd_on=extra["hd_on"], hd_denoise=extra["hd_denoise"],
         ))
         seeds = getattr(sd, "last_seeds", None) or []
         return (imgs, info_html, last, status, (list(seeds) if imgs else gr.update()),
@@ -2416,7 +2701,7 @@ def _build_generate_tab():
         init_image, strength_sl, use_i2i_cb,
         clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
         hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
-        pag_sl, freeu_cb, cfg_rescale_sl,
+        pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl,
     ]
     gen_event = generate_btn.click(
         lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
@@ -2425,17 +2710,21 @@ def _build_generate_tab():
         [output_gallery, gen_info, last_generated_images, model_status, last_seed_state,
          active_loras_html],
     )
-    stop_btn.click(do_stop, [], [gen_info], cancels=[gen_event])
+    # Stop only sets the abort flag (no cancels=): cancelling the task handed the GPU slot to the next
+    # job while this one was still running. The job ends at its next step / phase check.
+    stop_btn.click(do_stop, [], [gen_info])
 
     def do_xy_grid(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, auto_quality, prompt, neg_prompt,
                    scheduler, steps, cfg, width, height, batch, seed, init_img, strength, use_i2i,
                    clip_skip, var_seed, var_strength, hires_on, hires_scale, hires_denoise, hires_steps,
                    hires_upscaler, fd_on, fd_denoise, fd_mode, fd_prompt, pag_scale, freeu, cfg_rescale,
-                   x_axis, x_text, y_axis, y_text,
+                   hd_on, hd_denoise, x_axis, x_text, y_axis, y_text,
                    progress=gr.Progress()):
         import random
         _generation_abort.clear()
-        err_html = lambda m: ([], f'<p style="color:#f38ba8;">❌ {m}</p>', gr.update(), gr.update())
+        w1, w2, w3 = (_num(w, 0.8) for w in (w1, w2, w3))     # cleared boxes arrive as None
+        err_html = lambda m: ([], f'<p style="color:#f38ba8;">❌ {m}</p>', gr.update(), gr.update(), gr.update(),
+                              gr.update())
         xs, e1 = _xy_values(x_axis, x_text)
         ys, e2 = _xy_values(y_axis, y_text)
         if e1 or e2 or x_axis in (None, "none"):
@@ -2449,14 +2738,16 @@ def _build_generate_tab():
                 return err_html("LoRA 1 weight: pick a LoRA in slot 1 first.")
         ok, status = _ensure_model(model_path, vae_path, progress)
         if not ok:
-            return [], (status if isinstance(status, str) else ""), status, gr.update()
+            return [], (status if isinstance(status, str) else ""), status, gr.update(), gr.update(), gr.update()
         seed = int(_num(seed, -1))
         seed = random.randint(0, 2**32 - 1) if seed < 0 else seed
         base_extra = dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength, hires_on=hires_on,
                           hires_scale=hires_scale, hires_denoise=hires_denoise, hires_steps=hires_steps,
                           hires_upscaler=hires_upscaler, fd_on=fd_on, fd_denoise=fd_denoise, fd_mode=fd_mode,
-                          fd_prompt=fd_prompt, pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale)
+                          fd_prompt=fd_prompt, pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale,
+                          hd_on=hd_on, hd_denoise=hd_denoise)
         cells, t0, lora_w_now, model_now = [], time.time(), None, model_path
+        cell_seeds = []
         total = len(xs) * len(ys)
         try:
             for yi, yv in enumerate(ys):
@@ -2494,11 +2785,13 @@ def _build_generate_tab():
                                                 width, height, 1, p["seed"], init_img, strength, use_i2i,
                                                 auto_quality=auto_quality, extra=p["extra"])
                     if not imgs:
-                        return [], info, gr.update(), gr.update()
+                        return [], info, gr.update(), gr.update(), gr.update(), gr.update()
                     cells.append(imgs[0])
+                    cell_seeds.append((getattr(sd, "last_seeds", None) or [p["seed"]])[0])
         except _GenerationAborted:
             if not cells:
-                return [], '<p style="color:#fab387;">⏹ Grid stopped.</p>', gr.update(), gr.update()
+                return ([], '<p style="color:#fab387;">⏹ Grid stopped.</p>', gr.update(), gr.update(), gr.update(),
+                        gr.update())
         finally:
             if lora_w_now is not None and lora_w_now != w1:
                 _sync_loras([(lora1, w1), (lora2, w2), (lora3, w3)])
@@ -2525,7 +2818,11 @@ def _build_generate_tab():
         grid.info["saved_path"] = str(gpath)
         msg = (f'<p style="color:#a6e3a1;font-size:13px;">📊 Grid of {len(cells)} images in '
                f'{_fmt_elapsed(time.time() - t0)} — saved as {gpath.name} (each cell is saved too).</p>')
-        return [grid] + cells, msg, status, _active_loras_html()
+        # the gallery shows the grid first, then the cells: keep the image list and seeds aligned with it
+        # (Send to img2img / Show in folder / Last seed used the previous run's list before)
+        shown = [grid] + cells
+        return (shown, msg, status, _active_loras_html(), shown,
+                [cell_seeds[0] if cell_seeds else seed] + cell_seeds + [seed] * (len(cells) - len(cell_seeds)))
 
     def do_inpaint_ui(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, prompt, neg_prompt, scheduler,
                       steps, cfg, seed, clip_skip, editor, denoise, padding, progress=gr.Progress()):
@@ -2577,19 +2874,21 @@ def _build_generate_tab():
         return [out], msg, status, [out], [used]
 
     inp_event = inp_btn.click(
+        lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
+    ).then(
         do_inpaint_ui,
         [model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3, prompt_txt,
          neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl, seed_num, clip_skip_rb, inp_editor, inp_denoise_sl,
          inp_pad_sl],
         [output_gallery, gen_info, model_status, last_generated_images, last_seed_state],
     )
-    stop_btn.click(do_stop, [], [gen_info], cancels=[inp_event])
 
     xy_event = xy_btn.click(
+        lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
+    ).then(
         do_xy_grid, _gen_inputs + [xy_x_axis, xy_x_vals, xy_y_axis, xy_y_vals],
-        [output_gallery, gen_info, model_status, active_loras_html],
+        [output_gallery, gen_info, model_status, active_loras_html, last_generated_images, last_seed_state],
     )
-    stop_btn.click(do_stop, [], [gen_info], cancels=[xy_event])
     # Recreate a dropped image: the same run as Generate, with img2img switched off
     rec_event = recreate_btn.click(
         lambda: (False, None, 0), None, [use_i2i_cb, selected_gallery_image, selected_idx_state],
@@ -2598,7 +2897,6 @@ def _build_generate_tab():
         [output_gallery, gen_info, last_generated_images, model_status, last_seed_state,
          active_loras_html],
     )
-    stop_btn.click(do_stop, [], [gen_info], cancels=[rec_event])
 
     # ── Seed / size helpers ──────────────────────────────────────────────
     seed_random_btn.click(lambda: -1, None, seed_num)
@@ -2636,11 +2934,11 @@ def _build_generate_tab():
                         lora_dd3, lora_weight3, strength_sl, use_i2i_cb, i2i_restore_html,
                         clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl,
                         hires_denoise_sl, hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb,
-                        fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl, recreate_btn]
+                        fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, recreate_btn]
 
     def on_i2i_drop(img, restore):
         keep = [gr.update()] * 18
-        tail = [gr.update()] * 15 + [gr.update(visible=False)]
+        tail = [gr.update()] * 17 + [gr.update(visible=False)]
         if img is None:
             return (*keep, gr.update(), "", *tail)
         if not restore:
@@ -2661,6 +2959,8 @@ def _build_generate_tab():
         if plan["mode"] == "img2img":
             how = ("It was itself an img2img result, so to recreate it exactly you need its source image "
                    "(and strength " + str(plan.get("strength")) + "); ")
+        elif plan["mode"] == "inpaint":      # a txt2img run isn't the inpainted picture (audit F-20)
+            how = ("It is an inpaint result: recreating it needs its source image and the painted mask; ")
         else:
             how = ("<b>To recreate it exactly:</b> untick “Use img2img mode” and press Generate. "
                    "Keep it ticked to make variations of it (strength 0.3–0.5 keeps the composition); ")
@@ -2669,14 +2969,14 @@ def _build_generate_tab():
                 + ": " + _plan_summary(plan) + '</p><p style="font-size:13px;color:#a6adc8;margin:2px 0;">'
                 + how + "batch size was set to 1 so the seed matches.</p>")
         strength = gr.update()
-        if plan["mode"] != "img2img":
+        if plan["mode"] not in ("img2img", "inpaint"):
             strength = gr.update()                      # keep the user's variation strength
         elif plan.get("strength") is not None:
             strength = min(1.0, max(0.1, float(plan["strength"])))
         return (u(plan["prompt"]), u(plan["negative_prompt"]), u(plan["scheduler"]), u(plan["steps"]),
                 u(plan["cfg_scale"]), u(plan["width"]), u(plan["height"]), 1, u(plan["seed"]),
                 u(plan["model"]), u(plan["vae"]), *lora_ups, strength, True, note,
-                *_plan_extra_updates(plan), gr.update(visible=plan["mode"] != "img2img"))
+                *_plan_extra_updates(plan), gr.update(visible=plan["mode"] not in ("img2img", "inpaint")))
 
     init_image.upload(on_i2i_drop, [init_image, restore_cb], _restore_outputs)
 
@@ -2743,6 +3043,8 @@ def _build_generate_tab():
 
     # ── Auto-Loop wiring ─────────────────────────────────────────────────
     loop_event = loop_start_btn.click(
+        lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
+    ).then(
         do_autoloop,
         [
             model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3,
@@ -2753,17 +3055,18 @@ def _build_generate_tab():
             loop_max_batches, loop_delay,
             clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
             hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
-        pag_sl, freeu_cb, cfg_rescale_sl,
+            pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl,
         ],
         [output_gallery, gen_info, loop_status, last_generated_images, last_seed_state],
     )
-    loop_stop_btn.click(do_stop_loop, [], [loop_status], cancels=[loop_event])
+    # no cancels=: a cancelled task gives its GPU slot away while its thread still runs
+    loop_stop_btn.click(do_stop_loop, [], [loop_status])
     refresh_btn.click(do_refresh, [model_dd], [model_dd, lora_dd, lora_dd2, lora_dd3, vae_dd])
 
     def _update_gen_vram(model, width, height, batch, lora, vae, use_i2i):
         used = estimate_generate(
             model_name=model or "",
-            width=int(width), height=int(height), batch=int(batch),
+            width=int(_num(width, 512)), height=int(_num(height, 512)), batch=int(_num(batch, 1)),
             use_lora=(lora and lora != "none"),
             use_external_vae=(vae and vae != "none"),
             use_img2img=bool(use_i2i),
@@ -3007,12 +3310,124 @@ def _build_generate_tab():
     card_build_btn.click(do_card_build, [card_name_txt, lora_dd, lora_weight, model_dd],
                          [card_dd, outfit_dd, card_name_txt, card_status])
 
+    # ── Outfit batch: every outfit of a card × N seeds as one job (resumable) ──
+    @gpu_job
+    def do_card_batch(card_name, scene, seeds_per, resume, model_path, vae_path, lora1, w1, lora2, w2, lora3, w3,
+                      auto_quality, prompt, neg_prompt, scheduler, steps, cfg, width, height, batch, seed, init_img,
+                      strength, use_i2i, clip_skip, var_seed, var_strength, hires_on, hires_scale, hires_denoise,
+                      hires_steps, hires_upscaler, fd_on, fd_denoise, fd_mode, fd_prompt, pag_scale, freeu,
+                      cfg_rescale, hd_on, hd_denoise, progress=gr.Progress()):
+        """Generate every outfit of the card with the current settings (after 🎴 Load) and the same seeds for
+        each outfit, then a labelled contact sheet. Finished outfit/seed pairs are remembered per card
+        (outputs/card_batches/<card>.json) and skipped next time while the settings are unchanged."""
+        import hashlib, random
+        from PIL import Image as _I
+        from backend.character_cards import load_card, card_prompt, safe_name
+        _generation_abort.clear()
+        keep = gr.update()
+        say = lambda m, c="#f38ba8": [gr.update(), f'<p style="color:{c};font-size:13px;">{m}</p>', keep, keep,
+                                      keep, keep]
+        card = load_card(card_name) if card_name and card_name != "(none)" else None
+        if not card:
+            yield say("❌ Pick a character card first.")
+            return
+        outfits = list(card.get("outfits") or {}) or [None]
+        n_seeds = int(min(8, max(1, _num(seeds_per, 2))))
+        if len(outfits) * n_seeds > 96:
+            yield say(f"❌ {len(outfits)} outfits × {n_seeds} seeds = {len(outfits) * n_seeds} images — keep it at 96 "
+                      f"or fewer.")
+            return
+        w1, w2, w3 = (_num(w, 0.8) for w in (w1, w2, w3))
+        ok, status = _ensure_model(model_path, vae_path, progress)
+        if not ok:
+            yield [gr.update(), status if isinstance(status, str) else "", keep, keep, status, keep]
+            return
+        err = _sync_loras([(lora1, w1), (lora2, w2), (lora3, w3)], progress)
+        if err:
+            yield say(f"❌ LoRA problem: {err}")
+            return
+        base = int(_num(seed, -1))
+        base = random.randint(0, 2**32 - 1) if base < 0 else base
+        seeds = [(base + k) % 2**32 for k in range(n_seeds)]
+        extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength, hires_on=hires_on,
+                                  hires_scale=hires_scale, hires_denoise=hires_denoise, hires_steps=hires_steps,
+                                  hires_upscaler=hires_upscaler, fd_on=fd_on, fd_denoise=fd_denoise, fd_mode=fd_mode,
+                                  fd_prompt=fd_prompt, pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale,
+                                  hd_on=hd_on, hd_denoise=hd_denoise))
+        idx_path = OUTPUTS_DIR / "card_batches" / f"{safe_name(card['name']) or 'card'}.json"
+        try:
+            index = _json.loads(idx_path.read_text(encoding="utf-8")) if idx_path.exists() else {}
+        except Exception:
+            index = {}
+        same = _json.dumps([Path(str(model_path)).name, vae_path, [(Path(str(l)).name, w) for l, w in
+                            ((lora1, w1), (lora2, w2), (lora3, w3)) if l and l != "none"], neg_prompt, scheduler,
+                            steps, cfg, width, height, bool(auto_quality), extra], sort_keys=True, default=str)
+        cells, cell_seeds, t0, made, reused = [], [], time.time(), 0, 0
+        total = len(outfits) * n_seeds
+        try:
+            for oi, outfit in enumerate(outfits):
+                p = card_prompt(card, outfit, scene or "")
+                for s_ in seeds:
+                    if _generation_abort.is_set():
+                        raise _GenerationAborted()
+                    key = hashlib.sha1(f"{same}|{p}|{s_}".encode("utf-8")).hexdigest()[:16]
+                    old = OUTPUTS_DIR / index.get(key, "~")
+                    if resume and key in index and old.is_file():
+                        im = _I.open(old); im.load(); im.info["saved_path"] = str(old)
+                        cells.append(im); cell_seeds.append(s_); reused += 1
+                        continue
+                    progress(len(cells) / total, desc=f"{outfit or card['name']} · seed {s_} "
+                                                      f"({len(cells) + 1}/{total})")
+                    imgs, info, _ = do_generate(p, neg_prompt, scheduler, steps, cfg, width, height, 1, s_, None,
+                                                0.5, False, auto_quality=auto_quality, extra=dict(extra))
+                    if not imgs:
+                        if _generation_abort.is_set():
+                            raise _GenerationAborted()
+                        yield [cells or gr.update(), info, keep, keep, keep, keep]
+                        return
+                    im = imgs[0]
+                    cells.append(im); cell_seeds.append(s_); made += 1
+                    saved = (getattr(im, "info", None) or {}).get("saved_path")
+                    if saved:
+                        index[key] = Path(saved).name
+                        idx_path.parent.mkdir(parents=True, exist_ok=True)
+                        idx_path.write_text(_json.dumps(index, indent=1), encoding="utf-8")
+                    yield [list(cells), f'<p style="color:#89dceb;font-size:13px;">🎴 {len(cells)}/{total} · '
+                                        f'{html.escape(outfit or card["name"])} · seed {s_}</p>',
+                           list(cells), list(cell_seeds), keep, keep]
+        except _GenerationAborted:
+            if not cells:
+                yield say("⏹ Outfit batch stopped.", "#fab387")
+                return
+        rows = (len(cells) + n_seeds - 1) // n_seeds
+        while len(cells) % n_seeds:                     # stopped mid-row: pad with blanks
+            cells.append(_I.new("RGB", cells[0].size, (30, 30, 46)))
+        labels = [o or "(no outfit)" for o in outfits][:rows]      # rows follow the outfit order
+        sheet = _xy_grid(cells, [f"seed {s_}" for s_ in seeds], labels,
+                         f"{card['name']} · {len(labels)} outfit(s) × {n_seeds} seed(s)")
+        spath = _unique_output(f"outfits_{safe_name(card['name']) or 'card'}_{int(time.time())}")
+        sheet.save(spath)
+        sheet.info["saved_path"] = str(spath)
+        shown = [sheet] + cells
+        msg = (f'<p style="color:#a6e3a1;font-size:13px;">🎴 {html.escape(card["name"])}: {made} new + {reused} '
+               f'reused image(s) in {_fmt_elapsed(time.time() - t0)} — contact sheet {spath.name}'
+               + (" (stopped early)" if _generation_abort.is_set() else "") + "</p>")
+        yield [shown, msg, shown, [cell_seeds[0] if cell_seeds else base] + cell_seeds
+               + [base] * (len(cells) - len(cell_seeds)), status, _active_loras_html()]
+
+    card_batch_btn.click(
+        lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
+    ).then(
+        do_card_batch, [card_dd, card_scene_txt, card_batch_seeds, card_batch_resume] + _gen_inputs,
+        [output_gallery, gen_info, last_generated_images, last_seed_state, model_status, active_loras_html],
+    )
+
     gen_controls = {
         "model": model_dd,
         "vae": vae_dd,
         "extra": [clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl,
                   hires_denoise_sl, hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb,
-                  fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl],
+                  fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl],
         "lora_dd1": lora_dd,
         "lora_w1": lora_weight,
         "lora_w2": lora_weight2,
@@ -3387,7 +3802,7 @@ def _build_bridge_tab():
             _generation_abort.set()
             return '<p style="color:#fab387;">⏹ Stopping…</p>'
 
-        br_stop_btn.click(_br_stop, [], [br_status], cancels=[br_event])
+        br_stop_btn.click(_br_stop, [], [br_status])
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -3421,6 +3836,14 @@ def _build_upscale_tab():
                         "Est. VRAM",
                     )
                 )
+                with gr.Row():
+                    up_sd_cb = gr.Checkbox(
+                        value=False, label="✨ SD detail pass (tiled, loaded model)", scale=2,
+                        info="After upscaling, re-draws the image in native-size tiles at low denoise with the model "
+                             "loaded on the Generate tab — real detail instead of smooth upscaling. Uses the image's "
+                             "own prompt when it has one. ~10–30 s per tile.")
+                    up_sd_den = gr.Slider(0.15, 0.5, value=0.3, step=0.05, label="Detail denoise", scale=1,
+                                          info="0.25 subtle · 0.35 more detail · higher can put faces into tiles")
                 upscale_btn = gr.Button("🔍 Upscale", variant="primary")
                 up_info     = gr.HTML("")
                 with gr.Accordion("📁 Batch — upscale a whole folder", open=False):
@@ -3434,7 +3857,7 @@ def _build_upscale_tab():
             with gr.Column():
                 up_output = gr.Image(label="Upscaled Output", type="pil", show_download_button=True)
 
-    def do_upscale(image, scale, method, progress=gr.Progress()):
+    def do_upscale(image, scale, method, sd_detail=False, sd_denoise=0.3, progress=gr.Progress()):
         if image is None:
             return None, '<p style="color:#f38ba8;">Please upload an image.</p>'
 
@@ -3457,6 +3880,41 @@ def _build_upscale_tab():
             msg = html.escape((str(e).strip().splitlines() or [type(e).__name__])[0][:300])
             hint = " Try a smaller scale or Lanczos." if "memory" in msg.lower() else ""
             return None, f'<p style="color:#f38ba8;">❌ Upscale failed: {msg}.{hint}</p>'
+        detail_note = ""
+        if sd_detail:
+            if sd.pipe is None:
+                detail_note = ('<br><span style="color:#f9e2af;">✨ SD detail pass skipped: load a model on the '
+                               'Generate tab first.</span>')
+            elif out.size[0] * out.size[1] > 16_000_000:
+                detail_note = ('<br><span style="color:#f9e2af;">✨ SD detail pass skipped: over 16 MP would take '
+                               'too many tiles — use a smaller scale.</span>')
+            else:
+                from backend.detail_tools import tiled_detail
+                from backend.png_info import read_image_metadata
+                m = read_image_metadata(image) if getattr(image, "info", None) else {}
+                prompt = m.get("prompt") or "masterpiece, best quality, highres, detailed"
+                neg = m.get("negative_prompt") or "lowres, blurry, worst quality"
+                sched = m.get("sampler") if m.get("sampler") in SCHEDULER_MAP else "DPM++ 2M"
+                seed = int(_num(m.get("seed"), 0)) % 2**32
+                t1 = time.time()
+                _generation_abort.clear()
+
+                def tcb(k, n, s_, t_):
+                    if _generation_abort.is_set():
+                        raise _GenerationAborted()
+                    progress((k + s_ / max(1, t_)) / n, desc=f"Detail tile {k + 1}/{n}: step {s_}/{t_}")
+                try:
+                    out = tiled_detail(sd, out, prompt, neg, denoise=float(_num(sd_denoise, 0.3)), steps=20,
+                                       cfg=6.0, seed=seed, scheduler=sched, clip_skip=int(_num(m.get("clip_skip"), 1)),
+                                       step_callback=tcb)
+                    method = f"{method} + SD detail {float(_num(sd_denoise, 0.3)):g}"
+                    detail_note = (f'<br>✨ SD detail pass ({Path(str(sd.current_model)).stem}) · '
+                                   f'{time.time() - t1:.0f}s')
+                except _GenerationAborted:
+                    detail_note = '<br><span style="color:#fab387;">⏹ SD detail pass stopped — saved the plain upscale.</span>'
+                except Exception as e:
+                    detail_note = (f'<br><span style="color:#f38ba8;">✨ SD detail pass failed: '
+                                   f'{html.escape(str(e).splitlines()[0][:160] if str(e) else type(e).__name__)}</span>')
         # Auto-save, keeping the source's generation parameters (if any) in the PNG
         from PIL.PngImagePlugin import PngInfo
         meta = PngInfo()
@@ -3470,10 +3928,10 @@ def _build_upscale_tab():
         path = _unique_output(base)
         out.save(path, pnginfo=meta)
         out.info["saved_path"] = str(path)
-        return out, (f'<p style="color:#a6adc8;font-size:13px;">{info}<br>'
+        return out, (f'<p style="color:#a6adc8;font-size:13px;">{info}{detail_note}<br>'
                      f'Saved: outputs/{path.name}</p>')
 
-    upscale_btn.click(do_upscale, [up_input, up_scale, up_method], [up_output, up_info])
+    upscale_btn.click(do_upscale, [up_input, up_scale, up_method, up_sd_cb, up_sd_den], [up_output, up_info])
 
     def do_upscale_folder(folder, scale, method, progress=gr.Progress()):
         from PIL import Image as _Image
@@ -3534,7 +3992,7 @@ def _build_upscale_tab():
 # Tab: PNG Info & Metadata Dispatch
 # ═════════════════════════════════════════════════════════════════════════════
 def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
-    with gr.Tab("📄 PNG Info"):
+    with gr.Tab("📄 PNG Info", id="pnginfo"):
         gr.HTML(
             '<p style="color:#a6adc8;font-size:13px;">'
             'Inspect generation parameters embedded in PNG images, and transfer '
@@ -3568,7 +4026,7 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
             if img is None:
                 return (*[gr.update()] * 16,
                         '<p style="color:#f38ba8;font-size:13px;">⚠ No image loaded in PNG Info.</p>',
-                        *[gr.update()] * 15)
+                        *[gr.update()] * 17)
             plan = _restore_plan(read_png_info(img))
             u = lambda v: gr.update() if v is None else v
             lora_ups = [gr.update()] * 6
@@ -3638,7 +4096,7 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
             [png_input],
             [up_input, png_action_status],
         )
-    return {"to_generate": [send_gen_btn, send_i2i_btn], "to_upscale": [send_up_btn]}
+    return {"to_generate": [send_gen_btn, send_i2i_btn], "to_upscale": [send_up_btn], "input": png_input}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -3715,8 +4173,9 @@ def _build_watermark_tab():
                                           info="How far from each corner to scan for watermarks. "
                                                "12% means the outer 12% of each edge is checked.")
                     wm_langs  = gr.Dropdown(
-                        choices=["en", "en+ch_sim", "en+ja", "en+ko",
-                                 "en+ch_sim+ja+ko"],
+                        # EasyOCR combines English with ONE of these scripts only — "en+ch_sim+ja+ko"
+                        # always raised (audit F-22)
+                        choices=["en", "en+ch_sim", "en+ja", "en+ko"],
                         value="en",
                         label="OCR Languages",
                         info="Add languages if watermark text is non-English",
@@ -3868,7 +4327,7 @@ def _build_watermark_tab():
                 "Upload an image and click Auto-Detect.",
             )
         # Parse language string (e.g. "en+ch_sim" → ["en", "ch_sim"])
-        langs = [l.strip() for l in langs_str.replace("+", " ").split() if l.strip()]
+        langs = _ocr_langs(langs_str)
 
         try:
             regions = detect_all(
@@ -3924,7 +4383,7 @@ def _build_watermark_tab():
                 mask = _PILImage.new("L", image.size, 0)
         else:
             # Build mask from detected regions + merge with brush strokes
-            auto_mask = build_mask(image, regions or [], dilation=int(dilation))
+            auto_mask = build_mask(image, regions or [], dilation=int(_num(dilation, 8)))
             mask = merge_masks(auto_mask, manual_mask)
 
         # Check that mask is non-empty
@@ -3973,7 +4432,7 @@ def _build_watermark_tab():
             return '<p style="color:#f38ba8;">❌ No PNG / JPG / WebP images in that folder.</p>'
         if not (use_ocr or use_corner):
             return '<p style="color:#f38ba8;">❌ Turn on OCR and/or the corner heuristic — batch mode can only auto-detect.</p>'
-        langs = [l.strip() for l in (langs_str or "en").replace("+", " ").split() if l.strip()]
+        langs = _ocr_langs(langs_str)
         dest = OUTPUTS_DIR / f"cleaned_{_safe_name(src.name) or 'folder'}"
         dest.mkdir(parents=True, exist_ok=True)
         cleaned, untouched, failed, t0 = 0, 0, [], time.time()
@@ -3993,7 +4452,7 @@ def _build_watermark_tab():
                     img.save(target, pnginfo=_carry_params(img, None))
                     untouched += 1
                     continue
-                mask = build_mask(img, regions, dilation=int(dilation))
+                mask = build_mask(img, regions, dilation=int(_num(dilation, 8)))
                 if "lama" in m:
                     out = inpaint_lama(img, mask)
                 elif "sd" in m:
@@ -4077,9 +4536,11 @@ def _build_civitai_tab(model_dd, lora_dd, vae_dd, more_lora_dds=()):
         with gr.Row():
             api_key_box = gr.Textbox(
                 label="Civitai API Key (required for NSFW/explicit content)",
-                placeholder="Paste your key from civitai.com/user/account → API Keys…",
+                # never put the stored key into the component: Gradio serves every value in /config
+                placeholder=("●●● key saved — paste a new one to replace it, or type clear"
+                             if CIVITAI_API_KEY else "Paste your key from civitai.com/user/account → API Keys…"),
                 type="password",
-                value=CIVITAI_API_KEY or "",
+                value="",
                 scale=5,
             )
             api_key_btn = gr.Button("Set Key", scale=1)
@@ -4194,7 +4655,8 @@ def _build_civitai_tab(model_dd, lora_dd, vae_dd, more_lora_dds=()):
 
         except Exception as e:
             err = (f'<p style="text-align:center;color:#f38ba8;font-size:13px;">❌ Civitai search failed: '
-                   f'{e}<br>Check your internet connection (or try again — Civitai is sometimes slow).</p>')
+                   f'{html.escape(_civ_scrub(e))}<br>Check your internet connection (or try again — '
+                   f'Civitai is sometimes slow).</p>')
             return ([gr.update(value="")] * _RESULTS_PER_PAGE + [gr.update(visible=False)] * _RESULTS_PER_PAGE
                     + [err, gr.update(interactive=False), gr.update(interactive=False)])
 
@@ -4245,13 +4707,19 @@ def _build_civitai_tab(model_dd, lora_dd, vae_dd, more_lora_dds=()):
     prev_page_btn.click(do_prev_page, [], _page_outputs)
 
     def do_set_api_key(key):
-        k = key.strip()
+        k = (key or "").strip()
+        if not k:        # the box is empty by design (the saved key isn't shown): keep it
+            return ('<p style="color:#a6adc8;">No new key entered — the saved key (if any) stays. '
+                    'Type <code>clear</code> to remove it.</p>')
+        if k.lower() == "clear":
+            civitai.set_api_key("")
+            _persist_key("civitai", "")
+            os.environ.pop("CIVITAI_API_KEY", None)
+            return '<p style="color:#a6adc8;">API key removed.</p>'
         civitai.set_api_key(k)
-        if k:
-            _persist_key("civitai", k)
-            os.environ["CIVITAI_API_KEY"] = k
-            return '<p style="color:#a6e3a1;">✅ API key saved (persists across restarts) — NSFW/explicit results unlocked.</p>'
-        return '<p style="color:#a6adc8;">API key cleared.</p>'
+        _persist_key("civitai", k)
+        os.environ["CIVITAI_API_KEY"] = k
+        return '<p style="color:#a6e3a1;">✅ API key saved (persists across restarts) — NSFW/explicit results unlocked.</p>'
 
     api_key_btn.click(do_set_api_key, [api_key_box], [api_key_status])
 
@@ -4295,7 +4763,8 @@ def _build_civitai_tab(model_dd, lora_dd, vae_dd, more_lora_dds=()):
         try:
             version_data = civitai.get_model_version(vid)
         except Exception as e:
-            return (f'<p style="color:#f38ba8;">API error: {e}</p>', gr.update(value=0), *_no_update,
+            return (f'<p style="color:#f38ba8;">API error: {html.escape(_civ_scrub(e))}</p>', gr.update(value=0),
+                    *_no_update,
                     *[gr.update()] * len(more_lora_dds))
 
         def prog_cb(pct, msg):
@@ -4635,6 +5104,10 @@ def _build_train_tab(gen_lora_dds=()):
                     grad_ckpt_cb = gr.Checkbox(
                         value=True, label="Gradient checkpointing",
                         info="Trades ~15% speed for much lower memory. Keep ON for CPU/DML training.")
+                    train_clip_skip_rb = gr.Radio(
+                        [1, 2], value=2, label="CLIP skip (SD 1.5)",
+                        info="2 = what anime SD 1.5 checkpoints are used with (generate with CLIP skip 2 too). "
+                             "SDXL ignores it.")
                     flip_cb = gr.Checkbox(
                         value=False, label="Random horizontal flip",
                         info="Doubles effective dataset size by randomly mirroring images. "
@@ -4885,11 +5358,12 @@ def _build_train_tab(gen_lora_dds=()):
                 return 768
             return 512
 
+        @gpu_job
         def do_train_prepare(
             folder, trigger, res_choice, model_path,
             rank, alpha, lr, te_lr, epochs, train_te,
             target, sched, grad_accum, warmup, grad_ckpt, flip,
-            save_every, seed, device_choice, output_name,
+            save_every, seed, device_choice, output_name, train_clip_skip=2,
             progress=gr.Progress(),
         ):
             global _trainer
@@ -4907,6 +5381,8 @@ def _build_train_tab(gen_lora_dds=()):
             for _p in (_sd15, _sdxl):
                 if _p.pipe is not None:
                     _p._unload()
+            global _smartsplit_pipe
+            _smartsplit_pipe = None       # it holds its own copy of the model (and its VRAM)
             output_name = safe_output_name(output_name)
 
             # If a _prepared_ subfolder exists, use it
@@ -4936,6 +5412,7 @@ def _build_train_tab(gen_lora_dds=()):
                 device=device_choice,
                 output_dir=str(LORAS_DIR),
                 output_name=output_name,
+                clip_skip=2 if str(train_clip_skip) == "2" else 1,
             )
 
             if _trainer is not None:
@@ -5024,7 +5501,7 @@ def _build_train_tab(gen_lora_dds=()):
             epochs_sl, train_te_cb,
             target_dd, sched_dd, grad_accum_sl, warmup_sl,
             grad_ckpt_cb, flip_cb, save_every_sl, seed_num,
-            train_device_dd, output_name_txt,
+            train_device_dd, output_name_txt, train_clip_skip_rb,
         ]
         train_prepare_btn.click(do_train_prepare, _train_config_inputs,
                                 [train_progress, train_log])
@@ -5035,6 +5512,121 @@ def _build_train_tab(gen_lora_dds=()):
 # ═════════════════════════════════════════════════════════════════════════════
 # Tab 4: Settings
 # ═════════════════════════════════════════════════════════════════════════════
+def _build_history_tab(gen_controls: dict, up_input, png_input) -> dict:
+    """🗂 History: browse, search and star everything in outputs/ (index: backend/history.py)."""
+    from backend import history as H
+    PAGE = 48
+    with gr.Tab("🗂 History", id="history") as tab:
+        gr.HTML('<p style="color:#a6adc8;font-size:13px;">Everything in <code>outputs/</code>, newest first. Search '
+                'by prompt words, model, LoRA, seed or sampler (all words must match). Click an image for its '
+                'settings; ⭐ marks favourites. <b>📄 Open in PNG Info</b> → <b>Send to Generate</b> restores '
+                'everything it was made with.</p>')
+        with gr.Row():
+            h_text = gr.Textbox(label="Search", placeholder="e.g. red dress beach   or   9001", scale=4)
+            h_model = gr.Dropdown(["All"], value="All", label="Model", scale=2)
+            h_lora = gr.Dropdown(["All"], value="All", label="LoRA", scale=2)
+            with gr.Column(scale=1, min_width=120):
+                h_fav = gr.Checkbox(label="⭐ only", value=False)
+                h_refresh = gr.Button("🔄 Search", size="sm", variant="primary")
+        h_status = gr.HTML("")
+        h_gallery = gr.Gallery(label="Outputs", columns=8, height=620, object_fit="contain", allow_preview=False,
+                               show_label=False)
+        with gr.Row():
+            h_prev = gr.Button("◀ Newer", size="sm")
+            h_page = gr.HTML('<p style="text-align:center;color:#a6adc8;"></p>')
+            h_next = gr.Button("Older ▶", size="sm")
+        h_names, h_pageno, h_sel = gr.State([]), gr.State(0), gr.State(None)
+        h_info = gr.HTML("")
+        with gr.Row():
+            h_star = gr.Button("⭐ Favourite / unfavourite", size="sm")
+            h_png = gr.Button("📄 Open in PNG Info", size="sm", variant="primary")
+            h_i2i = gr.Button("🖼 Send to img2img", size="sm")
+            h_up = gr.Button("🔍 Send to Upscale", size="sm")
+            h_open = gr.Button("📂 Show in folder", size="sm")
+
+    def _page(names, page):
+        page = max(0, min(int(page or 0), max(0, (len(names) - 1) // PAGE)))
+        favs = H.favourites()
+        items = []
+        for n in names[page * PAGE:(page + 1) * PAGE]:
+            t = H.thumbnail(n)
+            if t:
+                items.append((t, ("⭐ " if n in favs else "") + n.rsplit(".", 1)[0][-22:]))
+        label = (f'<p style="text-align:center;color:#a6adc8;font-size:13px;">page {page + 1} of '
+                 f'{max(1, (len(names) + PAGE - 1) // PAGE)} · {len(names)} image(s)</p>')
+        return items, label, page
+
+    def do_hist_search(text, model, lora, fav_only):
+        idx = H.build_index()
+        names = H.search(idx, text, model, lora, bool(fav_only))
+        models = sorted({e.get("model") for e in idx.values() if e.get("model")}, key=str.lower)
+        loras = sorted({l for e in idx.values() for l in (e.get("loras") or [])}, key=str.lower)
+        items, label, page = _page(names, 0)
+        status = (f'<p style="color:#a6adc8;font-size:13px;">{len(names)} of {len(idx)} image(s) match.</p>'
+                  if idx else '<p style="color:#a6adc8;">No images in outputs/ yet.</p>')
+        return (items, label, names, page, None, "", status,
+                gr.update(choices=["All"] + models, value=model if model in models else "All"),
+                gr.update(choices=["All"] + loras, value=lora if lora in loras else "All"))
+
+    def do_hist_page(names, page, delta):
+        items, label, page = _page(names, int(page or 0) + delta)
+        return items, label, page, None, ""
+
+    def _info(name):
+        if not name:
+            return ""
+        from backend.png_info import read_png_info
+        p = OUTPUTS_DIR / name
+        if not p.is_file():
+            return '<p style="color:#f38ba8;">That file is gone.</p>'
+        star = "⭐ favourite · " if name in H.favourites() else ""
+        return (f'<p style="color:#cdd6f4;font-size:13px;margin:4px 0;">{star}<b>{html.escape(name)}</b></p>'
+                + format_png_info_html(read_png_info(str(p))))
+
+    def do_hist_select(names, page, evt: gr.SelectData):
+        i = int(page or 0) * PAGE + int(evt.index)
+        name = names[i] if 0 <= i < len(names) else None
+        return name, _info(name)
+
+    def do_hist_star(name, names, page):
+        if not name:
+            return gr.update(), "", gr.update()
+        H.toggle_favourite(name)
+        items, label, _ = _page(names, page)
+        return items, _info(name), label
+
+    def _load(name):
+        p = OUTPUTS_DIR / str(name or "")
+        if not name or not p.is_file():
+            return None
+        im = Image.open(p); im.load()
+        im.info["saved_path"] = str(p)
+        return im
+
+    def do_hist_open(name):
+        if name:
+            p = OUTPUTS_DIR / name
+            if p.is_file():
+                import subprocess
+                subprocess.Popen(f'explorer /select,"{p}"')
+        return gr.update()
+
+    search_in = [h_text, h_model, h_lora, h_fav]
+    search_out = [h_gallery, h_page, h_names, h_pageno, h_sel, h_info, h_status, h_model, h_lora]
+    for ev in (tab.select, h_refresh.click, h_text.submit, h_fav.input, h_model.input, h_lora.input):
+        ev(do_hist_search, search_in, search_out)
+    h_prev.click(lambda n, p: do_hist_page(n, p, -1), [h_names, h_pageno], [h_gallery, h_page, h_pageno, h_sel, h_info])
+    h_next.click(lambda n, p: do_hist_page(n, p, +1), [h_names, h_pageno], [h_gallery, h_page, h_pageno, h_sel, h_info])
+    h_gallery.select(do_hist_select, [h_names, h_pageno], [h_sel, h_info])
+    h_star.click(do_hist_star, [h_sel, h_names, h_pageno], [h_gallery, h_info, h_page])
+    h_open.click(do_hist_open, [h_sel], [h_status])
+    h_png.click(lambda n: _load(n) or gr.update(), [h_sel], [png_input])
+    h_i2i.click(lambda n: (_load(n) or gr.update(), True) if n else (gr.update(), gr.update()),
+                [h_sel], [gen_controls["init_image"], gen_controls["use_i2i"]])
+    h_up.click(lambda n: _load(n) or gr.update(), [h_sel], [up_input])
+    return {"to_png": h_png, "to_generate": h_i2i, "to_upscale": h_up}
+
+
 def _build_settings_tab():
     profile = get_profile()
 
@@ -5079,9 +5671,9 @@ def _build_settings_tab():
                 gr.Markdown("### 🔑 Hugging Face token (optional)")
                 hf_token_txt = gr.Textbox(
                     label="HF Token",
-                    value=HF_TOKEN or "",
+                    value="",                    # stored tokens stay out of Gradio's /config
                     type="password",
-                    placeholder="hf_…",
+                    placeholder="●●● token saved — paste a new one to replace it" if HF_TOKEN else "hf_…",
                     info="HuggingFace access token — only for gated repos (e.g. FLUX.1-dev, SD 3.x); the "
                          "built-in SD 1.5 / SDXL base downloads don't need one. "
                          "Get one at huggingface.co/settings/tokens.",
@@ -5299,6 +5891,8 @@ def _build_settings_tab():
             set_active_gpu(0, backend="cpu")
         for _p in (_sd15, _sdxl):     # weights live on the old device
             _p._unload()
+        global _smartsplit_pipe
+        _smartsplit_pipe = None       # built for the old device
         dev = _cfg.DEVICE
         slow = (' iGPUs are much slower than the dGPU for image generation.'
                 if g.is_igpu else '')
@@ -5535,6 +6129,7 @@ def _restore_plan(meta: dict) -> dict:
     plan["var_strength"] = float(_num(meta.get("var_strength"), 0.0)) if meta.get("var_seed") is not None else 0.0
     plan["hires"] = meta.get("hires") if isinstance(meta.get("hires"), dict) else None
     plan["face_detail"] = meta.get("face_detail") if isinstance(meta.get("face_detail"), dict) else None
+    plan["hand_detail"] = meta.get("hand_detail") if isinstance(meta.get("hand_detail"), dict) else None
     plan["pag_scale"] = float(_num(meta.get("pag_scale"), 0.0))
     plan["freeu"] = bool(meta.get("freeu"))
     plan["cfg_rescale"] = float(_num(meta.get("cfg_rescale"), 0.0))
@@ -5555,6 +6150,8 @@ def _plan_extra_updates(plan: dict) -> list:
     fd = plan.get("face_detail") or {}
     fdx = _clean_extra(dict(fd_on=bool(fd), fd_denoise=fd.get("denoise"), fd_mode=fd.get("detector"),
                             fd_prompt=fd.get("prompt")))
+    hd = plan.get("hand_detail") or {}
+    hdx = _clean_extra(dict(hd_on=bool(hd), hd_denoise=hd.get("denoise")))
     return [ex["clip_skip"], ex["var_seed"], ex["var_strength"], bool(h),
             ex["hires_scale"] if h else keep, ex["hires_denoise"] if h else keep,
             ex["hires_steps"] if h else keep, ex["hires_upscaler"] if h else keep,
@@ -5562,7 +6159,8 @@ def _plan_extra_updates(plan: dict) -> list:
             fdx["fd_prompt"] if fd else keep,
             # boosters are part of how the image looks: always set (off when the record has none)
             *(lambda b: [b["pag_scale"], b["freeu"], b["cfg_rescale"]])(_clean_extra(dict(
-                pag_scale=plan.get("pag_scale"), freeu=plan.get("freeu"), cfg_rescale=plan.get("cfg_rescale"))))]
+                pag_scale=plan.get("pag_scale"), freeu=plan.get("freeu"), cfg_rescale=plan.get("cfg_rescale")))),
+            bool(hd), hdx["hd_denoise"] if hd else keep]
 
 
 def _plan_summary(plan: dict) -> str:
@@ -5585,6 +6183,8 @@ def _plan_summary(plan: dict) -> str:
         bits.append(f"hires fix ×{h.get('scale')} (denoise {h.get('denoise')})")
     if plan.get("face_detail"):
         bits.append(f"face detail (denoise {plan['face_detail'].get('denoise')})")
+    if plan.get("hand_detail"):
+        bits.append(f"hand detail (denoise {plan['hand_detail'].get('denoise')})")
     if plan.get("scheduler"):
         bits.append(plan["scheduler"])
     out = ", ".join(bits)
@@ -5718,6 +6318,8 @@ def _params_text(rec: dict) -> str:
     fd = rec.get("face_detail") or {}
     if fd:
         parts.append(f"Face detail: denoise {fd['denoise']:g} ({fd['detector']})")
+    if (rec.get("hand_detail") or {}).get("denoise") is not None:
+        parts.append(f"Hand detail: denoise {_num(rec['hand_detail']['denoise'], 0.35):g}")
     if rec.get("pag_scale"):
         parts.append(f"PAG scale: {rec['pag_scale']:g}")
     if rec.get("freeu"):
@@ -5932,6 +6534,7 @@ def build_app() -> gr.Blocks:
             _build_civitai_tab(_gen_model_dd, _gen_lora_dd, _gen_vae_dd,
                                (_gen_ctrl["lora_dd2"], _gen_ctrl["lora_dd3"]))
             _build_train_tab((_gen_lora_dd, _gen_ctrl["lora_dd2"], _gen_ctrl["lora_dd3"]))
+            _hist_btns = _build_history_tab(_gen_ctrl, _up_input, _png_btns["input"])
             _build_settings_tab()
             build_help_tab()
 
@@ -5939,6 +6542,9 @@ def build_app() -> gr.Blocks:
         _TO_TOP_JS = "() => window.scrollTo({top: 0, behavior: 'smooth'})"
         for _b in _png_btns["to_generate"]:
             _b.click(lambda: gr.Tabs(selected="generate"), None, main_tabs)
+        _hist_btns["to_png"].click(lambda: gr.Tabs(selected="pnginfo"), None, main_tabs)
+        _hist_btns["to_generate"].click(lambda: gr.Tabs(selected="generate"), None, main_tabs)
+        _hist_btns["to_upscale"].click(lambda: gr.Tabs(selected="upscale"), None, main_tabs)
         for _b in _png_btns["to_upscale"]:
             _b.click(lambda: gr.Tabs(selected="upscale"), None, main_tabs).then(
                 None, None, None, js=_TO_TOP_JS)
@@ -5959,7 +6565,30 @@ def build_app() -> gr.Blocks:
             [_gen_ctrl["last_images"]], main_tabs,
         ).then(None, None, None, js=_TO_TOP_JS)
 
+    _serialize_gpu_events(app)
     return app
+
+
+# Events that load, change or run the pipelines / the GPU. Gradio 4 limits concurrency per event, so
+# Generate could start while an X/Y grid, Auto-Loop or Bridge run was still going: both threads then
+# loaded models / fused LoRAs on the same pipelines and the process died (access violation in
+# safetensors load_file, 2026-09-30). One shared queue slot runs them one after another; Stop,
+# typing helpers and the CPU-only taggers stay outside it.
+_GPU_FNS = {"do_generate_ui", "do_xy_grid", "do_autoloop", "do_bridge", "do_inpaint_ui", "do_load_model",
+            "do_upscale", "do_upscale_folder", "do_detect", "do_remove", "do_remove_folder", "do_train_start",
+            "do_autocaption", "do_unload_blip", "on_apply_split", "on_gpu_select", "on_accel_te_toggle"}
+
+
+def _serialize_gpu_events(blocks) -> int:
+    n = 0
+    for f in blocks.fns:
+        if f.fn is not None and (getattr(f.fn, "__name__", "") in _GPU_FNS or getattr(f.fn, "_gpu_job", False)):
+            f.concurrency_id, f.concurrency_limit = "gpu", 1
+            if not getattr(f.fn, "_gpu_locked", False):
+                f.fn = _locked(f.fn)
+                f.fn._gpu_locked = f.fn._gpu_job = True
+            n += 1
+    return n
 
 
 def _exit_with_parent() -> None:

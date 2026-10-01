@@ -80,13 +80,33 @@ def _load_embeddings(pipe) -> None:
         print(f"[Embedding] Loaded {len(loaded)} {arch_label} embedding(s): {', '.join(loaded)}")
 
 
+def _st_header(path: Path) -> dict:
+    """A .safetensors file's tensor table (name → {dtype, shape, …}) without loading any weights.
+    The companion-TI scan used to load every small file in the LoRA folders on each LoRA change."""
+    import json, struct
+    with open(path, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        if not 2 <= n < 64 << 20:
+            raise ValueError("not a safetensors header")
+        hdr = json.loads(f.read(n))
+    hdr.pop("__metadata__", None)
+    return hdr
+
+
+def _torch_load_safe(path: Path):
+    """torch.load without running pickled code (weights_only): embeddings are plain tensors/dicts;
+    a .pt that needs more isn't loaded at all (weights_only=False executed any pickle)."""
+    import torch
+    return torch.load(str(path), map_location="cpu", weights_only=True)
+
+
 def _is_ti_embedding(path: Path) -> bool:
     """Check if a .pt/.safetensors file is a textual-inversion embedding (not a LoRA)."""
     import torch
     ext = path.suffix.lower()
     try:
         if ext == ".pt":
-            data = torch.load(str(path), map_location="cpu", weights_only=False)
+            data = _torch_load_safe(path)
             if isinstance(data, dict):
                 keys = set(data.keys())
                 # TI embeddings have 'string_to_param' or a single key with a tensor
@@ -103,9 +123,7 @@ def _is_ti_embedding(path: Path) -> bool:
                 return data.dim() <= 2
             return False
         elif ext == ".safetensors":
-            from safetensors.torch import load_file
-            data = load_file(str(path))
-            keys = set(data.keys())
+            keys = set(_st_header(path))
             if any("lora" in k.lower() for k in keys):
                 return False
             # TI safetensors: typically 1 key "emb_params" or similar
@@ -126,7 +144,7 @@ def _ti_matches_pipeline(path: Path, pipe) -> bool:
     try:
         ext = path.suffix.lower()
         if ext == ".pt":
-            data = torch.load(str(path), map_location="cpu", weights_only=False)
+            data = _torch_load_safe(path)
             if isinstance(data, dict):
                 if "string_to_param" in data:
                     tensor = next(iter(data["string_to_param"].values()))
@@ -138,11 +156,9 @@ def _ti_matches_pipeline(path: Path, pipe) -> bool:
                 emb_dim = tensor.shape[-1]
                 return emb_dim == expected_dim
         elif ext == ".safetensors":
-            from safetensors.torch import load_file
-            data = load_file(str(path))
-            tensor = next(iter(data.values()))
-            emb_dim = tensor.shape[-1]
-            return emb_dim == expected_dim
+            shapes = [v.get("shape") for v in _st_header(path).values() if isinstance(v, dict)]
+            if shapes and shapes[0]:
+                return shapes[0][-1] == expected_dim
     except Exception:
         pass
     return True  # if we can't check, let it try
@@ -220,19 +236,6 @@ def _load_companion_ti(pipe, lora_path: str) -> list[str]:
     return loaded
 
 
-def _restore_param(param, saved) -> None:
-    """Copy a snapshot tensor back into `param`. A token-embedding table that a textual
-    inversion grew after the snapshot (companion TIs load after the first LoRA) gets its
-    original rows back and keeps the new tokens' rows — a plain copy_() raised a size error."""
-    saved = saved.to(param.device)
-    if param.shape == saved.shape:
-        param.data.copy_(saved)
-    elif param.dim() == 2 and param.shape[1] == saved.shape[1] and param.shape[0] > saved.shape[0]:
-        param.data[:saved.shape[0]].copy_(saved)
-    else:
-        print(f"[LoRA] Snapshot shape {tuple(saved.shape)} doesn't fit {tuple(param.shape)} — left as is")
-
-
 def _strip_lora_layers(model) -> None:
     """
     Walk the module tree and replace every PEFT LoraLayer wrapper with its
@@ -282,6 +285,16 @@ def _read_sidecar_base(model_path: str) -> str | None:
         return _json.loads(sidecar.read_text(encoding="utf-8")).get("baseModel", "").lower()
     except Exception:
         return None
+
+
+# load_model(vae_path=KEEP_VAE): "whatever VAE is loaded" (Bridge, internal reloads). An explicit
+# VAE (a path, or None / "none" for the checkpoint's own) that differs forces a reload — before, a
+# VAE-only change returned "Already loaded" and the old VAE silently stayed (audit F-03).
+KEEP_VAE = object()
+
+
+def vae_key(v) -> str | None:
+    return None if v is None or v is KEEP_VAE or str(v).strip().lower() in ("", "none") else str(v)
 
 
 def _from_pretrained(cls, repo_id: str, **kwargs):
@@ -473,6 +486,12 @@ def _build_embeds(pipe, prompt: str, neg_prompt: str, device: str, clip_skip: in
         te_device = str(next(pipe.text_encoder.parameters()).device)
         if "privateuseone" in te_device:
             return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt), **skip_kw}
+        # fp32 for the encode (see sdxl_pipeline._build_sdxl_embeds): fp16 encoding on ZLUDA
+        # isn't deterministic run to run; fp16→fp32→fp16 is lossless
+        import torch
+        te_half = pipe.text_encoder.dtype == torch.float16
+        if te_half:
+            pipe.text_encoder.float()
         c = Compel(
             tokenizer=pipe.tokenizer,
             text_encoder=pipe.text_encoder,
@@ -487,6 +506,8 @@ def _build_embeds(pipe, prompt: str, neg_prompt: str, device: str, clip_skip: in
         pos = encode_chunked(c, prompt, pipe.tokenizer)
         neg = encode_chunked(c, neg_prompt, pipe.tokenizer)
         pos, neg = pad_to_same_chunks(c, pos, neg)
+        if te_half:
+            pos, neg = pos.half(), neg.half()
         seq_len = pos.shape[1]
         if seq_len > 77:
             print(f"[Compel] Long prompt encoded in {seq_len // 77} chunks of 77 tokens ✓")
@@ -495,6 +516,12 @@ def _build_embeds(pipe, prompt: str, neg_prompt: str, device: str, clip_skip: in
         print(f"[Compel] Encoding failed ({e}), falling back to raw 77-token strings")
         return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt), **skip_kw}
     finally:
+        try:
+            import torch
+            if pipe is not None and pipe.text_encoder.dtype == torch.float32 and pipe.unet.dtype == torch.float16:
+                pipe.text_encoder.half()          # back to the pipeline's dtype, also after an error
+        except Exception:
+            pass
         pipe = c = None
 
 
@@ -535,7 +562,7 @@ class SDPipeline:
         self._clean_te_state:   dict | None = None
 
     # ── Model loading ──────────────────────────────────────────────────────────
-    def load_model(self, model_path_or_id: str, vae_path: str | None = None) -> str:
+    def load_model(self, model_path_or_id: str, vae_path=KEEP_VAE) -> str:
         """
         Load an SD 1.x/2.x model from a local .safetensors path or HuggingFace ID.
         SDXL models are handled by SDXLPipeline — this class should never receive them.
@@ -543,8 +570,10 @@ class SDPipeline:
         import torch
         from diffusers import StableDiffusionPipeline, AutoencoderKL
 
-        if model_path_or_id == self.current_model:
+        if model_path_or_id == self.current_model and self.pipe is not None and (
+                vae_path is KEEP_VAE or vae_key(vae_path) == vae_key(self._last_vae_path)):
             return f"✅ Already loaded: {Path(model_path_or_id).name}"
+        vae_path = vae_key(vae_path)
 
         self.device = _device()
         self.dtype  = get_torch_dtype(self.device)
@@ -633,6 +662,9 @@ class SDPipeline:
         self._inpaint_pipe = None
         self._pag_pipes = None
         self.prediction = {}
+        if getattr(self, "_snap", None) is not None:
+            self._snap.close()
+        self._snap = None
         self.current_model = None
         self.loaded_loras  = []
         self._lora_adapters = {}
@@ -645,45 +677,28 @@ class SDPipeline:
             torch.cuda.empty_cache()
 
     def _snapshot_clean_state(self):
-        """
-        Save CPU-pinned copies of UNet + text_encoder parameters immediately
-        after a clean model load.  These snapshots let _restore_clean_state()
-        roll back any LoRA fusions before re-applying a changed LoRA set.
-        Stored on CPU so they don't consume VRAM.
-        """
+        """Start LoRA-restore snapshots for a clean model. They fill lazily: just before a LoRA
+        is fused, the weights of the layers it changes are copied to the CPU (backend/lora_snapshot)
+        — a full copy of every weight made the SDXL pipeline hold 6.8 GB of RAM."""
         if self.pipe is None:
             return
-        import torch
-        with torch.no_grad():
-            self._clean_unet_state = {
-                n: p.detach().cpu().clone()
-                for n, p in self.pipe.unet.named_parameters()
-            }
-            if hasattr(self.pipe, "text_encoder") and self.pipe.text_encoder is not None:
-                self._clean_te_state = {
-                    n: p.detach().cpu().clone()
-                    for n, p in self.pipe.text_encoder.named_parameters()
-                }
-            else:
-                self._clean_te_state = {}
-        print(f"[LoRA] Snapshot saved ({sum(v.numel() for v in self._clean_unet_state.values())/1e6:.0f}M UNet params on CPU)")
+        from backend.lora_snapshot import Snapshot
+        if getattr(self, "_snap", None) is not None:
+            self._snap.close()
+        self._snap = Snapshot()
+        self._clean_unet_state, self._clean_te_state = {}, None   # marker only: "snapshots started"
+        # the text encoder in full (246 MB, to disk): load_lora_weights can rewrite layers of it
+        # before anything is fused (seen on SDXL's CLIP-L) — only a copy taken now restores it exactly
+        if getattr(self.pipe, "text_encoder", None) is not None:
+            for n, p in self.pipe.text_encoder.named_parameters():
+                self._snap.add("text_encoder", n, p)
+            self._snap.spill()
 
     def _restore_clean_state(self):
-        """
-        Overwrite UNet + text_encoder parameters in-place from the CPU snapshot.
-        Handles CPU→DML and CPU→CPU transfers transparently via param.copy_().
-        """
-        if self.pipe is None or not self._clean_unet_state:
+        """Put every weight a LoRA changed back from the snapshot (RAM part + temp files)."""
+        if self.pipe is None or getattr(self, "_snap", None) is None:
             return
-        import torch
-        with torch.no_grad():
-            for name, param in self.pipe.unet.named_parameters():
-                if name in self._clean_unet_state:
-                    _restore_param(param, self._clean_unet_state[name])
-            if self._clean_te_state and self.pipe.text_encoder is not None:
-                for name, param in self.pipe.text_encoder.named_parameters():
-                    if name in self._clean_te_state:
-                        _restore_param(param, self._clean_te_state[name])
+        self._snap.restore(self.pipe)
 
     # ── LoRA management ────────────────────────────────────────────────────────
     def load_lora(self, lora_path: str, weight: float = 0.8, slot: int = 0) -> str:
@@ -805,7 +820,9 @@ class SDPipeline:
                 from backend.model_manager import lycoris_kind
                 if lycoris_kind(path):   # LoHa / LoKr: diffusers can't load these, fuse ourselves
                     from backend.lycoris import apply_lycoris
-                    n, skipped = apply_lycoris(self.pipe, path, weight)
+                    from backend.lora_snapshot import param_snapshotter
+                    n, skipped = apply_lycoris(self.pipe, path, weight,
+                                               before_change=param_snapshotter(self.pipe, self._snap))
                     self.loaded_loras.append(name_str)
                     print(f"[LoRA] Slot {slot+1}: {name_str} (LyCORIS, {n} layers"
                           f"{f', {skipped} unmatched' if skipped else ''}) fused at ×{weight:.2f}")
@@ -821,10 +838,14 @@ class SDPipeline:
                             "architecture or tool. Try a different LoRA version."
                         ) from None
                     raise
+                from backend.lora_snapshot import snapshot_wrapped
+                snapshot_wrapped(self.pipe, self._snap)   # clean copies of what fuse changes
                 self.pipe.fuse_lora(lora_scale=weight)
                 self._purge_peft()  # strip wrappers; fused weights stay in base layers
                 self.loaded_loras.append(name_str)
                 print(f"[LoRA] Slot {slot+1}: {name_str} fused at ×{weight:.2f}")
+            if getattr(self, "_snap", None) is not None:
+                self._snap.spill()          # restore copies → temp file, off the RAM
         finally:
             # Always move back to original device
             if needs_move:

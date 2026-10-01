@@ -247,14 +247,20 @@ def parameters_html() -> str:
     h += _table(
         ["Scheduler / 采样器", "Speed / 速度", "Quality / 质量", _cn("适用场景")],
         [
-            [_code("DPM++ 2M Karras"),  "⚡⚡⚡", "★★★★★",  _cn("最推荐，20–30步即可出高质量图，通用首选。")],
-            [_code("DPM++ SDE Karras"), "⚡⚡",   "★★★★★",  _cn("质量极高，随机性更强，适合追求细节的生成。")],
-            [_code("Euler a"),          "⚡⚡⚡", "★★★★",   _cn("多样性好，每步种子略有变化，适合探索风格。")],
-            [_code("Euler"),            "⚡⚡⚡", "★★★★",   _cn("稳定，收敛快，适合固定构图的复现。")],
-            [_code("DDIM"),             "⚡⚡",   "★★★",    _cn("经典算法，img2img效果稳定，已被DPM系列超越。")],
-            [_code("UniPC"),            "⚡⚡⚡", "★★★★",   _cn("快速收敛，少步（10步）效果好。")],
-            [_code("PNDM"),             "⚡⚡",   "★★★",    _cn("老牌稳定，已基本被DPM替代。")],
-            [_code("LMS Karras"),       "⚡⚡",   "★★★",    _cn("线性多步采样，质量一般，已较少使用。")],
+            [_code("DPM++ 2M Karras"),     "⚡⚡⚡", "★★★★★", _cn("最推荐，20–30步即可出高质量图，通用首选。")],
+            [_code("DPM++ 2M AYS"),        "⚡⚡⚡⚡", "★★★★★", _cn("AYS 采样计划：10–12 步约等于常规 25 步。")],
+            [_code("DPM++ 2M"),            "⚡⚡⚡", "★★★★",  _cn("不带 Karras 的原版，旧记录（格式1）的“Karras”即此。")],
+            [_code("DPM++ 2M SDE Karras"), "⚡⚡",   "★★★★★", _cn("随机性更强、细节更丰富。")],
+            [_code("DPM++ SDE Karras"),    "⚡",     "★★★★★", _cn("每步两次计算，质量极高但慢一倍。")],
+            [_code("DPM++ SDE"),           "⚡",     "★★★★",  _cn("同上，不带 Karras。")],
+            [_code("Euler a"),             "⚡⚡⚡", "★★★★",  _cn("多样性好，每步加噪，适合探索风格。")],
+            [_code("Euler"),               "⚡⚡⚡", "★★★★",  _cn("稳定，收敛快，适合固定构图的复现。")],
+            [_code("Euler AYS"),           "⚡⚡⚡⚡", "★★★★",  _cn("Euler + AYS 采样计划，少步数。")],
+            [_code("UniPC"),               "⚡⚡⚡", "★★★★",  _cn("快速收敛，少步（10步）效果好。")],
+            [_code("Heun"),                "⚡",     "★★★★",  _cn("每步两次计算，慢但精确。")],
+            [_code("DDIM"),                "⚡⚡",   "★★★",   _cn("经典算法，img2img效果稳定，已被DPM系列超越。")],
+            [_code("PNDM"),                "⚡⚡",   "★★★",   _cn("即 A1111 的 PLMS，老牌算法，已基本被DPM替代。")],
+            [_code("LMS"),                 "⚡⚡",   "★★★",   _cn("线性多步采样，质量一般，已较少使用。")],
         ]
     )
     h += _note("💡 Start with <b>DPM++ 2M Karras</b> at 20 steps. Only change if you need specific characteristics. "
@@ -280,6 +286,27 @@ def parameters_html() -> str:
              "Finds faces and re-draws each one at the model's native size with low denoise (0.3–0.45) — fixes "
              "small or messy faces in full-body and group shots. Works after hires fix and in img2img too.",
              _cn("检测人脸并以模型原生分辨率低降噪重绘，修复全身图/多人图中的小脸。")],
+            ["✋ Hand detail",
+             "Same idea for hands (anime hand detector, gloves count), run before the faces: 0.35 cleans up "
+             "smudged fingers, 0.45–0.5 redraws them. It can't reliably fix a wrong finger count, and it may "
+             "touch up hand-shaped things (a ship's turret) — at low denoise they stay what they were. Face and "
+             "hand passes use the evenly spaced version of your sampler (Karras / AYS at the same denoise "
+             "changed almost nothing).",
+             _cn("对手部做同样的重绘（动漫手部检测，手套也算），在脸部之前进行：0.35 清理手指，0.45–0.5 重画。"
+                 "无法保证修正手指数量。脸/手重绘使用均匀步长版本的采样器。")],
+            ["🎴 Every outfit of a card",
+             "Character cards → “🎴▶ Generate every outfit”: each outfit × N seeds (the same seeds for every outfit) "
+             "with the current settings, then a labelled contact sheet. Pairs already made with the same settings "
+             "are skipped, so a stopped run resumes.",
+             _cn("角色卡 →“生成所有服装”：每套服装 × N 个种子（种子相同便于对比），最后生成对比图；已生成的会跳过，可断点续跑。")],
+            ["🗂 History",
+             "Search everything in outputs/ by prompt words, model, LoRA or seed; ⭐ favourites; open an image in PNG "
+             "Info → Send to Generate to restore exactly how it was made.",
+             _cn("历史：按提示词、模型、LoRA、种子搜索全部输出，可收藏，一键在 PNG Info 中恢复参数。")],
+            ["✨ SD detail pass (Upscale tab)",
+             "After upscaling, re-draws the image in native-size tiles at low denoise (0.25–0.35) with the loaded "
+             "model — real detail beyond hires fix's 1536 / 2048 px limit. Higher denoise can put faces into tiles.",
+             _cn("放大后用已加载模型分块低降噪重绘，超越高清修复的尺寸上限；降噪过高可能在分块里画出多余的脸。")],
             ["🖌 Inpaint",
              "Paint over any area and describe what should be there; only that area is redrawn, at native "
              "resolution, with your model, LoRAs and seed.",

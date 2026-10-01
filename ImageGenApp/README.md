@@ -45,7 +45,13 @@ Generate images from text prompts using Stable Diffusion checkpoints. The output
 
 **Hires fix:** generate at the model's native size (good composition), then upscale ×1.5–2 and let the model re-draw details at the big size. SD 1.5 512×768 → 768×1152 takes about 30 s; SDXL 832×1216 → 1248×1824 about 2 min, and fits in 12 GB. Choose Lanczos, or Real-ESRGAN for sharper line art.
 
-**✨ Face detail (ADetailer-style):** finds faces (anime and photo detectors) and redraws each one at the model's full resolution with low denoise. Small faces in full-body or group shots get proper eyes and mouths, at about 5–15 s per face on SD 1.5 and ~30 s on SDXL. Every detection is double-checked, so hands, chairs and folds aren't mistaken for faces. You can add an extra face-only prompt.
+**✨ Face detail (ADetailer-style):** finds faces (a YOLO anime-face detector; photo mode uses OpenCV's face cascades) and redraws each one at the model's full resolution with low denoise. Small faces in full-body or group shots get proper eyes and mouths, at about 5–15 s per face on SD 1.5 and ~30 s on SDXL. You can add an extra face-only prompt. **✋ Also re-draw hands** does the same for hands (anime hand detector, gloves too) before the faces — it cleans up smudged fingers but can't reliably fix a finger count.
+
+**🎴 Generate every outfit:** in the character-card panel, renders each outfit of the card × N seeds with the current settings (the same seeds for every outfit) and finishes with a labelled contact sheet. Pairs already made with the same settings are skipped, so a stopped run picks up where it left off.
+
+**🗂 History tab:** every image in `outputs/`, newest first, searchable by prompt words, model, LoRA, seed or sampler, with ⭐ favourites; **📄 Open in PNG Info → Send to Generate** restores how an image was made. The index reads only PNG text chunks (≈ 8 s for 2,000 images the first time, instant afterwards) and keeps small thumbnails in `outputs/.thumbs/`.
+
+**✨ SD detail pass (Upscale tab):** after the upscale, the image is re-drawn in overlapping native-size tiles at low denoise with the model loaded on the Generate tab — real detail where hires fix stops (1536 / 2048 px). It uses the image's own prompt when it has one.
 
 **🖌 Inpaint:** paint over any part of an image and describe what should be there. Only the painted area changes, and it's redrawn at native resolution, so hands and faces get full detail. It uses your current model, LoRAs, sampler and seed.
 
@@ -239,6 +245,7 @@ ImageGenApp/
 ├── run_zluda.bat             # Run any script under the ZLUDA environment
 ├── install.bat               # One-time dependency installer
 ├── selftest_zluda.py         # GPU-vs-CPU correctness self-test
+├── smoke_gpu.py              # GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl], app closed)
 ├── run_tests.py              # CPU test suite (NPU tests skip without the hardware)
 ├── download_models.bat/.py   # Starter model downloader
 ├── backend/                  # One module per feature (list with descriptions: ../AGENTS.md "Layout")

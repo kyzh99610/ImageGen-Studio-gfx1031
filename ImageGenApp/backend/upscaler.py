@@ -37,6 +37,14 @@ class Upscaler:
 
     def __init__(self):
         self._onnx_session = None
+
+    def release(self) -> None:
+        """Drop the ONNX session: on DirectML it keeps its memory arena on the dGPU, next to the SD
+        pipeline (the hires pass that follows peaks at ~10 of 12 GB; audit F-28)."""
+        if self._onnx_session is not None:
+            self._onnx_session = None
+            import gc
+            gc.collect()
         self._torch_upsampler = None
 
     # ── Public API ─────────────────────────────────────────────────────────────

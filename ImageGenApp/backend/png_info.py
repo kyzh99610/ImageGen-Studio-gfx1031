@@ -71,7 +71,7 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
         "raw_text": raw_text,
     }
 
-    if not raw_text:
+    if not raw_text and "imagegen" not in info:   # a record alone is enough (audit F-21)
         return result
 
     # Standard A1111 / ImageGen parameters format:
@@ -190,6 +190,9 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
     m = re.search(r"\bFace detail: denoise ([0-9.]+) \((\w+)\)", param_text)
     if m:
         result["face_detail"] = {"denoise": float(m.group(1)), "detector": m.group(2), "prompt": ""}
+    m = re.search(r"\bHand detail: denoise ([0-9.]+)", param_text)
+    if m:
+        result["hand_detail"] = {"denoise": float(m.group(1))}
 
     # ImageGen Studio's own record: exact model / VAE / LoRA files and weights
     rec = _parse_json(info.get("imagegen")) if "imagegen" in info else None
@@ -207,11 +210,16 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
             if rec["model"].get("sha256_10"):
                 result["model_hash"] = rec["model"]["sha256_10"]
         if rec.get("loras"):
-            result["loras"] = ", ".join(f"{Path(l['file']).stem}:{l.get('weight', 0.8):g}"
+            def _w(v):
+                try:
+                    return f"{float(v):g}"
+                except (TypeError, ValueError):     # a damaged record ("abc") must not break reading it
+                    return "0.8"
+            result["loras"] = ", ".join(f"{Path(str(l['file'])).stem}:{_w(l.get('weight', 0.8))}"
                                         for l in rec["loras"] if isinstance(l, dict) and l.get("file"))
         if rec.get("vae"):
             result["vae"] = (rec["vae"] or {}).get("file")
-        for k in ("clip_skip", "var_seed", "var_strength", "hires", "face_detail", "inpaint_padding",
+        for k in ("clip_skip", "var_seed", "var_strength", "hires", "face_detail", "hand_detail", "inpaint_padding",
                   "pag_scale", "freeu", "cfg_rescale"):
             if rec.get(k) is not None:
                 result[k] = rec[k]
@@ -327,6 +335,8 @@ def format_png_info_html(meta: dict[str, Any]) -> str:
         badges.append(f'<span style="background:#313244;color:#89dceb;padding:3px 8px;border-radius:4px;font-size:13px;">🔍 Hires fix: <b>×{h.get("scale")} · denoise {h.get("denoise")} · {h.get("steps")} steps</b></span>')
     if isinstance(meta.get("face_detail"), dict):
         badges.append(f'<span style="background:#313244;color:#f9e2af;padding:3px 8px;border-radius:4px;font-size:13px;">✨ Face detail: <b>denoise {meta["face_detail"].get("denoise")}</b></span>')
+    if isinstance(meta.get("hand_detail"), dict):
+        badges.append(f'<span style="background:#313244;color:#f9e2af;padding:3px 8px;border-radius:4px;font-size:13px;">✋ Hand detail: <b>denoise {meta["hand_detail"].get("denoise")}</b></span>')
     if meta.get("model_hash"):
         badges.append(f'<span style="background:#313244;color:#a6adc8;padding:3px 8px;border-radius:4px;font-size:13px;">#️⃣ Model hash: <b>{meta["model_hash"]}</b></span>')
     badge_html = " ".join(badges)
