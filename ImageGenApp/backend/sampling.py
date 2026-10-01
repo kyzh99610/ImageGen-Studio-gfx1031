@@ -117,6 +117,8 @@ def make_scheduler(pipe, name: str):
     for k in ("use_karras_sigmas", "algorithm_type"):
         if k not in extra and k in cfg:
             cfg.pop(k)
+    if cls_name == "UniPCMultistepScheduler":
+        _patch_linalg_solve()
     cls = getattr(diffusers, cls_name)
     try:
         sched = cls.from_config(cfg, **extra)
@@ -206,6 +208,35 @@ def _patch_fourier_filter():
 
     fourier_filter._cpu_fallback = True
     tu.fourier_filter = fourier_filter
+
+
+_gpu_solve_ok = True
+
+
+def _patch_linalg_solve():
+    """UniPC solves a tiny (up to 3x3) linear system every step with torch.linalg.solve; on ZLUDA the
+    batched LU it needs (cublasSgetrsBatched) is CUBLAS_STATUS_NOT_SUPPORTED, so UniPC failed on every
+    model ("Generation failed: CUDA error ..."). After the first failure the solve runs on the CPU
+    (a handful of floats, one tiny sync per step)."""
+    import torch
+    if getattr(torch.linalg.solve, "_cpu_fallback", False):
+        return
+    orig = torch.linalg.solve
+
+    def solve(A, B, *args, **kw):
+        global _gpu_solve_ok
+        if _gpu_solve_ok:
+            try:
+                return orig(A, B, *args, **kw)
+            except RuntimeError as e:
+                if "not_supported" not in str(e).lower() and "getrs" not in str(e).lower():
+                    raise
+                _gpu_solve_ok = False
+                print(f"[UniPC] GPU linear solve unavailable ({str(e).splitlines()[0][:100]}); solving on the CPU")
+        return orig(A.detach().float().cpu(), B.detach().float().cpu(), *args, **kw).to(A.device, A.dtype)
+
+    solve._cpu_fallback = True
+    torch.linalg.solve = solve
 
 
 def _pag_class(xl: bool, kind: str):

@@ -20,6 +20,10 @@ CARDS_DIR = SETTINGS_DIR / "characters"
 # tag words that describe the character's body (kept with the character, not an outfit)
 _BODY_WORDS = ("hair", "eyes", "bangs", "ahoge", "ears", "tail", "horns", "wings", "mole", "freckles",
                "sidelocks", "eyebrows", "fang", "skin", "halo", "pupils", "eyelashes")
+# a signature hair pin is part of the look, but taggers miss small ornaments (one character LoRA's training captions
+# have "butterfly hair ornament" in 58 % of the images): these tags count from half the images, not 60 %
+_ACCESSORY_WORDS = ("hair ornament", "hairclip", "hair clip", "hairpin", "hair pin", "hair flower", "hair bow",
+                    "hair ribbon", "hairband", "hair bell", "hair stick")
 # words that name clothing (used to name outfits after their most telling pieces)
 _CLOTHES_WORDS = ("dress", "bikini", "swimsuit", "jacket", "coat", "uniform", "kimono", "yukata", "shirt",
                   "skirt", "shorts", "pants", "headwear", "hat", "headdress", "choker", "gloves", "thighhighs",
@@ -132,7 +136,8 @@ def card_from_lora(lora_path: str, weight: float = 0.8, checkpoint: str | None =
         return None
     tags = list(kw.triggers) + [t for t in kw.likely if t not in kw.triggers]
     for t, cov in kw.tags:
-        if cov >= 0.6 and any(w in _k(t) for w in _BODY_WORDS) and _k(t) not in {_k(x) for x in tags}:
+        need = 0.5 if any(w in _k(t) for w in _ACCESSORY_WORDS) else 0.6
+        if cov >= need and any(w in _k(t) for w in _BODY_WORDS) and _k(t) not in {_k(x) for x in tags}:
             tags.append(t)
         if len(tags) >= 10:
             break

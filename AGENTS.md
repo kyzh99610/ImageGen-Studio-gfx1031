@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 118-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 126-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 113 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 121 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -391,6 +391,27 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   loaded silently and decoded garbage. `quant_conv.bias` norm ≈ 43.8 for every SDXL VAE (base/Pony/IL/NoobAI), 4.4–6.4
   for SD 1.x — read from the header offsets only (mmapping a 6 GB checkpoint hit the commit limit with the app up).
   `app._effective_vae()` uses the checkpoint's own VAE for a mismatch and warns in the load status.
+
+### Stop in multi-image jobs, UniPC, SDXL samplers, identity check (2026-10-01)
+- **Stop in multi-image jobs:** `do_generate`'s `finally` no longer clears `_generation_abort` — a Stop during a
+  hires / hand / face pass was cleared with that image and the outfit batch / X/Y grid carried on. Every top-level
+  run (`do_generate_ui`, Auto-Loop, X/Y, outfit batch, Inpaint, Bridge, Upscale) clears it when it starts. Auto-Loop
+  ends on Stop instead of reporting "no images".
+- **Outfit batch:** with seed −1 and "Skip pairs" the random base seed is kept in the resume index (`__pending__`,
+  keyed by settings + card + scene + seeds) until the batch completes, so a rerun after a Stop finds its pairs; an
+  image whose post pass was stopped ("saved the images from before it") is shown but not recorded as done.
+  Afterwards `backend/identity_check.py` (WD14, CPU, only when the model is already cached) flags images whose hair /
+  eye colour from the card's tags scores < 0.35 (curated images average 0.85 / 0.87).
+- **History:** missing / damaged files get a placeholder tile (`_unreadable.jpg`) — skipping them shifted every later
+  tile's click target.
+- **UniPC** failed on every model: `torch.linalg.solve` needs `cublasSgetrsBatched` (NOT_SUPPORTED under ZLUDA);
+  `sampling._patch_linalg_solve()` moves the tiny solve to the CPU after the first failure.
+- **LMS / PNDM / Heun garble SDXL** (iridescent noise on faces / fabrics; SD 1.5 fine). A float32 `step()` didn't
+  help; cause open (next idea: VAE). Generate warns; the sampler hint says so.
+- `danbooru_tags.did_you_mean` leaves qualified tags alone ("black butterfly hair ornament" isn't a typo of the
+  bare tag); `card_from_lora` keeps hair accessories from 50 % coverage (a character LoRA's butterfly hair ornament: 58 %);
+  img2img ticked without an image says so.
+- Restore round trips: SDXL 832×1216 max 1/255, SDXL hires ~0.26/255 between runs, SD 1.5 ~1/255.
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
