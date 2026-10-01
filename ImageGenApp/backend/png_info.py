@@ -190,6 +190,8 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
     m = re.search(r"\bFace detail: denoise ([0-9.]+) \((\w+)\)", param_text)
     if m:
         result["face_detail"] = {"denoise": float(m.group(1)), "detector": m.group(2), "prompt": ""}
+    if re.search(r"\bEmphasis: Compel\b", param_text):
+        result["emphasis"] = "compel"
     m = re.search(r"\bHand detail: denoise ([0-9.]+)", param_text)
     if m:
         result["hand_detail"] = {"denoise": float(m.group(1))}
@@ -219,7 +221,7 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
                                         for l in rec["loras"] if isinstance(l, dict) and l.get("file"))
         if rec.get("vae"):
             result["vae"] = (rec["vae"] or {}).get("file")
-        for k in ("clip_skip", "var_seed", "var_strength", "hires", "face_detail", "hand_detail", "inpaint_padding",
+        for k in ("clip_skip", "var_seed", "var_strength", "hires", "face_detail", "hand_detail", "inpaint_padding", "emphasis",
                   "pag_scale", "freeu", "cfg_rescale"):
             if rec.get(k) is not None:
                 result[k] = rec[k]
