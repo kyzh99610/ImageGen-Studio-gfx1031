@@ -160,7 +160,15 @@ def resize_and_crop(
     1.  Scale so the *shorter* dimension fills the target exactly.
     2.  Center-crop the *longer* dimension.
     """
-    img = Image.open(img_path).convert("RGB")
+    from PIL import ImageOps
+    with Image.open(img_path) as src:
+        img = ImageOps.exif_transpose(src)            # phone photos are stored sideways + an EXIF flag
+        if img.mode in ("RGBA", "LA", "P") and ("A" in img.mode or "transparency" in img.info):
+            rgba = img.convert("RGBA")                 # transparent pixels keep hidden colours: use white
+            img = Image.new("RGB", rgba.size, (255, 255, 255))
+            img.paste(rgba, mask=rgba.getchannel("A"))
+        else:
+            img = img.convert("RGB")
     w, h = img.size
     scale = max(target_w / w, target_h / h)
     new_w, new_h = round(w * scale), round(h * scale)
@@ -207,22 +215,34 @@ def prepare_dataset(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     total = len(assignments)
+    used: set[str] = set()
+    done, failed = 0, []
 
     for i, item in enumerate(assignments):
         if callback:
             callback(i, total, f"Processing {item['filename']}")
         try:
             img = resize_and_crop(item["path"], item["bucket_w"], item["bucket_h"])
-            stem = Path(item["filename"]).stem
+            # a.jpg and a.png in one folder used to overwrite each other's output
+            base = stem = Path(item["filename"]).stem
+            k = 2
+            while stem.casefold() in used:
+                stem, k = f"{base}_{k}", k + 1
+            used.add(stem.casefold())
             img.save(output_dir / f"{stem}.png", "PNG")
 
             caption = item.get("caption", "")
             if trigger_word and trigger_word.lower() not in caption.lower():
                 caption = f"{trigger_word}, {caption}" if caption else trigger_word
             (output_dir / f"{stem}.txt").write_text(caption, encoding="utf-8")
+            done += 1
         except Exception as e:
             print(f"[Dataset] Error processing {item['filename']}: {e}")
+            failed.append(item["filename"])
 
     if callback:
         callback(total, total, "Done!")
-    return f"✅ Prepared {total} images → {output_dir}"
+    msg = f"✅ Prepared {done} images → {output_dir}"
+    if failed:
+        msg += f" · ⚠ {len(failed)} failed: " + ", ".join(failed[:5]) + (" …" if len(failed) > 5 else "")
+    return msg

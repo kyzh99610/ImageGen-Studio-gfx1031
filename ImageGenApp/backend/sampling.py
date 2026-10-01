@@ -33,13 +33,35 @@ SCHEDULERS: dict[str, tuple[str, dict]] = {
     "Euler":               ("EulerDiscreteScheduler", {}),
     "Euler AYS":           ("EulerDiscreteScheduler", {"_ays": True}),
     "DDIM":                ("DDIMScheduler", {}),
-    "PNDM":                ("PNDMScheduler", {}),
+    # skip_prk_steps (A1111 "PLMS"): SDXL files start from an Euler config without it, and then
+    # PNDM failed below 4 steps and ran ~9 extra UNet passes (audit F-33)
+    "PNDM":                ("PNDMScheduler", {"skip_prk_steps": True}),
     "LMS":                 ("LMSDiscreteScheduler", {}),
     "Heun":                ("HeunDiscreteScheduler", {}),
     "UniPC":               ("UniPCMultistepScheduler", {}),
 }
 # records written before the Karras fix (format < 2) used these names for the plain samplers
 LEGACY_NAMES = {"DPM++ 2M Karras": "DPM++ 2M", "DPM++ SDE Karras": "DPM++ SDE"}
+
+# Karras / AYS schedules start img2img at much lower noise for the same strength, so a face / hand
+# detail pass at denoise 0.35 hardly changed anything (SDXL, same image: face 9.7/255 and hand 9.0
+# vs 16.3 and 21.3 with plain DPM++ 2M). The detail passes use the evenly spaced variant instead, so
+# their denoise slider means what its labels say.
+_UNIFORM = {"DPM++ 2M Karras": "DPM++ 2M", "DPM++ 2M AYS": "DPM++ 2M", "DPM++ 2M SDE Karras": "DPM++ 2M",
+            "DPM++ SDE Karras": "DPM++ SDE", "Euler AYS": "Euler"}
+
+
+# requested sampler → the one that actually ran (only when it couldn't be built, e.g. no torchsde)
+FALLBACKS: dict[str, str] = {}
+
+
+def ran_as(name: str) -> str:
+    return FALLBACKS.get(name, name)
+
+
+def uniform_variant(name: str) -> str:
+    """The same sampler with evenly spaced timesteps (unchanged when it already has them)."""
+    return _UNIFORM.get(name, name)
 
 
 # ── Align Your Steps ──────────────────────────────────────────────────────────
@@ -101,6 +123,7 @@ def make_scheduler(pipe, name: str):
     except ImportError as e:
         # DPMSolverSDEScheduler needs torchsde (in requirements.txt; older installs lack it)
         print(f"[Sampler] {name} unavailable ({e}); using DPM++ 2M Karras. Re-run install.bat to add it.")
+        FALLBACKS[name] = "DPM++ 2M Karras"          # records name the sampler that really ran (F-31)
         return make_scheduler(pipe, "DPM++ 2M Karras")
     if ays:
         _use_ays(sched, xl=hasattr(pipe, "text_encoder_2"))
@@ -114,7 +137,9 @@ def detect_prediction(path: str) -> dict:
     out = {"v_pred": False, "zero_snr": False}
     p = Path(str(path))
     name = p.name.lower()
-    if re.search(r"v[-_ ]?pred", name):
+    # a whole "vpred" word: case-sensitive boundaries so CamelCase ("XLVpred10") counts, but
+    # "v_predator" / "kvpredx" don't (audit F-17)
+    if re.search(r"(?<![a-z])[vV][-_ ]?[pP][rR][eE][dD](?:[iI][cC][tT][iI][oO][nN])?(?![a-z])", p.name):
         out.update(v_pred=True, zero_snr=True)
     if p.suffix.lower() == ".safetensors" and p.is_file():
         try:
@@ -213,6 +238,22 @@ def boosters(sdp) -> dict:
             "cfg_rescale": min(1.0, float(rescale))}
 
 
+def _seed_sde_noise(scheduler, call: dict) -> None:
+    """DPM++ SDE (DPMSolverSDEScheduler) draws its per-step noise from a torchsde Brownian tree
+    seeded from the *global* torch RNG — the per-image generators never reach it, so the same seed
+    gave a different picture every run (audit F-32). Hand it the per-image seeds instead: a list
+    makes one tree per image, so batch image i == a single run with seed + i."""
+    if not hasattr(scheduler, "noise_sampler_seed"):
+        return
+    g = call.get("generator")
+    gens = [x for x in (g if isinstance(g, (list, tuple)) else [g]) if x is not None]
+    if not gens:
+        return
+    seeds = [int(x.initial_seed()) for x in gens]
+    scheduler.noise_sampler_seed = seeds if len(seeds) > 1 else seeds[0]
+    scheduler.noise_sampler = None          # built from the seed at the first step
+
+
 def run_pipe(sdp, pipe, kind: str, **call):
     """Call a diffusers pipeline with PAG / FreeU / CFG rescale applied as set on `sdp`.
     kind: txt2img / img2img / inpaint (PAG isn't used for inpaint)."""
@@ -243,6 +284,7 @@ def run_pipe(sdp, pipe, kind: str, **call):
     # PAG swaps attention processors on the shared UNet and only restores them when a run
     # finishes; a Stop mid-run must not leave them in place for the next plain run.
     procs = dict(unet.attn_processors) if target is not pipe else None
+    _seed_sde_noise(target.scheduler, call)
     try:
         with torch.no_grad():
             return target(**call)

@@ -58,6 +58,9 @@ class TrainingConfig:
     dataset_dir: str = ""          # folder with prepared images + .txt captions
     trigger_word: str = ""
     resolution: int = 512          # 512 for SD 1.5, 1024 for SDXL
+    # SD 1.5 only: 2 = train on the text encoder's penultimate layer (+ final layer norm, like kohya /
+    # A1111 "Clip skip: 2") — what anime SD 1.5 checkpoints are used with. SDXL always uses the penultimate.
+    clip_skip: int = 2
     use_bucketing: bool = True
     flip_augment: bool = False     # random horizontal flip
 
@@ -296,6 +299,7 @@ def save_lora(
     text_encoders: list | None,
     output_path: str | Path,
     cfg: TrainingConfig,
+    captions: list[str] | None = None,
 ):
     """Save trained LoRA weights as kohya-compatible safetensors."""
     from peft import get_peft_model_state_dict
@@ -324,7 +328,18 @@ def save_lora(
         "ss_training_comment": f"Trained by ImageGenApp | trigger: {cfg.trigger_word}",
         "ss_output_name": cfg.output_name,
         "modelspec.architecture": "stable-diffusion-xl-v1-base" if cfg.model_type == "sdxl" else "stable-diffusion-v1",
+        "ss_sd_model_name": Path(cfg.base_model).name,
+        "ss_clip_skip": str(cfg.clip_skip if cfg.model_type != "sdxl" else 2),
     }
+    # what the keyword chips / coverage read (kohya keys): tag counts and the dataset size
+    if captions:
+        from collections import Counter
+        import json as _json
+        freq = Counter(t.strip() for c in captions for t in c.split(",") if t.strip())
+        ds = Path(cfg.dataset_dir).name or "dataset"
+        metadata["ss_tag_frequency"] = _json.dumps({ds: dict(freq.most_common())}, ensure_ascii=False)
+        metadata["ss_dataset_dirs"] = _json.dumps({ds: {"n_repeats": 1, "img_count": len(captions)}})
+        metadata["ss_num_train_images"] = str(len(captions))
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_file(state, str(output_path), metadata=metadata)
@@ -409,6 +424,15 @@ def _cache_latents_for_items(
     return latents
 
 
+def _sd1_hidden(text_encoder, enc_out, clip_skip: int):
+    """SD 1.x conditioning: the last layer, or (CLIP skip 2) the penultimate one through the final
+    layer norm — the same tensor the generate side feeds the UNet with CLIP skip 2."""
+    if clip_skip and clip_skip >= 2 and getattr(enc_out, "hidden_states", None) is not None:
+        h = enc_out.hidden_states[-int(clip_skip)]
+        return text_encoder.text_model.final_layer_norm(h)
+    return enc_out[0]
+
+
 @torch.no_grad()
 def _cache_text_embeds(
     items: list[_TrainItem],
@@ -417,6 +441,7 @@ def _cache_text_embeds(
     is_sdxl: bool = False,
     trigger_word: str = "",
     callback: Callable | None = None,
+    clip_skip: int = 1,
 ) -> list[dict[str, torch.Tensor]]:
     """Pre-compute text embeddings for every caption."""
 
@@ -460,7 +485,7 @@ def _cache_text_embeds(
             })
         else:
             embeds.append({
-                "encoder_hidden_states": enc_out[0].squeeze(0).cpu(),
+                "encoder_hidden_states": _sd1_hidden(text_encoder, enc_out, clip_skip).squeeze(0).cpu(),
             })
 
     return embeds
@@ -515,6 +540,16 @@ class LoRATrainer:
         except Exception as e:
             self.cleanup()
             return f"❌ Prepare failed: {e}"
+
+    def _captions(self) -> list[str]:
+        """Each training image's caption as trained (trigger word first)."""
+        trig, out = self.cfg.trigger_word, []
+        for it in self.items:
+            cap = it.caption or ""
+            if trig and not cap.lower().startswith(trig.lower()):
+                cap = f"{trig}, {cap}" if cap else trig
+            out.append(cap)
+        return out
 
     def train(self, callback: Callable | None = None) -> str:
         """Main training loop.  Returns status message."""
@@ -712,7 +747,7 @@ class LoRATrainer:
                     and (epoch + 1) % cfg.save_every_n_epochs == 0
                     and epoch + 1 < cfg.epochs):
                 ep_path = _unique_path(Path(cfg.output_dir) / f"{cfg.output_name}_ep{epoch+1}.safetensors")
-                save_lora(self.unet, self._trained_te_list, ep_path, cfg)
+                save_lora(self.unet, self._trained_te_list, ep_path, cfg, self._captions())
 
         # ── Cleanup ────────────────────────────────────────────────────────
         self.unet.cpu()
@@ -729,7 +764,7 @@ class LoRATrainer:
         # Final save
         # Never overwrite an existing LoRA (the default name is "my_lora"): add _2, _3 …
         out_path = _unique_path(Path(cfg.output_dir) / f"{cfg.output_name}.safetensors")
-        save_lora(self.unet, self._trained_te_list, out_path, cfg)
+        save_lora(self.unet, self._trained_te_list, out_path, cfg, self._captions())
         return (f"✅ Training complete — {global_step} steps in {elapsed/60:.1f}m — "
                 f"best loss {best_loss:.4f} — saved → {out_path.name}")
 
@@ -764,7 +799,7 @@ class LoRATrainer:
             }
             return embed_dict, enc_hidden
         else:
-            enc_hidden = enc_out[0]
+            enc_hidden = _sd1_hidden(self.text_encoder, enc_out, self.cfg.clip_skip)
             embed_dict = {"encoder_hidden_states": enc_hidden.squeeze(0)}
             return embed_dict, enc_hidden
 
@@ -900,6 +935,7 @@ class LoRATrainer:
                 is_sdxl=(cfg.model_type == "sdxl"),
                 trigger_word=cfg.trigger_word,
                 callback=callback,
+                clip_skip=cfg.clip_skip,
             )
 
         # Free VAE — not needed during training when latents are cached

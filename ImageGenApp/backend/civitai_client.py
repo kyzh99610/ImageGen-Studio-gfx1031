@@ -7,6 +7,8 @@ Docs: https://developer.civitai.com/docs/api/public-rest
 
 from __future__ import annotations
 
+import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -42,10 +44,20 @@ _TYPE_TO_DIR: dict[str, Path] = {
 }
 
 
+_TOKEN_RE = re.compile(r"(token=)[^&\s'\"]+", re.I)
+
+
+def scrub(text, key: str | None = None) -> str:
+    """Error text without the API key: httpx errors quote the full URL, and searches send the key
+    as ?token= (audit F-09)."""
+    t = _TOKEN_RE.sub(r"\1***", str(text))
+    k = key if key is not None else os.environ.get("CIVITAI_API_KEY") or ""
+    return t.replace(k, "***") if len(k) >= 8 else t
+
+
 def _safe_filename(name: str, fallback: str = "model.safetensors") -> str:
     """A file name from the API, made safe to save on Windows: no folders ("../x"),
     no characters Windows forbids (<>:"/\\|?*), no reserved device names (CON, NUL…)."""
-    import re
     name = str(name or "").replace("\\", "/").split("/")[-1]
     name = re.sub(r'[<>:"|?*\x00-\x1f]', "_", name).strip().rstrip(". ")
     stem = name.split(".")[0].upper()
@@ -192,7 +204,15 @@ class CivitaiClient:
         # Stream into a .part file and rename when complete, so an interrupted
         # download never leaves a truncated model under its real name (which the
         # "already exists" check below would then treat as a finished download).
-        part_path  = save_dir / (file_name + ".part")
+        expected = int((primary.get("sizeKB") or 0) * 1024)
+        # Authors often keep one file name across versions: a file of the wrong size is another
+        # version, not this one — keep it and save this version beside it (it used to report
+        # "✅ Downloaded" and leave the old file with the old trigger words; audit F-06)
+        if save_path.exists() and expected and abs(save_path.stat().st_size - expected) > max(4096, expected // 1000):
+            file_name = f"{save_path.stem} (v{version.get('id', 'new')}){save_path.suffix}"
+            save_path = save_dir / file_name
+        # the .part is keyed by version: two versions with one file name must never be spliced (F-26)
+        part_path  = save_dir / f"{file_name}.{version.get('id', 'x')}.part"
 
         already_existed = save_path.exists()
 

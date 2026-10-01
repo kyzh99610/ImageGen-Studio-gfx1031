@@ -35,14 +35,23 @@ def split_tags(prompt: str) -> list[str]:
     for i, seg in enumerate(_BREAK.split(prompt or "")):
         if i:
             out.append("BREAK")
-        buf, depth, j = [], 0, 0
+        buf, depth, angle, j = [], 0, False, 0
         while j < len(seg):
             ch = seg[j]
             if ch == "\\" and j + 1 < len(seg):
                 buf.append(seg[j:j + 2]); j += 2; continue
-            if ch in "([<{":
+            # "<" is a bracket only for <lora:…> / <lyco:…> / <hypernet:…>: the Danbooru kaomoji
+            # ">_<" and ":<" (WD14 emits them) opened one that never closed, and the rest of the
+            # prompt became a single "tag" (audit F-07)
+            if ch == "<":
+                if not angle and re.match(r"<(lora|lyco|hypernet):", seg[j:], re.I):
+                    angle, depth = True, depth + 1
+            elif ch == ">":
+                if angle:
+                    angle, depth = False, depth - 1
+            elif ch in "([{":
                 depth += 1
-            elif ch in ")]>}" and depth:
+            elif ch in ")]}" and depth:
                 depth -= 1
             if ch in ",\n" and depth == 0:
                 out.append("".join(buf)); buf = []
@@ -91,7 +100,9 @@ def parse_tag(tag: str) -> tuple[str, float, str]:
         if m and _outer_pair("(" + m.group(1) + ")", "(", ")"):
             w *= float(m.group(2)); t = m.group(1).strip(); continue
         pm = re.match(r"^(.*?)(\++|-+)$", t)
-        if pm and pm.group(1) and not pm.group(1).endswith(("\\", " ")) and pm.group(1)[-1] not in "+-":
+        # a sign is a weight only after a letter, digit or ")" — "+_+" / "-_-" are Danbooru tags
+        # (same rule as prompt_syntax._TRAILING_SIGN)
+        if pm and pm.group(1) and (pm.group(1)[-1].isalnum() or pm.group(1)[-1] == ")"):
             n = len(pm.group(2))
             w *= (1.1 ** n) if pm.group(2)[0] == "+" else (0.9 ** n)
             t = pm.group(1).strip()          # "(x:1.2)++": the loop unwraps the rest

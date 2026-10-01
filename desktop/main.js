@@ -19,13 +19,16 @@ const READY_TIMEOUT_MS = 10 * 60 * 1000;
 let win = null;
 let server = null;          // child process we started (null when attached to one already running)
 let serverUrl = null;
+let announcedUrl = null;     // the URL the backend printed ("Running on local URL: …")
 let quitting = false;
 let logStream = null;
 let logFile = null;
 const recentLines = [];
 
 app.setAppUserModelId('ImageGenStudio.Desktop');
-if (!app.requestSingleInstanceLock()) {
+// the losing instance must not go on to open a window / start a second backend (audit F-29)
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
@@ -101,7 +104,13 @@ function logLine(line) {
   send('log', clean);
   if (/Found AMD|ROCm runtime|GPU gfx/.test(clean)) status('Starting the AI backend…', clean);
   else if (/Launching with ZLUDA/.test(clean)) status('Loading the app (about 20 seconds)…', clean);
-  else if (/Running on local URL/.test(clean)) status('Almost ready…', clean);
+  else if (/Running on local URL/.test(clean)) {
+    status('Almost ready…', clean);
+    // launch.bat moves to the next free port if ours was taken between pickPort() and the bind:
+    // trust what the backend printed, not the port we asked for
+    const m = clean.match(/Running on local URL:\s*(http:\/\/[^\s/]+)\/?/);
+    if (m) announcedUrl = m[1] + '/';
+  }
 }
 
 // ── Backend process ────────────────────────────────────────────────────────────
@@ -167,8 +176,9 @@ async function waitUntilReady(url) {
   const t0 = Date.now();
   while (Date.now() - t0 < READY_TIMEOUT_MS) {
     if (quitting) return false;
-    const r = await httpGet(url, 2500);
-    if (r && r.status === 200 && r.body.includes('ImageGen Studio')) return true;
+    const target = announcedUrl || url;
+    const r = await httpGet(target, 2500);
+    if (r && r.status === 200 && r.body.includes('ImageGen Studio')) return target;
     if (server === null && !(await findRunningInstance())) return false;   // backend died
     send('elapsed', Math.round((Date.now() - t0) / 1000));
     await new Promise((res) => setTimeout(res, 1000));
@@ -276,6 +286,7 @@ async function boot() {
   const repo = findRepo();
   buildMenu(repo);
   serverUrl = null;
+  announcedUrl = null;
   await win.loadFile(path.join(__dirname, 'splash.html'));
   if (!repo) {
     send('failed', { code: null, logFile: '', tail: ['Could not find the ImageGenApp folder next to this program.'] });
@@ -284,13 +295,13 @@ async function boot() {
   try {
     const url = await startBackend(repo);
     status('Loading the app (about 20 seconds)…', '');
-    const ok = await waitUntilReady(url);
-    if (!ok) {
+    const readyUrl = await waitUntilReady(url);
+    if (!readyUrl) {
       if (!quitting && server) send('failed', { code: 'timeout', logFile, tail: recentLines.slice(-25) });
       return;
     }
-    serverUrl = url;
-    await win.loadURL(url + '?__theme=dark');
+    serverUrl = readyUrl;
+    await win.loadURL(readyUrl + '?__theme=dark');
   } catch (e) {
     send('failed', { code: null, logFile, tail: [String(e && e.message || e)] });
   }
@@ -314,6 +325,7 @@ function snapshot(name) {
 }
 
 app.whenReady().then(() => {
+  if (!gotLock) return;
   createWindow();
   win.webContents.on('did-finish-load', () => {
     const onUi = serverUrl && win.webContents.getURL().startsWith(serverUrl);
