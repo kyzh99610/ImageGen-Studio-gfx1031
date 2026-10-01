@@ -294,6 +294,12 @@ def parameters_html() -> str:
              "changed almost nothing).",
              _cn("对手部做同样的重绘（动漫手部检测，手套也算），在脸部之前进行：0.35 清理手指，0.45–0.5 重画。"
                  "无法保证修正手指数量。脸/手重绘使用均匀步长版本的采样器。")],
+            ["⚖️ Prompt weights & colour bleeding",
+             "(tag:1.3) works like A1111 now (Settings → Prompt weights): the app used to apply weights 2–5× harder, so "
+             "weighted background / lighting / colour tags flooded their colour onto the character. If a scene colour "
+             "still bleeds, lower that tag's weight.",
+             _cn("权重 (tag:1.3) 现与 A1111 相同（设置 → Prompt weights）；之前权重过强，背景/光照颜色会染到角色身上。"
+                 "仍有串色时降低场景标签的权重。")],
             ["🎴 Every outfit of a card",
              "Character cards → “🎴▶ Generate every outfit”: each outfit × N seeds (the same seeds for every outfit) "
              "with the current settings, then a labelled contact sheet. Pairs already made with the same settings "

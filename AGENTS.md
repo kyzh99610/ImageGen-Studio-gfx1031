@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 114-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 118-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 109 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 113 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -367,6 +367,31 @@ name of the selected gallery image (`example_image`). Load restores all of it (L
   feathered blend where the mask touches the crop/image edge (seamlessClone washes to grey there). OCR boxes are
   widened by ~1 character so "©"/"@" next to the text are removed too.
 
+### Prompt weights & colour bleeding (2026-09-30)
+Report: on another (NVIDIA) PC, background colours bled hard into the character on every model. Measured here with a
+bleed metric (scratch `bleach_metric.py`: YOLO face box → hair band; projection of the hair's Lab a/b onto the image
+border's colour direction), a grey-haired test character in a white dress, 5 strongly coloured scenes, same seeds:
+- **App features are not the cause** (an SD 1.5 anime checkpoint, vs base): PAG 2, FreeU, CFG rescale 0.7, AYS 12, hires
+  1.5×/0.45, face detail 0.4 all within ±1; auto-quality tags off: background chroma +7, hair +0.9.
+- **Prompt weights were.** Compel applies `(tag:w)` as `empty + (z − empty)·w` with no renormalisation; A1111's
+  default "Original" emphasis multiplies the token embeddings by w and rescales the chunk to its unweighted mean.
+  Scene tags at 1.3 / 1.5: hair bleed +15.3 / +24.7 (face +8.7) with Compel vs **+2.9 / +5.6 (face +0.3)** with A1111
+  maths on SD 1.5; SDXL (wai) +5.9 vs +2.7. Civitai prompts are written for A1111, so weighted colour / lighting /
+  background tags hit ~2–5× too hard. `prompt_syntax.EMPHASIS` (default **"a1111"**) patches Compel's
+  `EmbeddingsProvider.get_embeddings_for_weighted_prompt_fragments` (per 77-token chunk, per text encoder; unit
+  weights fall through to Compel unchanged); Settings → "Prompt weights" switches to "compel" (saved in
+  `settings/_prefs.json`, applied at start). Records carry `emphasis`; A1111 text says `Emphasis: Compel` only for
+  Compel; restore notes a mismatch when the prompt has weights (records without the field = Compel, the old behaviour).
+  The SDXL embedding cache key includes the mode (it served the other mode's embeddings once).
+- **BREAK** between the subject and the scene tags: my hair-band metric said SDXL −19 %, but the second session's
+  subject-only metric (U2-Net mask + WD14) found the hair tint unchanged (+0.2) and background chroma −12 % — BREAK
+  mostly tones the scene down; it is not a bleed fix. Same metric confirmed the weights result: tags at 1.5 under
+  Compel took P(grey hair) 0.76 → 0.27 and P(red eyes) → 0.55; A1111 maths 0.68 / 0.73.
+- **VAE family** (`model_manager.vae_family`): SD 1.5 and SDXL VAEs have identical shapes, so an SD 1.5 VAE on SDXL
+  loaded silently and decoded garbage. `quant_conv.bias` norm ≈ 43.8 for every SDXL VAE (base/Pony/IL/NoobAI), 4.4–6.4
+  for SD 1.x — read from the header offsets only (mmapping a 6 GB checkpoint hit the commit limit with the app up).
+  `app._effective_vae()` uses the checkpoint's own VAE for a mismatch and warns in the load status.
+
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
 auto-quality tags: each tag once (key = lower-case, `_`→space, weight syntax removed), strongest weight wins,
@@ -576,8 +601,9 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
     A renamed GPU callback fails the test (`_GPU_FNS` names must exist).
 23. **Audit round (2026-09-30)** — a separate session audited the repo (report: 33 findings); fixed with tests:
     **GPU jobs** — `app.gpu_job` marks handlers (the LoRA Apply/Remove/Clear buttons and Train → Prepare were outside
-    the group) and `_serialize_gpu_events` runs every GPU handler under `_GPU_LOCK` (an RLock held for the whole job,
-    generators until they finish). Stop buttons have **no `cancels=`**: a cancelled Gradio task released the queue slot
+    the group) and `_serialize_gpu_events` runs every GPU handler under `_GPU_LOCK` (a plain `threading.Lock` held for
+    the whole job, generators until they finish — an RLock failed: Gradio resumes generators on other pool threads,
+    the release raised and the lock stayed held, hanging later jobs). Stop buttons have **no `cancels=`**: a cancelled Gradio task released the queue slot
     while its thread still ran, and the next job started beside it. Stop sets `_generation_abort`; the job ends at its
     next step / phase check. **`--cpu`** deadlocked at start (torch imported first on two threads) → `import torch`
     before `preload_tokenizer()`. **VAE-only change** returned "Already loaded" → `load_model(vae_path=KEEP_VAE)`
@@ -604,6 +630,8 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
 | `CUDA not available` / device is cpu | Not launched via `launch.bat` / `run_zluda.bat`, or HIP runtime missing |
 | Black / noisy images, NaN | Run `run_zluda.bat selftest_zluda.py`; check `IMAGEGEN_CUDNN` isn't set; LoRA/base mismatch |
 | Generation suddenly very slow | VRAM spilled to shared memory — look for "⚠ VRAM over-committed", lower size/batch |
+| Colours of the background flood the character | Weighted scene/colour tags under Compel weighting — Settings → Prompt weights = A1111 (default since 2026-09-30); lower the scene tags' weights |
+| Garbage / psychedelic colours on one model family | A VAE of the other family selected — the load status warns and uses the checkpoint's own VAE |
 | First generation of a session is slow | Normal: ZLUDA loads kernels per process (~1 min); on a new PC ~15 min once (empty zluda.db) |
 | Process won't exit | ZLUDA shutdown hang — close the window / `taskkill /F /T` the zluda.exe tree |
 | "… is incomplete" / "isn't a valid .safetensors file" | Truncated/corrupt file (`model_manager.safetensors_problem()`) — re-download |
