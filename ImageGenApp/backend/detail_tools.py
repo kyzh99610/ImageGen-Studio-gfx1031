@@ -77,9 +77,14 @@ def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, nega
     """Repaint the white part of `mask` with the loaded model. Returns (image, seed used)."""
     import torch
     from backend.sd_pipeline import _load_scheduler, _make_generator
+    from backend.sampling import uniform_variant
 
     if sdp is None or sdp.pipe is None:
         raise RuntimeError("No model loaded.")
+    # Karras / AYS start an inpaint pass at much lower noise for the same denoise (AYS 12 at 0.95: sigma 7.4, evenly
+    # spaced 9.1; at 0.75: 2.9 vs 4.1), so a big flat colour couldn't be changed at all — denoise means what it says,
+    # as in the face / hand / tiled passes (2026-10-02)
+    scheduler = uniform_variant(scheduler)
     image = image.convert("RGB")
     W, H = image.size
     mask = mask.convert("L").resize((W, H), Image.NEAREST)

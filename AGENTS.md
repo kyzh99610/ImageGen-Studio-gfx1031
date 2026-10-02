@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 126-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 132-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 121 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 127 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -406,12 +406,40 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   tile's click target.
 - **UniPC** failed on every model: `torch.linalg.solve` needs `cublasSgetrsBatched` (NOT_SUPPORTED under ZLUDA);
   `sampling._patch_linalg_solve()` moves the tiny solve to the CPU after the first failure.
-- **LMS / PNDM / Heun garble SDXL** (iridescent noise on faces / fabrics; SD 1.5 fine). A float32 `step()` didn't
-  help; cause open (next idea: VAE). Generate warns; the sampler hint says so.
+- **LMS / PNDM / Heun garble SDXL** (iridescent noise on faces / fabrics; SD 1.5 fine) — cause found and fixed
+  2026-10-02 (see "LMS / PNDM on SDXL …" below); Heun was only grainy.
 - `danbooru_tags.did_you_mean` leaves qualified tags alone ("black butterfly hair ornament" isn't a typo of the
   bare tag); `card_from_lora` keeps hair accessories from 50 % coverage (a character LoRA's butterfly hair ornament: 58 %);
   img2img ticked without an image says so.
 - Restore round trips: SDXL 832×1216 max 1/255, SDXL hires ~0.26/255 between runs, SD 1.5 ~1/255.
+
+### LMS / PNDM on SDXL, commit preflight, card profiles, ⭐ rating, inpaint sampler (2026-10-02)
+- **LMS / PNDM garbled SDXL pictures** (iridescent speckles on eyes, hair, fabrics). Both are 4th-order Adams–Bashforth
+  methods, stable only while a step shrinks sigma by < ~30 %; every schedule ends with bigger steps, where model noise is
+  amplified ~20× (latents ±6 instead of ±3.6, identical with the fp32 VAE — the decoder was never the cause), and on some
+  SDXL-family checkpoints (a NoobAI merge) the order-3/4 steps in the middle left hue noise with latents of normal size.
+  `sampling._lms_lower_order` / `_plms_lower_order`: the last steps drop to order 3, 2, 1, img2img starts at order 1, and
+  SDXL-family pipelines never go above order 2 (SD 1.5 keeps 4). Checked on Illustrious, NoobAI and Pony checkpoints. Heun was
+  never garbled, only grainier; PNDM stays the grainiest — the Generate note says "more grain" for PNDM / Heun on SDXL.
+- **Commit preflight:** a checkpoint load needs ~2.05× the file size in Windows commit (RAM + page file) for a moment, 2.25×
+  the first time in a process, and under ZLUDA GPU allocations count too. With too little free the process died with an
+  access violation in safetensors' `load_file`; `model_manager.commit_problem()` now refuses the load with a message (close
+  big programs or enlarge the page file).
+- **Per-checkpoint profiles in character cards:** `profiles` = {checkpoint file → LoRAs + weights, CFG, steps, sampler,
+  CLIP skip, negative, size, VAE, PAG, FreeU, CFG rescale, face / hand detail}. 🎴 Load applies the profile of the checkpoint
+  selected in the Generate tab (and keeps that checkpoint); "📌 Save as this checkpoint's profile" stores the current setup.
+- **⭐ rating for the outfit batch** (`backend/image_score.py`, CPU, cached models only): one face / ≤ 2 hands (YOLO), the
+  card's hair / eye colours and hair accessory on the 2.4× head crop (WD14), colour specks; n/5 on each contact-sheet tile.
+  On hand-labelled test pictures the accessory check separated the right hair ornament from a look-alike clip with AUC 0.99.
+- **Upscale tab** keeps the source's `imagegen` record (`_carry_params`), so upscaled / SD-detail pictures restore with
+  their boosters.
+- **Inpaint runs the evenly spaced variant of the sampler** (like the face / hand / tiled passes): AYS 12 at denoise 0.95
+  started at σ 7.4 (evenly spaced 9.1), at 0.75 at 2.9 (4.1), so big flat colours couldn't change. Small things (a hair
+  ornament ~0.9, an expression ~0.5) work; a whole-outfit recolour works better as same seed + edited prompt, and 1.0 over a
+  body-sized area draws a new person. The Bridge names the SDXL LoRAs its stage 2 used (whatever the Generate tab applied).
+- Measured on a character card (four SDXL checkpoints, ~480 pictures, scored): the recipe sat on a plateau — CFG 5 vs 6, LoRA
+  weight 0.9 vs 0.75 and Euler a vs AYS 12 were not better on fresh paired seeds. Costs: weights ≥ 1.3 on eye tags, a
+  non-native aspect (768×1344), CFG rescale ≥ 0.5, PAG 3. Variation strength 0.1 already moves the picture (|diff| ~25/255).
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
@@ -642,6 +670,10 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
     prep (same stems, alpha, EXIF), companion-TI scan (header-only, `weights_only=True`), SmartSplit notes what it
     skips, ESRGAN DML session released before the hires img2img, Electron second instance / announced port, sampler
     fallback recorded as what ran.
+24. **LMS / PNDM garbled SDXL** → 4th-order Adams–Bashforth: blow-up in the last steps and hue noise from order-3/4 steps
+    → lower order at the end + never above order 2 on SDXL-family pipelines (2026-10-02).
+25. **SDXL checkpoint load killed the app (0xC0000005)** when Windows commit ran out → `commit_problem()` refuses with a message.
+26. **Upscale tab dropped the `imagegen` record** → `_carry_params()`.
 
 ## Troubleshooting
 
@@ -653,6 +685,7 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
 | Generation suddenly very slow | VRAM spilled to shared memory — look for "⚠ VRAM over-committed", lower size/batch |
 | Colours of the background flood the character | Weighted scene/colour tags under Compel weighting — Settings → Prompt weights = A1111 (default since 2026-09-30); lower the scene tags' weights |
 | Garbage / psychedelic colours on one model family | A VAE of the other family selected — the load status warns and uses the checkpoint's own VAE |
+| App dies (0xC0000005 in `safetensors.load_file`) while loading an SDXL checkpoint, or "Not enough free memory to load …" | Windows *commit* (RAM + page file) is full: a load needs ~2× the file size for a moment and GPU allocations count too. Close big programs or enlarge the page file (System → Advanced → Performance → Virtual memory) |
 | First generation of a session is slow | Normal: ZLUDA loads kernels per process (~1 min); on a new PC ~15 min once (empty zluda.db) |
 | Process won't exit | ZLUDA shutdown hang — close the window / `taskkill /F /T` the zluda.exe tree |
 | "… is incomplete" / "isn't a valid .safetensors file" | Truncated/corrupt file (`model_manager.safetensors_problem()`) — re-download |

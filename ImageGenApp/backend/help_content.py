@@ -275,9 +275,10 @@ def parameters_html() -> str:
              "SDXL 832×1216 → 1248×1824 in ~2 min (fits 12 GB).",
              _cn("先按原生尺寸构图，放大后再以图生图重绘细节（降噪0.35–0.5）。")],
             ["🔀 Variations",
-             "Keeps the main seed and blends in a second seed's noise: 0.05–0.2 = same picture, small changes. "
+             "Keeps the main seed and blends in a second seed's noise: 0.05–0.1 = a close relative (pose and details shift, the "
+             "character stays), 0.25+ = mostly a new picture. "
              "“🔀 More like this” under the gallery sets it up for the image you picked.",
-             _cn("保持主种子并混入变体种子：0.05–0.2 为小幅变化。图库下“More like this”一键设置。")],
+             _cn("保持主种子并混入变体种子：0.05–0.1 为相近变体（姿势与细节会变，角色不变），0.25 以上基本是新图。图库下“More like this”一键设置。")],
             ["✂️ CLIP skip",
              "2 = use the text encoder's second-to-last layer — what most SD 1.5 anime checkpoints were trained "
              "with (A1111 “Clip skip: 2”). SDXL always does this already.",
@@ -301,14 +302,21 @@ def parameters_html() -> str:
              _cn("权重 (tag:1.3) 现与 A1111 相同（设置 → Prompt weights）；之前权重过强，背景/光照颜色会染到角色身上。"
                  "仍有串色时降低场景标签的权重。")],
             ["🎲 Samplers on SDXL",
-             "LMS, PNDM and Heun fill SDXL pictures with colour noise here (SD 1.5 is fine) — use DPM++ 2M Karras / AYS, "
-             "Euler a or UniPC. The result line warns when one of them runs on an SDXL model.",
-             _cn("LMS、PNDM、Heun 在 SDXL 上会产生彩色噪点（SD 1.5 正常），请改用 DPM++ 2M Karras / AYS、Euler a 或 UniPC。")],
+             "LMS and PNDM used to fill SDXL pictures with colour noise (4th-order multistep methods are unstable on "
+             "SDXL); on SDXL-family models (SDXL, Pony, Illustrious, NoobAI) they now run as 2nd-order methods and are "
+             "clean. PNDM and Heun still leave a little more grain in skies and backgrounds than DPM++ 2M Karras / AYS "
+             "or Euler — the result line says so on SDXL models.",
+             _cn("LMS、PNDM 以前会在 SDXL 上产生彩色噪点（四阶多步法在 SDXL 上不稳定）；在 SDXL 系列模型（SDXL / Pony / "
+                 "Illustrious / NoobAI）上它们现在按二阶运行，已正常。"
+                 "PNDM 和 Heun 在天空/背景处仍比 DPM++ 2M Karras / AYS 或 Euler 略多颗粒。")],
             ["🎴 Every outfit of a card",
              "Character cards → “🎴▶ Generate every outfit”: each outfit × N seeds (the same seeds for every outfit) "
              "with the current settings, then a labelled contact sheet. Pairs already made with the same settings "
-             "are skipped, so a stopped run resumes.",
-             _cn("角色卡 →“生成所有服装”：每套服装 × N 个种子（种子相同便于对比），最后生成对比图；已生成的会跳过，可断点续跑。")],
+             "are skipped, so a stopped run resumes. Every picture gets a ⭐ rating (n/5) on the sheet from CPU checks "
+             "whose models are already cached: one face / at most two hands, the card's hair and eye colours and its "
+             "hair pin on the head crop, colour noise — with the reasons for anything below 5.",
+             _cn("角色卡 →“生成所有服装”：每套服装 × N 个种子（种子相同便于对比），最后生成对比图；已生成的会跳过，可断点续跑。"
+                 "对比图上每张图有 ⭐ 评分（n/5）：一张脸/至多两只手、角色卡的发色瞳色与发饰、彩色噪点（仅用已缓存的模型在 CPU 上检查）。")],
             ["🗂 History",
              "Search everything in outputs/ by prompt words, model, LoRA or seed; ⭐ favourites; open an image in PNG "
              "Info → Send to Generate to restore exactly how it was made.",
@@ -319,8 +327,10 @@ def parameters_html() -> str:
              _cn("放大后用已加载模型分块低降噪重绘，超越高清修复的尺寸上限；降噪过高可能在分块里画出多余的脸。")],
             ["🖌 Inpaint",
              "Paint over any area and describe what should be there; only that area is redrawn, at native "
-             "resolution, with your model, LoRAs and seed.",
-             _cn("涂抹要修改的区域并描述内容，仅重绘该区域。")],
+             "resolution, with your model, LoRAs and seed. Good for small things (a hair pin at 0.9, an expression at "
+             "~0.5); it uses the evenly spaced version of your sampler so denoise means what it says. A whole outfit "
+             "recolour works better as same seed + edited prompt; 1.0 over a body-sized area draws a new person.",
+             _cn("涂抹要修改的区域并描述内容，仅重绘该区域。适合小物件（发饰约 0.9、表情约 0.5）；换整套衣服颜色请用同种子+改提示词。")],
             ["⏩ DPM++ 2M AYS",
              "NVIDIA's Align-Your-Steps schedule: about the quality of 25 steps in 10–12. The Karras samplers "
              "really use Karras sigmas (as in A1111).",
@@ -339,8 +349,12 @@ def parameters_html() -> str:
              _cn("{a|b|c} 每张图随机选一项；__outfit__ 从 wildcards/outfit.txt 随机取一行。随种子固定。")],
             ["🎴 Character cards",
              "Checkpoint + LoRAs + character tags + outfits + size/CFG/steps in one click. “Build from LoRA slot 1” "
-             "turns a character LoRA's trigger words and Civitai example prompts into a card with outfits.",
-             _cn("一键载入角色的模型、LoRA、角色标签与服装。可由 LoRA 自动生成。")],
+             "turns a character LoRA's trigger words and Civitai example prompts into a card with outfits. "
+             "“📌 Save as this checkpoint's profile” remembers the LoRA weights, CFG, sampler and boosters (PAG, face "
+             "detail …) that suit the selected checkpoint; 🎴 Load applies the profile of whichever checkpoint is "
+             "selected, and the card's defaults for the others.",
+             _cn("一键载入角色的模型、LoRA、角色标签与服装。可由 LoRA 自动生成。“📌 保存为当前模型的配置”记住该模型适用的 LoRA 权重、"
+                 "CFG、采样器与画质增强；载入时按当前所选模型套用对应配置。")],
             ["🏷 Interrogate (WD14)",
              "Reads an image's Danbooru tags into the prompt (img2img, PNG Info); in Train LoRA it tags a whole "
              "dataset. ~1 s per image on the CPU.",

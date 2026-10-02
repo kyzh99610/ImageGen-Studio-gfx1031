@@ -52,6 +52,59 @@ def safetensors_problem(path: str) -> str:
     return ""
 
 
+# Loading a checkpoint maps the file copy-on-write (charged as Windows commit in full) while `.to(cuda)` copies the weights
+# to the GPU — and under ZLUDA GPU allocations are charged as commit too (2 GB on the GPU = 2 GB less free commit). Measured
+# 2026-10-01 for 6.5-6.6 GB SDXL files: a load peaks at 2.04x the file size, the first load of a process at 2.25-2.4x
+# (14.55 GB and 15.6 GB for two 6.5 GB anime SDXL files). When other programs have used up the commit limit (RAM + page file)
+# the load does not fail cleanly: the process dies with an access violation inside safetensors' load_file — and with it the
+# queue, an outfit batch…
+LOAD_COMMIT_FACTOR = 2.05          # later loads
+LOAD_COMMIT_FACTOR_FIRST = 2.25    # the first load in a process (kernel / context set-up on top)
+_first_load = [True]
+
+
+def avail_commit_gb() -> float | None:
+    """Free Windows commit (how much more memory this process may still commit, RAM + page file) in GB; None if unknown."""
+    import os
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        class _MS(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong), ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong), ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong), ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong), ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        ms = _MS()
+        ms.dwLength = ctypes.sizeof(ms)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+            return None
+        return ms.ullAvailPageFile / 2**30
+    except Exception:
+        return None
+
+
+def commit_problem(model_path) -> str | None:
+    """A plain-English refusal when the free commit is clearly too small to load this checkpoint (call it after the
+    previous model has been unloaded); None when it should fit or can't be judged (not a local file, not Windows)."""
+    p = Path(str(model_path))
+    if not p.is_file():
+        return None
+    free = avail_commit_gb()
+    if free is None:
+        return None
+    size = p.stat().st_size / 2**30
+    need = (LOAD_COMMIT_FACTOR_FIRST if _first_load[0] else LOAD_COMMIT_FACTOR) * size
+    if free >= need:
+        _first_load[0] = False
+        return None
+    return (f"Not enough free memory to load {p.name}: while a {size:.1f} GB checkpoint loads, Windows needs about {need:.0f} GB "
+            f"of free commit (RAM + page file) and only {free:.1f} GB are free. Loading anyway would crash the app. "
+            f"Close other programs (browsers use a lot) or enlarge the page file (System → Advanced → Performance → "
+            f"Virtual memory), then load it again.")
+
+
 def lycoris_kind(path: str) -> str | None:
     """'LoHa' / 'LoKr' if the file uses a LyCORIS format diffusers can't load, else None."""
     import json, struct
