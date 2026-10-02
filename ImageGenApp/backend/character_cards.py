@@ -3,6 +3,8 @@ Character cards: one JSON file per character in settings/characters/ with everyt
 makes that character come out right — checkpoint, LoRAs + weights, the character's own tags,
 named outfits (tag sets), an optional negative, size, CFG, steps, sampler and CLIP skip.
 "Build from LoRA" fills one in from the LoRA's Civitai trigger prompts and training tags.
+A card may also carry `profiles`: per-checkpoint overrides (LoRA weights, CFG, sampler, boosters …) that
+🎴 Load applies when the checkpoint selected in the Generate tab has one.
 """
 from __future__ import annotations
 
@@ -49,6 +51,64 @@ def _num(v, lo, hi, cast):
     return v if lo <= v <= hi else None
 
 
+def _clean_loras(raw) -> list:
+    loras = []
+    for l in raw or []:
+        if isinstance(l, dict) and isinstance(l.get("file"), str) and l["file"].strip():
+            w = _num(l.get("weight", 0.8), -3.0, 3.0, float)
+            loras.append({"file": Path(l["file"]).name, "weight": 0.8 if w is None else round(w, 3)})
+    return loras[:3]
+
+
+def _fill_settings(d: dict, out: dict) -> dict:
+    """The optional numeric / text settings of a card or a profile, sanitised, into `out`."""
+    as_int = lambda v: int(round(float(v)))      # "832.7" / 1216.0 from a hand-edited file
+    for k, lo, hi, cast in (("width", 256, 2048, as_int), ("height", 256, 2048, as_int), ("cfg", 1.0, 30.0, float),
+                            ("steps", 1, 150, as_int), ("clip_skip", 1, 4, as_int)):
+        if d.get(k) is not None:
+            v = _num(d.get(k), lo, hi, cast)
+            if v is not None:
+                out[k] = (v // 8 * 8) if k in ("width", "height") else v
+    for k in ("vae", "negative", "scheduler", "notes"):
+        if isinstance(d.get(k), str) and d[k].strip():
+            out[k] = Path(d[k]).name if k == "vae" else d[k].strip()
+    return out
+
+
+# quality boosters a per-checkpoint profile may carry (0 = off; face / hand detail = the denoise strength)
+_BOOSTERS = (("pag", 0.0, 6.0), ("cfg_rescale", 0.0, 1.0), ("face_detail", 0.0, 0.8), ("hand_detail", 0.0, 0.7))
+
+
+def _clean_profile(p) -> dict | None:
+    """One checkpoint's overrides of the card (LoRAs as a whole list, settings, boosters); None if nothing valid is left."""
+    if not isinstance(p, dict):
+        return None
+    out = {"loras": _clean_loras(p["loras"])} if isinstance(p.get("loras"), list) else {}
+    _fill_settings(p, out)
+    for k, lo, hi in _BOOSTERS:
+        if p.get(k) is not None:
+            v = _num(p.get(k), lo, hi, float)
+            if v is not None:
+                v = round(v, 3)
+                out[k] = max(v, 0.1) if k.endswith("_detail") and v > 0 else v      # the sliders start at 0.1
+    if isinstance(p.get("freeu"), bool):
+        out["freeu"] = p["freeu"]
+    return out or None
+
+
+def card_for_checkpoint(card: dict, checkpoint) -> tuple[dict, str | None]:
+    """The card with the profile for `checkpoint` (file name or path) laid over it, and that profile's key;
+    (card, None) when the card has no profile for it."""
+    want = Path(str(checkpoint or "")).name.lower()
+    for key, prof in (card.get("profiles") or {}).items():
+        if want and (key.lower() == want or Path(key).stem.lower() == Path(want).stem):
+            merged = {k: v for k, v in card.items() if k != "profiles"}
+            merged.update(prof)                       # a profile's LoRA list replaces the card's as a whole
+            merged["checkpoint"] = key
+            return merged, key
+    return card, None
+
+
 def clean_card(d) -> dict | None:
     """A card with only known, sane fields (None if it isn't a card at all)."""
     if not isinstance(d, dict):
@@ -56,11 +116,7 @@ def clean_card(d) -> dict | None:
     name = safe_name(d.get("name"))
     if not name:
         return None
-    loras = []
-    for l in d.get("loras") or []:
-        if isinstance(l, dict) and isinstance(l.get("file"), str) and l["file"].strip():
-            w = _num(l.get("weight", 0.8), -3.0, 3.0, float)
-            loras.append({"file": Path(l["file"]).name, "weight": 0.8 if w is None else round(w, 3)})
+    loras = _clean_loras(d.get("loras"))
     outfits = {}
     raw = d.get("outfits") or {}
     if isinstance(raw, dict):
@@ -69,19 +125,18 @@ def clean_card(d) -> dict | None:
                 outfits[k.strip()[:80]] = v.strip()
     card = {"name": name,
             "checkpoint": Path(d["checkpoint"]).name if isinstance(d.get("checkpoint"), str) and d["checkpoint"] else None,
-            "loras": loras[:3],
+            "loras": loras,
             "tags": d.get("tags") if isinstance(d.get("tags"), str) else "",
             "outfits": outfits}
-    as_int = lambda v: int(round(float(v)))      # "832.7" / 1216.0 from a hand-edited file
-    for k, lo, hi, cast in (("width", 256, 2048, as_int), ("height", 256, 2048, as_int), ("cfg", 1.0, 30.0, float),
-                            ("steps", 1, 150, as_int), ("clip_skip", 1, 4, as_int)):
-        if d.get(k) is not None:
-            v = _num(d.get(k), lo, hi, cast)
-            if v is not None:
-                card[k] = (v // 8 * 8) if k in ("width", "height") else v
-    for k in ("vae", "negative", "scheduler", "notes"):
-        if isinstance(d.get(k), str) and d[k].strip():
-            card[k] = Path(d[k]).name if k == "vae" else d[k].strip()
+    _fill_settings(d, card)
+    profiles = {}
+    if isinstance(d.get("profiles"), dict):
+        for ck, p in d["profiles"].items():
+            prof = _clean_profile(p)
+            if isinstance(ck, str) and Path(ck).name and prof:
+                profiles[Path(ck).name] = prof
+    if profiles:
+        card["profiles"] = profiles
     return card
 
 

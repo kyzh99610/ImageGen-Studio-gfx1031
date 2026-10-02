@@ -578,6 +578,10 @@ class SDPipeline:
         self.device = _device()
         self.dtype  = get_torch_dtype(self.device)
         self._unload()
+        from backend.model_manager import commit_problem
+        low = commit_problem(model_path_or_id)          # a refusal instead of a crash inside safetensors when commit runs out
+        if low:
+            return f"❌ {low}"
 
         path = Path(model_path_or_id)
         is_local = path.exists()
