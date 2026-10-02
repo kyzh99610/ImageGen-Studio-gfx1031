@@ -743,9 +743,11 @@ def _clean_extra(extra: dict | None) -> dict:
     }
 
 
-# these three samplers fill SDXL pictures with iridescent colour noise on faces and fabrics (SD 1.5 is fine);
-# a float32 step() didn't change it, cause unknown — the result says so instead of leaving it a mystery
-_SDXL_BAD_SAMPLERS = ("LMS", "PNDM", "Heun")
+# LMS / PNDM filled SDXL pictures with iridescent colour noise until 2026-10-02 (4th-order Adams–Bashforth is unstable on
+# SDXL-family models — backend/sampling lowers the order at the end and caps it at 2 there). PNDM and Heun are clean since,
+# but leave more grain in smooth areas than DPM++ / Euler (measured, 3 seeds: chroma high-pass 0.63 / 0.65 vs 0.52–0.56) —
+# the result says so
+_SDXL_BAD_SAMPLERS = ("PNDM", "Heun")
 _SDXL_FAMILIES = ("sdxl", "pony", "illustrious")
 
 _XY_AXES = ["none", "CFG", "Steps", "Sampler", "Seed", "LoRA 1 weight", "CLIP skip", "Hires denoise",
@@ -1068,7 +1070,8 @@ def _build_generate_tab():
                     _cards0 = _list_cards()
                     card_dd = gr.Dropdown(label="Character", choices=["(none)"] + _cards0,
                                           value=_cards0[0] if _cards0 else "(none)",
-                                          info="Saved in settings/characters/ (checkpoint, LoRAs, tags, outfits, size…)")
+                                          info="Saved in settings/characters/ (checkpoint, LoRAs, tags, outfits, size…). "
+                                               "📌 profiles: 🎴 Load uses the one for the checkpoint selected now")
                     from backend.character_cards import load_card as _load_card
                     _card0 = _load_card(_cards0[0]) if _cards0 else None
                     _outs0 = ["(no outfit tags)"] + list((_card0 or {}).get("outfits") or {})
@@ -1081,6 +1084,7 @@ def _build_generate_tab():
                     with gr.Row():
                         card_save_btn = gr.Button("💾 Save current setup", size="sm")
                         card_build_btn = gr.Button("🧩 Build from LoRA slot 1", size="sm")
+                    card_profile_btn = gr.Button("📌 Save as this checkpoint's profile", size="sm")
                     card_status = gr.HTML("")
                     with gr.Row():
                         card_batch_seeds = gr.Number(value=2, precision=0, minimum=1, maximum=8,
@@ -1163,7 +1167,7 @@ def _build_generate_tab():
                                 label="Sampler / Scheduler",
                                 choices=list(SCHEDULER_MAP.keys()),
                                 value=_ls.get("scheduler", "DPM++ 2M Karras"),
-                                info="DPM++ 2M Karras: best all-rounder · DPM++ 2M AYS: similar quality in 10–12 steps · LMS / PNDM / Heun garble SDXL (SD 1.5 only).",
+                                info="DPM++ 2M Karras: best all-rounder · DPM++ 2M AYS: similar quality in 10–12 steps · PNDM / Heun leave a little more grain on SDXL.",
                             )
                             steps_sl    = gr.Slider(1, 150, value=_ls.get("steps", DEFAULT_STEPS), step=1,  label="Steps",
                                                     info="25–35 is the sweet spot.")
@@ -1202,8 +1206,8 @@ def _build_generate_tab():
                                 var_seed_num = gr.Number(value=-1, precision=0, label="Variation seed (-1 = random)")
                                 var_strength_sl = gr.Slider(
                                     0, 1, value=0, step=0.01, label="Variation strength",
-                                    info="0 = off · 0.05–0.2 = same composition, small changes · 1 = the variation "
-                                         "seed's own image. Keep the main seed fixed.")
+                                    info="0 = off · 0.05–0.1 = a close relative (pose and details shift, the character stays) · "
+                                         "0.25+ = mostly a new picture · 1 = the variation seed's own image. Keep the main seed fixed.")
                         with gr.Accordion("🔍 Hires fix — generate small, then refine at a higher resolution",
                                           open=bool(_ls.get("hires_on"))):
                             hires_cb = gr.Checkbox(
@@ -1282,7 +1286,7 @@ def _build_generate_tab():
                             strength_sl = gr.Slider(0.1, 1.0, value=0.75, step=0.05, label="Denoise Strength",
                                                     info="How much to change the input: 0.3 subtle · 0.5 restyle · 0.8+ mostly new. "
                                                          "Karras / AYS samplers change less at the same value (+0.15). "
-                                                         "Recolouring an outfit needs 🖌 Inpaint, not img2img.")
+                                                         "Recolouring an outfit: same seed + edited prompt; 🖌 Inpaint for small things (pin, expression).")
                             use_i2i_cb  = gr.Checkbox(label="Use img2img mode", value=False,
                                                       info="Start from the image above instead of pure noise.")
                             restore_cb  = gr.Checkbox(
@@ -1608,8 +1612,9 @@ def _build_generate_tab():
                 sd._lora_adapters = {}
                 lora_status = "<br>⚠️ Previous LoRAs dropped (incompatible with new model)"
 
-        # Resolution / quality tag hint based on model family
-        family = sd.model_family
+        # Resolution / quality tag hint based on model family (none when the load failed or was refused: the family
+        # would still be the previous model's)
+        family = sd.model_family if sd.pipe is not None else None
         res_hint = ""
         if family == "pony":
             res_hint = (
@@ -1820,8 +1825,8 @@ def _build_generate_tab():
         fixes_note = (f'<br><span style="color:#f9e2af;">Adjusted: {"; ".join(fixes)}</span>'
                       if fixes else "")
         if scheduler in _SDXL_BAD_SAMPLERS and sd.model_family in _SDXL_FAMILIES:
-            fixes_note += (f'<br><span style="color:#fab387;">⚠ {scheduler} garbles SDXL pictures here (colour noise on '
-                           f'faces and fabrics) — try DPM++ 2M AYS, Euler a or UniPC.</span>')
+            fixes_note += (f'<br><span style="color:#fab387;">ℹ {scheduler} leaves a little more grain in skies and '
+                           f'backgrounds than DPM++ 2M AYS / Karras on SDXL models.</span>')
 
         # ── Optionally add the quality tags each model family was trained with ─
         added_tags = added_neg = ""
@@ -2960,7 +2965,7 @@ def _build_generate_tab():
         if not seeds:
             return (gr.update(),) * 4 + ('<p style="color:#f5c6a0;font-size:13px;">Generate something first.</p>',)
         i = idx if isinstance(idx, int) and 0 <= idx < len(seeds) else 0
-        st = cur_strength if cur_strength and 0 < float(cur_strength) <= 0.5 else 0.15
+        st = cur_strength if cur_strength and 0 < float(cur_strength) <= 0.5 else 0.1
         return (seeds[i], -1, st, False,
                 f'<p style="color:#a6e3a1;font-size:13px;">🔀 Seed {seeds[i]} + variation strength {st:g} — '
                 f'press Generate (a batch gives several variations at once).</p>')
@@ -3238,7 +3243,9 @@ def _build_generate_tab():
         loras = ", ".join(f"{Path(l['file']).stem} ×{l['weight']:g}" for l in card["loras"]) or "no LoRA"
         return (f'<p style="color:#a6adc8;font-size:13px;margin:2px 0;">🎴 <b>{html.escape(card["name"])}</b> · '
                 f'{html.escape(card.get("checkpoint") or "current checkpoint")} · {html.escape(loras)} · '
-                f'{len(card["outfits"])} outfit(s)<br><code>{html.escape(card["tags"])}</code></p>')
+                f'{len(card["outfits"])} outfit(s)'
+                + (f' · 📌 {len(card["profiles"])} checkpoint profile(s)' if card.get("profiles") else "")
+                + f'<br><code>{html.escape(card["tags"])}</code></p>')
 
     def on_card_pick(name):
         from backend.character_cards import load_card
@@ -3253,16 +3260,17 @@ def _build_generate_tab():
         want = (fname or "").lower()
         return next((path for n, path in items if n.lower() == want), None) if want else None
 
-    def do_card_load(name, outfit, scene, neg, *cur):
-        from backend.character_cards import load_card, card_prompt
+    def do_card_load(name, outfit, scene, neg, cur_model=None):
+        from backend.character_cards import load_card, card_prompt, card_for_checkpoint
         from backend.model_manager import list_checkpoints, list_loras, list_vaes
-        n_out = 16
+        n_out = 23
         card = load_card(name) if name and name != "(none)" else None
         if not card:
             return (*[gr.update()] * n_out, '<p style="color:#f9e2af;font-size:13px;">⚠ Pick a card first.</p>')
+        card, profile = card_for_checkpoint(card, cur_model)    # the checkpoint selected now may have its own profile
         notes = []
         model = gr.update()
-        if card.get("checkpoint"):
+        if card.get("checkpoint") and not profile:               # a profile keeps the checkpoint the user picked
             path = _find_file(card["checkpoint"], list_checkpoints())
             if path:
                 model = path
@@ -3286,13 +3294,19 @@ def _build_generate_tab():
         prompt = card_prompt(card, outfit if outfit != _NO_OUTFIT else None, scene or "")
         negative = merge_prompts(neg or "", card["negative"]) if card.get("negative") else gr.update()
         g = lambda k: card[k] if k in card else gr.update()
+        # boosters only when the profile has them (face / hand detail: 0 = off, else the denoise strength)
+        fd, hd = card.get("face_detail"), card.get("hand_detail")
+        boost = [g("pag"), g("cfg_rescale"), g("freeu"),
+                 gr.update() if fd is None else fd > 0, gr.update() if not fd else fd,
+                 gr.update() if hd is None else hd > 0, gr.update() if not hd else hd]
         msg = (f'<p style="color:#a6e3a1;font-size:13px;margin:2px 0;">✅ Loaded {html.escape(card["name"])}'
-               + (f' — {html.escape(outfit)}' if outfit and outfit != _NO_OUTFIT else "") + "</p>"
+               + (f' — {html.escape(outfit)}' if outfit and outfit != _NO_OUTFIT else "")
+               + (f' · 📌 profile for {html.escape(profile)}' if profile else "") + "</p>"
                + (f'<p style="color:#f9e2af;font-size:13px;margin:2px 0;">⚠ {html.escape("; ".join(notes))}</p>'
                   if notes else ""))
         return (model, vae, *lora_vals, prompt, negative, g("width"), g("height"), g("cfg"), g("steps"),
                 g("scheduler") if card.get("scheduler") in SCHEDULER_MAP else gr.update(),
-                g("clip_skip") if card.get("clip_skip") in (1, 2) else gr.update(), msg)
+                g("clip_skip") if card.get("clip_skip") in (1, 2) else gr.update(), *boost, msg)
 
     def _card_choices(value):
         from backend.character_cards import list_cards
@@ -3309,7 +3323,8 @@ def _build_generate_tab():
                 "loras": [{"file": Path(str(l)).name, "weight": wt} for l, wt in ((l1, w1), (l2, w2), (l3, w3))
                           if l and l != "none"],
                 "tags": prompt or "", "outfits": old.get("outfits") or {}, "negative": neg or "",
-                "width": w, "height": h, "cfg": cfg, "steps": steps, "scheduler": sched, "clip_skip": cs}
+                "width": w, "height": h, "cfg": cfg, "steps": steps, "scheduler": sched, "clip_skip": cs,
+                "profiles": old.get("profiles") or {}}
         try:
             save_card(card)
         except (OSError, ValueError) as e:
@@ -3318,6 +3333,30 @@ def _build_generate_tab():
         return (_card_choices(n), gr.update(choices=outs, value=_NO_OUTFIT),
                 f'<p style="color:#a6e3a1;font-size:13px;">💾 Saved card <b>{html.escape(n)}</b> (the whole '
                 f'prompt is its tags; outfits kept). Edit settings/characters/{html.escape(n)}.json to fine-tune.</p>')
+
+    def do_card_profile(name, model, vae, l1, w1, l2, w2, l3, w3, neg, w, h, cfg, steps, sched, cs,
+                        pag, freeu, rescale, fd_on, fd_den, hd_on, hd_den):
+        """Remember the current LoRA weights, settings and boosters as the card's profile for the selected
+        checkpoint (🎴 Load applies it whenever that checkpoint is selected)."""
+        from backend.character_cards import load_card, save_card
+        card = load_card(name) if name and name != "(none)" else None
+        if not card:
+            return '<p style="color:#f9e2af;font-size:13px;">⚠ Pick a card first.</p>'
+        if not (model and Path(str(model)).is_file()):
+            return '<p style="color:#f9e2af;font-size:13px;">⚠ Select the checkpoint this profile is for first.</p>'
+        key = Path(str(model)).name
+        card["profiles"] = {**(card.get("profiles") or {}), key: {
+            "loras": [{"file": Path(str(l)).name, "weight": wt} for l, wt in ((l1, w1), (l2, w2), (l3, w3)) if l and l != "none"],
+            "vae": Path(str(vae)).name if vae and vae != "none" and Path(str(vae)).is_file() else None,
+            "negative": neg or "", "width": w, "height": h, "cfg": cfg, "steps": steps, "scheduler": sched,
+            "clip_skip": cs, "pag": pag or 0.0, "freeu": bool(freeu), "cfg_rescale": rescale or 0.0,
+            "face_detail": (fd_den or 0.0) if fd_on else 0.0, "hand_detail": (hd_den or 0.0) if hd_on else 0.0}}
+        try:
+            save_card(card)
+        except (OSError, ValueError) as e:
+            return f'<p style="color:#f38ba8;font-size:13px;">❌ {html.escape(str(e))}</p>'
+        return (f'<p style="color:#a6e3a1;font-size:13px;">📌 Saved the profile of <b>{html.escape(card["name"])}</b> for '
+                f'<b>{html.escape(key)}</b> — 🎴 Load applies it whenever this checkpoint is selected.</p>')
 
     def do_card_build(name, lora, weight, model):
         from backend.character_cards import card_from_lora, load_card, save_card, safe_name
@@ -3343,10 +3382,16 @@ def _build_generate_tab():
     card_dd.input(on_card_pick, [card_dd], [outfit_dd, card_name_txt, card_status])
     card_load_btn.click(
         do_card_load,
-        [card_dd, outfit_dd, card_scene_txt, neg_prompt_txt],
+        [card_dd, outfit_dd, card_scene_txt, neg_prompt_txt, model_dd],
         [model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3,
          prompt_txt, neg_prompt_txt, width_sl, height_sl, cfg_sl, steps_sl, scheduler_dd, clip_skip_rb,
-         card_status])
+         pag_sl, cfg_rescale_sl, freeu_cb, fd_cb, fd_denoise_sl, hd_cb, hd_denoise_sl, card_status])
+    card_profile_btn.click(
+        do_card_profile,
+        [card_dd, model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3,
+         neg_prompt_txt, width_sl, height_sl, cfg_sl, steps_sl, scheduler_dd, clip_skip_rb,
+         pag_sl, freeu_cb, cfg_rescale_sl, fd_cb, fd_denoise_sl, hd_cb, hd_denoise_sl],
+        [card_status])
     card_save_btn.click(
         do_card_save,
         [card_name_txt, model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3,
@@ -3467,32 +3512,40 @@ def _build_generate_tab():
             idx_path.write_text(_json.dumps(index, indent=1), encoding="utf-8")      # finished: forget the seed
         rows = (len(cells) + n_seeds - 1) // n_seeds
         n_real = len(cells)
+        # ⭐ rating (CPU, only the checks whose models are already cached): one face / ≤ 2 hands, the card's hair / eye
+        # colours and hair pin on the head crop (scene colour leaking into the eyes was the first thing to go), colour
+        # noise. Written onto the contact sheet; the pictures themselves stay clean.
+        scored, sheet_cells, looked = [], list(cells), False
+        try:
+            from backend import image_score as _is
+            can = _is.available()
+            if n_real and any(can.values()):
+                scored = _is.score_images(cells[:n_real], card.get("tags", ""))
+                sheet_cells = [_is.badge(c, r) for c, r in zip(cells, scored)]
+                looked = bool(can["look"] and _is.ic.traits(card.get("tags", "")))
+        except Exception as e:
+            print(f"[Score] skipped: {e}")
         while len(cells) % n_seeds:                     # stopped mid-row: pad with blanks (contact sheet only)
             cells.append(_I.new("RGB", cells[0].size, (30, 30, 46)))
+            sheet_cells.append(cells[-1])
         labels = [o or "(no outfit)" for o in outfits][:rows]      # rows follow the outfit order
-        sheet = _xy_grid(cells, [f"seed {s_}" for s_ in seeds], labels,
+        sheet = _xy_grid(sheet_cells, [f"seed {s_}" for s_ in seeds], labels,
                          f"{card['name']} · {len(labels)} outfit(s) × {n_seeds} seed(s)")
         spath = _unique_output(f"outfits_{safe_name(card['name']) or 'card'}_{int(time.time())}")
         sheet.save(spath)
         sheet.info["saved_path"] = str(spath)
         shown = [sheet] + cells[:n_real]
-        # off-model check (WD14, CPU, only when its model is already cached): does every image still show the hair /
-        # eye colours the card names? Scene colour leaking into the eyes was the first thing to go (measured).
         ident = ""
-        try:
-            from backend import identity_check as _ic
-            if n_real and _ic.traits(card.get("tags", "")) and _ic.available():
-                res = _ic.check(cells[:n_real], card.get("tags", ""))
-                bad = [(outfits[i // n_seeds] or card["name"], cell_seeds[i], r["flags"]) for i, r in enumerate(res)
-                       if r.get("flags") and i < len(cell_seeds)]
-                if bad:
-                    ident = ('<br><span style="color:#f9e2af;">⚠ possibly off-model (WD14 does not see the card’s colours): '
-                             + "; ".join(f'{html.escape(str(o))} · seed {s_} ({html.escape(", ".join(f))})' for o, s_, f in bad[:8])
-                             + (f" … and {len(bad) - 8} more" if len(bad) > 8 else "") + "</span>")
-                else:
-                    ident = f"<br>✅ hair / eye colours match the card in all {n_real} image(s) (WD14)"
-        except Exception as e:
-            print(f"[Identity] check skipped: {e}")
+        if scored:
+            bad = [(outfits[i // n_seeds] or card["name"], cell_seeds[i], r["flags"]) for i, r in enumerate(scored)
+                   if r["flags"] and i < len(cell_seeds)]
+            ident = f"<br>⭐ {sum(r['stars'] for r in scored) / len(scored):.1f}/5 on average"
+            if bad:
+                ident += ('<br><span style="color:#f9e2af;">⚠ possibly off-model or damaged: '
+                          + "; ".join(f'{html.escape(str(o))} · seed {s_} ({html.escape(", ".join(f))})' for o, s_, f in bad[:8])
+                          + (f" … and {len(bad) - 8} more" if len(bad) > 8 else "") + "</span>")
+            elif looked:
+                ident += f"<br>✅ hair / eye colours match the card in all {n_real} image(s) (WD14)"
         msg = (f'<p style="color:#a6e3a1;font-size:13px;">🎴 {html.escape(card["name"])}: {made} new + {reused} '
                f'reused image(s) in {_fmt_elapsed(time.time() - t0)} — contact sheet {spath.name}'
                + (" (stopped early)" if _generation_abort.is_set() else "") + ident + "</p>")
@@ -3868,6 +3921,12 @@ def _build_bridge_tab():
             if tag_notes:
                 status += ('<p style="color:#89b4fa;font-size:13px;">🧬 LoRA tags from the prompt: '
                            + " · ".join(tag_notes) + "</p>")
+            # stage 2 runs on whatever LoRAs the resident SDXL model has from the Generate tab (round 3, F5)
+            xl_loras = [str(v[0]) for _, v in sorted(_sdxl._lora_adapters.items())] if s2_imgs else []
+            if xl_loras:
+                status += ('<p style="color:#f9e2af;font-size:13px;">ℹ Stage 2 used the SDXL LoRAs still applied from '
+                           'the Generate tab: ' + html.escape(", ".join(xl_loras))
+                           + " — clear them there for a plain SDXL refine.</p>")
             return base_image, refined, all_imgs, status
 
         br_event = br_run_btn.click(
@@ -3998,13 +4057,9 @@ def _build_upscale_tab():
                 except Exception as e:
                     detail_note = (f'<br><span style="color:#f38ba8;">✨ SD detail pass failed: '
                                    f'{html.escape(str(e).splitlines()[0][:160] if str(e) else type(e).__name__)}</span>')
-        # Auto-save, keeping the source's generation parameters (if any) in the PNG
-        from PIL.PngImagePlugin import PngInfo
-        meta = PngInfo()
+        # Auto-save, keeping the source's generation settings (A1111 text + our record) in the PNG
         src_info = getattr(image, "info", {}) or {}
-        params = src_info.get("parameters")
-        if params:
-            meta.add_text("parameters", f"{params}\nUpscaled: {int(scale)}× {method}")
+        meta = _carry_params(image, f"Upscaled: {int(scale)}× {method}")
         # Name it after the generated source when known: 1790…_seed42_0_4x.png
         src = src_info.get("saved_path")
         base = f"{Path(src).stem}_{int(scale)}x" if src else f"upscale_{int(time.time())}"
@@ -4018,7 +4073,6 @@ def _build_upscale_tab():
 
     def do_upscale_folder(folder, scale, method, progress=gr.Progress()):
         from PIL import Image as _Image
-        from PIL.PngImagePlugin import PngInfo
         src = Path(str(folder or "").strip().strip('"'))
         if not str(folder or "").strip() or not src.is_dir():
             return '<p style="color:#f38ba8;">❌ Enter an existing folder.</p>'
@@ -4034,15 +4088,12 @@ def _build_upscale_tab():
             try:
                 with _Image.open(f) as im:
                     im.load()
-                    params = im.info.get("parameters")
+                    meta = _carry_params(im, f"Upscaled: {scale}× {method}")
                     img = im.convert("RGB")
                 if img.width * img.height * scale * scale > 64_000_000:
                     skipped.append(f"{f.name} (too large)")
                     continue
                 out, _ = upscaler.upscale(img, scale, method)
-                meta = PngInfo()
-                if params:
-                    meta.add_text("parameters", f"{params}\nUpscaled: {scale}× {method}")
                 target = dest / f"{f.stem}_{scale}x.png"
                 n = 1
                 while target.exists():

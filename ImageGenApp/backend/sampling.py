@@ -98,6 +98,51 @@ def _use_ays(scheduler, xl: bool):
     scheduler._ays = True
 
 
+# ── LMS / PNDM: lower order at the end ────────────────────────────────────────
+# Both are 4th-order Adams–Bashforth methods, stable only while a step shrinks sigma by less than ~30 %.
+# Every schedule ends with bigger ones (sigma 0.24 → 0.04 → 0, whatever the step count), where the
+# noise in the UNet's predictions is amplified ~20× (toy model: ×21 against Euler). On SDXL that gave
+# latents of ±6 instead of ±3.6 from the second-to-last step on and iridescent speckles on eyes, hair and
+# fabrics (2026-10-01; the fp32 VAE decoded exactly the same speckles, so the decoder was never the cause).
+# Like DPM-Solver's lower_order_final the last steps drop to order 3, 2, 1. The start does too: img2img
+# began at order 4 on a one-entry history (diffusers weighted that single derivative with order-4 coefficients).
+# On SDXL-family models that is not enough (2026-10-02, a NoobAI checkpoint: LMS and PNDM were still iridescent — violet eyes,
+# rainbow glints on pins and fabrics — with latents of normal size, so it is hue noise from the order-3/4 steps in the
+# middle of the schedule, not the blow-up of the last steps; Euler, AYS and LMS at order 2 for all steps were clean on
+# the same seed, order 3 was not). SDXL-family pipelines therefore never go above order 2; SD 1.5 keeps 4.
+def _lms_lower_order(sched, max_order: int = 4) -> None:
+    orig = sched.step
+
+    def step(model_output, timestep, sample, order=4, return_dict=True):
+        if sched.step_index is None:
+            sched._init_step_index(timestep)
+        left = len(sched.timesteps) - sched.step_index        # steps still to take, this one included
+        order = max(1, min(int(order), max_order, left, len(sched.derivatives) + 1))
+        return orig(model_output, timestep, sample, order=order, return_dict=return_dict)
+
+    sched.step = step
+
+
+def _plms_lower_order(sched, max_order: int = 4) -> None:
+    orig = sched.step_plms
+
+    def step_plms(model_output, timestep, sample, return_dict=True):
+        k = int((sched.timesteps <= timestep).sum())          # steps still to take, this one included
+        use = min(k, max_order)                               # the order this step runs at
+        if sched.counter >= 2 and use < 4:                    # (the first two steps are PLMS's own start-up)
+            if use > 1:
+                sched.ets = sched.ets[-(use - 1):]            # one more is appended inside: `use` in all
+            else:                                             # order 1 = the plain prediction, as in the first step
+                counter, sched.ets, sched.counter = sched.counter, [], 0
+                try:
+                    return orig(model_output, timestep, sample, return_dict)
+                finally:
+                    sched.counter = counter + 1
+        return orig(model_output, timestep, sample, return_dict)
+
+    sched.step_plms = step_plms
+
+
 def make_scheduler(pipe, name: str):
     """A fresh scheduler for `name` from the pipeline's config (keeps its prediction type)."""
     import diffusers
@@ -127,8 +172,13 @@ def make_scheduler(pipe, name: str):
         print(f"[Sampler] {name} unavailable ({e}); using DPM++ 2M Karras. Re-run install.bat to add it.")
         FALLBACKS[name] = "DPM++ 2M Karras"          # records name the sampler that really ran (F-31)
         return make_scheduler(pipe, "DPM++ 2M Karras")
+    xl = hasattr(pipe, "text_encoder_2")
     if ays:
-        _use_ays(sched, xl=hasattr(pipe, "text_encoder_2"))
+        _use_ays(sched, xl=xl)
+    if cls_name == "LMSDiscreteScheduler":
+        _lms_lower_order(sched, 2 if xl else 4)
+    elif cls_name == "PNDMScheduler":
+        _plms_lower_order(sched, 2 if xl else 4)
     return sched
 
 

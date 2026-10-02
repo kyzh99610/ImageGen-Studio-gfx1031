@@ -897,6 +897,36 @@ def _():
     assert "isn't a valid" in safetensors_problem(junk)
 
 
+@test("Checkpoint load preflight: too little free Windows commit → a plain refusal (not a crash in safetensors), enough → the load goes on")
+def _():
+    import tempfile
+    from unittest.mock import patch
+    from backend import model_manager as MM
+    tmp = Path(tempfile.mkdtemp())
+    f = tmp / "big.safetensors"
+    f.write_bytes(b"\0" * (4 << 20))                          # 4 MB stands in for a 6.6 GB checkpoint (need = 2.0 × its size)
+    assert MM.commit_problem(str(tmp / "missing.safetensors")) is None and MM.commit_problem("org/repo") is None
+    with patch.object(MM, "avail_commit_gb", return_value=0.001):
+        msg = MM.commit_problem(str(f))
+        assert msg and "big.safetensors" in msg and "free commit" in msg and "page file" in msg, msg
+    with patch.object(MM, "avail_commit_gb", return_value=100.0):
+        assert MM.commit_problem(str(f)) is None
+    with patch.object(MM, "avail_commit_gb", return_value=None):
+        assert MM.commit_problem(str(f)) is None              # unknown → never blocks
+    free = MM.avail_commit_gb()
+    assert free is None or 0 < free < 4096, free               # the real Win32 call works on this machine
+    from backend.sdxl_pipeline import SDXLPipeline
+    from backend.sd_pipeline import SDPipeline
+    for cls in (SDXLPipeline, SDPipeline):                     # both refuse before they touch the file
+        sdp = cls()
+        with patch.object(MM, "avail_commit_gb", return_value=0.001):
+            r = sdp.load_model(str(f))
+        assert r.startswith("❌ Not enough free memory") and sdp.pipe is None, r
+        with patch.object(MM, "avail_commit_gb", return_value=100.0):
+            r2 = sdp.load_model(str(f))                        # zeros are no checkpoint: it fails later, not at the preflight
+        assert "Not enough free memory" not in r2 and r2.startswith("❌"), r2
+
+
 @test("PNG Info reads LoRAs from <lora:…> tags and our 'LoRAs:' field")
 def _():
     import app as _app
@@ -1711,6 +1741,76 @@ def _():
         cc.CARDS_DIR = old
 
 
+@test("Character card profiles: sanitised, picked by the selected checkpoint (name / stem / path, any case), laid over the card")
+def _():
+    from backend import character_cards as cc
+    card = cc.clean_card({"name": "P", "checkpoint": "a.safetensors", "loras": [{"file": "x.safetensors", "weight": 0.75}],
+                          "cfg": 6.0, "steps": 12, "scheduler": "DPM++ 2M AYS", "profiles": {
+        "C:\\m\\wai.safetensors": {"loras": [{"file": "y.safetensors", "weight": "0.6"}], "cfg": 5, "pag": 2, "freeu": True,
+                                   "face_detail": 0.05, "hand_detail": 9, "junk": 1},
+        "pony.safetensors": {"loras": []}, "bad": "x", "": {"cfg": 5}, "empty.safetensors": {"cfg": "nan"}}})
+    assert set(card["profiles"]) == {"wai.safetensors", "pony.safetensors"}, card["profiles"]
+    assert card["profiles"]["wai.safetensors"] == {"loras": [{"file": "y.safetensors", "weight": 0.6}], "cfg": 5.0, "pag": 2.0,
+                                                   "freeu": True, "face_detail": 0.1}, card["profiles"]   # 9 is out of range; 0.05 → slider minimum
+    assert card["profiles"]["pony.safetensors"] == {"loras": []}
+    eff, key = cc.card_for_checkpoint(card, r"D:\models\checkpoints\WAI.safetensors")
+    assert key == "wai.safetensors" and eff["cfg"] == 5.0 and eff["steps"] == 12 and "profiles" not in eff, eff
+    assert eff["loras"] == [{"file": "y.safetensors", "weight": 0.6}] and eff["checkpoint"] == "wai.safetensors"
+    assert cc.card_for_checkpoint(card, "pony")[1] == "pony.safetensors"                         # by stem
+    eff, key = cc.card_for_checkpoint(card, "other.safetensors")
+    assert key is None and eff is card
+    assert cc.card_for_checkpoint(card, None)[1] is None and cc.card_for_checkpoint({"name": "q"}, "a")[1] is None
+    assert "profiles" not in cc.clean_card({"name": "n", "profiles": "x"})
+
+
+@test("🎴 Load applies the card's profile for the selected checkpoint (settings + boosters, checkpoint kept), 📌 saves one, Save keeps them")
+def _():
+    import app as _app
+    import backend.character_cards as CC
+    tmp = Path(_tf.mkdtemp())
+    old = CC.CARDS_DIR
+    try:
+        CC.CARDS_DIR = tmp / "cards"
+        CC.CARDS_DIR.mkdir()
+        (CC.CARDS_DIR / "G.json").write_text(json.dumps({
+            "name": "G", "checkpoint": "base.safetensors", "tags": "1girl", "cfg": 6.0, "steps": 12, "scheduler": "Euler a",
+            "loras": [{"file": "l.safetensors", "weight": 0.7}],
+            "profiles": {"wai.safetensors": {"cfg": 4.5, "steps": 20, "scheduler": "DPM++ 2M Karras", "pag": 2.0, "freeu": True,
+                                             "face_detail": 0.35, "hand_detail": 0.0, "loras": []}}}), encoding="utf-8")
+        by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+        fn = lambda n: getattr(by[n].fn, "__wrapped__", by[n].fn)
+        with patch("backend.model_manager.list_checkpoints", return_value=[("base.safetensors", "/m/base.safetensors"),
+                                                                           ("wai.safetensors", "/m/wai.safetensors")]), \
+             patch("backend.model_manager.list_loras", return_value=[("l.safetensors", "/m/l.safetensors")]), \
+             patch("backend.model_manager.list_vaes", return_value=[]):
+            out = fn("do_card_load")("G", "(no outfit tags)", "", "", "/m/wai.safetensors")
+            assert len(out) == 24, len(out)
+            assert out[0].get("__type__") == "update" and out[2] == "none"                         # checkpoint kept, profile has no LoRA
+            assert (out[12], out[13]) == (4.5, 20) and out[14] == "DPM++ 2M Karras", out[12:15]
+            assert (out[16], out[18], out[19], out[20], out[21]) == (2.0, True, True, 0.35, False), out[16:23]
+            assert "profile for wai.safetensors" in out[23]
+            out = fn("do_card_load")("G", "(no outfit tags)", "", "", "/m/base.safetensors")      # no profile for this one: the card
+            assert out[0] == "/m/base.safetensors" and out[2] == "/m/l.safetensors" and out[3] == 0.7
+            assert (out[12], out[13], out[14]) == (6.0, 12, "Euler a") and out[16].get("__type__") == "update" and "profile" not in out[23]
+        # 📌 Save as this checkpoint's profile, then 💾 Save current setup must keep the profiles
+        ck, lo = tmp / "sdxl.safetensors", tmp / "l.safetensors"
+        ck.write_bytes(b"x")
+        lo.write_bytes(b"x")
+        msg = fn("do_card_profile")("G", str(ck), "none", str(lo), 0.6, "none", 0.7, "none", 0.7, "bad hands", 832, 1216, 5.0, 12,
+                                    "DPM++ 2M AYS", 1, 2.0, False, 0.5, True, 0.35, False, 0.35)
+        assert "📌 Saved" in msg, msg
+        prof = CC.load_card("G")["profiles"]["sdxl.safetensors"]
+        assert prof["loras"] == [{"file": "l.safetensors", "weight": 0.6}] and prof["cfg"] == 5.0 and prof["pag"] == 2.0, prof
+        assert (prof["cfg_rescale"], prof["face_detail"], prof["hand_detail"], prof["freeu"]) == (0.5, 0.35, 0.0, False), prof
+        assert "Pick a card" in fn("do_card_profile")("(none)", str(ck), "none", "none", 0.7, "none", 0.7, "none", 0.7, "", 832, 1216,
+                                                      5.0, 12, "Euler a", 1, 0.0, False, 0.0, False, 0.35, False, 0.35)
+        fn("do_card_save")("G", str(ck), "none", "none", 0.7, "none", 0.7, "none", 0.7, "1girl, solo", "bad", 832, 1216, 6.0, 12,
+                           "Euler a", 1)
+        assert set(CC.load_card("G")["profiles"]) == {"wai.safetensors", "sdxl.safetensors"}
+    finally:
+        CC.CARDS_DIR = old
+
+
 @test("WD14 tagger: input prep (white pad, BGR, NHWC), thresholds, rating kept apart, tag text")
 def _():
     import numpy as np
@@ -1997,6 +2097,44 @@ def _():
     assert "PAG scale" in _app._XY_AXES and _app._xy_values("PAG scale", "0, 2.5") == ([0.0, 2.5], "")
 
 
+@test("Upscale tab (single image and folder) keeps the source's imagegen record, not only the A1111 text")
+def _():
+    import app as _app
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    tmp = Path(_tf.mkdtemp())
+    rec = json.dumps({"app": "ImageGen Studio", "format": 2, "mode": "txt2img", "seed": 7, "scheduler": "DPM++ 2M AYS"})
+    meta = PngInfo()
+    meta.add_text("parameters", "1girl\nSteps: 12, Seed: 7")
+    meta.add_itxt("imagegen", rec)
+    src_dir = tmp / "in"
+    src_dir.mkdir()
+    Image.new("RGB", (16, 24), (200, 30, 30)).save(src_dir / "a.png", pnginfo=meta)
+    Image.new("RGB", (16, 24)).save(src_dir / "plain.png")                   # no metadata at all: nothing to carry, no crash
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    fn = lambda n: getattr(by[n].fn, "__wrapped__", by[n].fn)
+    quiet = lambda *a, **k: None
+    o = _app.OUTPUTS_DIR
+    try:
+        _app.OUTPUTS_DIR = tmp / "out"
+        with Image.open(src_dir / "a.png") as im:
+            im.load()
+            out, _msg = fn("do_upscale")(im, 2, "Lanczos", False, 0.3, progress=quiet)
+        assert out.size == (32, 48), out.size
+        [saved] = list((tmp / "out").glob("*.png"))
+        with Image.open(saved) as r:
+            assert json.loads(r.info["imagegen"]) == json.loads(rec), r.info
+            assert r.info["parameters"] == "1girl\nSteps: 12, Seed: 7\nUpscaled: 2× Lanczos", r.info["parameters"]
+        msg = fn("do_upscale_folder")(str(src_dir), 2, "Lanczos", progress=quiet)
+        assert "Upscaled 2 of 2" in msg, msg
+        with Image.open(tmp / "out" / "upscaled_in" / "a_2x.png") as r:
+            assert json.loads(r.info["imagegen"]) == json.loads(rec) and r.info["parameters"].endswith("Upscaled: 2× Lanczos"), r.info
+        with Image.open(tmp / "out" / "upscaled_in" / "plain_2x.png") as r:
+            assert "imagegen" not in r.info and "parameters" not in r.info, r.info
+    finally:
+        _app.OUTPUTS_DIR = o
+
+
 @test("Danbooru tags: autocomplete by popularity, near-miss hints, one-click fixes keep weights")
 def _():
     from backend import danbooru_tags as dt
@@ -2233,6 +2371,26 @@ def _():
         assert seen["scheduler"] == "DPM++ 2M", seen
     finally:
         dt.inpaint_region, dt.detect_faces = orig_inp, orig_df
+    # the 🖌 Inpaint button too: AYS 12 at 0.95 started at sigma 7.4 and couldn't recolour a garment (round 3, F4)
+    import backend.sd_pipeline as _sdp_mod
+
+    class _Stop(Exception):
+        pass
+    got = []
+    orig_ls = _sdp_mod._load_scheduler
+    unet = object()
+    fake = type("S", (), {"pipe": type("P", (), {"unet": unet})(), "is_sdxl": False, "dtype": None, "device": "cpu"})()
+    fake._inpaint_pipe = type("I", (), {"unet": unet})()
+    try:
+        _sdp_mod._load_scheduler = lambda pipe, name: (got.append(name), (_ for _ in ()).throw(_Stop()))
+        m = Image.new("L", (64, 64)); m.paste(255, (16, 16, 48, 48))
+        try:
+            dt.inpaint_region(fake, Image.new("RGB", (64, 64)), m, "x", scheduler="DPM++ 2M AYS")
+        except _Stop:
+            pass
+        assert got == ["DPM++ 2M"], got
+    finally:
+        _sdp_mod._load_scheduler = orig_ls
     ex = _app._clean_extra(dict(hd_on=1, hd_denoise=5))
     assert ex["hd_on"] is True and ex["hd_denoise"] == 0.7
     assert _app._clean_extra({})["hd_denoise"] == 0.35
@@ -2475,6 +2633,87 @@ def _():
     for steps in (1, 2, 3):
         gen(scheduler="PNDM", steps=steps)
 
+
+
+@test("LMS / PNDM end at a lower order (4th-order Adams–Bashforth blew up SDXL pictures), never exceed order 2 on SDXL-family pipelines (a NoobAI checkpoint), img2img starts at order 1; model noise is no longer amplified ~20×")
+def _():
+    import torch
+    from diffusers import EulerDiscreteScheduler, LMSDiscreteScheduler, PNDMScheduler
+    from backend.sampling import make_scheduler
+    # SDXL's own scheduler config (what make_scheduler starts from)
+    cfg = dict(num_train_timesteps=1000, beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear",
+               prediction_type="epsilon", timestep_spacing="leading", steps_offset=1)
+
+    class Pipe:                                  # SD 1.5-like: no second text encoder
+        scheduler = EulerDiscreteScheduler.from_config(cfg)
+
+    class PipeXL(Pipe):                          # SDXL family (also Pony / Illustrious / NoobAI)
+        text_encoder_2 = object()
+
+    def run(sched, steps, noise, seed, vp, n=256, begin=None, keep=None):
+        """A perfect denoiser (x0 = 0) whose eps prediction carries `noise`; keep(sched) records scheduler state per step."""
+        sched.set_timesteps(steps)
+        if begin is not None:
+            sched.set_begin_index(begin)
+        g, gn = torch.Generator().manual_seed(seed), torch.Generator().manual_seed(seed + 1000)
+        x = torch.randn(1, n, generator=g) * (1.0 if vp else sched.init_noise_sigma)
+        for t in (sched.timesteps if begin is None else sched.timesteps[begin:]):
+            if vp:
+                eps = x / (1 - sched.alphas_cumprod[int(t)]) ** 0.5
+            else:
+                sched.scale_model_input(x, t)
+                eps = x / sched.sigmas[sched.step_index]
+            x = sched.step(eps + noise * torch.randn(1, n, generator=gn), t, x, return_dict=False)[0]
+            if keep:
+                keep(sched)
+        return x
+
+    def err(make, steps, vp):                    # distance of the noisy run's result to the noise-free one, mean over seeds
+        return sum(float((run(make(), steps, 0.05, s, vp) - run(make(), steps, 0.0, s, vp)).abs().mean()) for s in range(4)) / 4
+
+    # the order drops to 3, 2, 1 for the last three steps (and builds up 1, 2, 3, 4 at the start)
+    orders, orig_coeff = [], LMSDiscreteScheduler.get_lms_coefficient
+
+    def spy(self, order, t, current_order):
+        if current_order == 0:
+            orders.append(order)
+        return orig_coeff(self, order, t, current_order)
+    with patch.object(LMSDiscreteScheduler, "get_lms_coefficient", spy):
+        run(make_scheduler(Pipe, "LMS"), 20, 0.0, 0, False)
+    assert orders == [1, 2, 3] + [4] * 14 + [3, 2, 1], orders
+    seen = []
+    run(make_scheduler(Pipe, "PNDM"), 20, 0.0, 0, True, keep=lambda s: seen.append(len(s.ets)))
+    assert seen == [1, 1, 2, 3] + [4] * 14 + [3, 2, 1], seen
+    # img2img: the first step has one derivative, so it must be a plain Euler step (diffusers used order-4 weights)
+    s = make_scheduler(Pipe, "LMS")
+    s.set_timesteps(20)
+    s.set_begin_index(8)
+    x = torch.randn(1, 16)
+    eps = torch.randn(1, 16)
+    t = s.timesteps[8]
+    s.scale_model_input(x, t)
+    sig, nxt = float(s.sigmas[8]), float(s.sigmas[9])
+    assert torch.allclose(s.step(eps, t, x, return_dict=False)[0], x + eps * (nxt - sig), atol=1e-5)
+    # noise amplification (toy model: the plain classes amplify the model's noise ~20×; Euler is the reference)
+    e_euler = err(lambda: EulerDiscreteScheduler.from_config(cfg), 20, False)
+    e_plain = err(lambda: LMSDiscreteScheduler.from_config(cfg), 20, False)
+    e_fixed = err(lambda: make_scheduler(Pipe, "LMS"), 20, False)
+    assert e_plain > 8 * e_euler, (e_plain, e_euler)             # the problem is real in this toy …
+    assert e_fixed < 1.5 * e_euler, (e_fixed, e_euler)           # … and gone
+    p_plain = err(lambda: PNDMScheduler.from_config(dict(cfg, skip_prk_steps=True)), 20, True)
+    p_fixed = err(lambda: make_scheduler(Pipe, "PNDM"), 20, True)
+    assert p_fixed < 0.75 * p_plain, (p_fixed, p_plain)
+    # SDXL family: order 3 / 4 steps in the middle of the schedule gave iridescent hue noise on a NoobAI checkpoint even with a clean
+    # ending (violet eyes, rainbow glints; order 2 for all steps was clean) → never above 2, still 1 at the first / last step
+    orders.clear()
+    with patch.object(LMSDiscreteScheduler, "get_lms_coefficient", spy):
+        run(make_scheduler(PipeXL, "LMS"), 20, 0.0, 0, False)
+    assert orders == [1] + [2] * 18 + [1], orders
+    seen = []
+    run(make_scheduler(PipeXL, "PNDM"), 20, 0.0, 0, True, keep=lambda s: seen.append(len(s.ets)))
+    assert seen == [1, 1] + [2] * 18 + [1], seen
+    assert err(lambda: make_scheduler(PipeXL, "LMS"), 20, False) < 1.5 * e_euler
+    assert err(lambda: make_scheduler(PipeXL, "PNDM"), 20, True) < 0.75 * p_plain
 
 
 @test("LoRA on a tiny CPU pipeline through diffusers + PEFT: apply / re-weight / remove / unload restore bit-exactly")
@@ -2791,26 +3030,76 @@ def _():
     assert res[0]["flags"] == [] and sorted(res[1]["flags"]) == ["grey hair 0.20", "red eyes 0.05"], res
 
 
+@test("⭐ score: accessory tags from a card, head crop, anatomy / look / noise flags cost stars, the badge is drawn")
+def _():
+    from PIL import Image
+    from backend import image_score as S
+    acc = S.accessories("1girl, (black butterfly hair ornament:1.2), red eyes, hair ornament, hairclip, red hair bow, smile")
+    assert acc == [("black butterfly hair ornament", ["black_butterfly_hair_ornament", "butterfly_hair_ornament"]),
+                   ("hair ornament", ["hair_ornament"]), ("hairclip", ["hairclip"]), ("red hair bow", ["red_hair_bow"])], acc
+    assert S.accessories("1girl, red eyes") == []
+    im = Image.new("RGB", (832, 1216))
+    assert S.head_crop(im, (100, 100, 200, 200)).size == (240, 240)                          # 2.4 face widths, centred
+    assert S.head_crop(im, (0, 0, 100, 100)).size == (240, 240) and S.head_crop(im, (700, 1100, 832, 1216)).size == (316, 316)
+    tags = "1girl, red eyes, grey hair, black butterfly hair ornament, red hair bow"
+    box = [(300, 200, 420, 320)]
+    good = {"grey_hair": 0.9, "red_eyes": 0.9, "butterfly_hair_ornament": 0.9}
+    cases = {                                        # name: (faces, hands, WD14 probabilities of the head crop, speck share)
+        "ok": (box, [], good, 0.0),
+        "no face": ([], [], good, 0.0),
+        "two faces": (box * 2, [], good, 0.0),
+        "hands": (box, [1, 2, 3], good, 0.0),
+        "off": (box, [], {"grey_hair": 0.9, "red_eyes": 0.1, "butterfly_hair_ornament": 0.2}, 0.0),
+        "noise": (box, [], good, 0.002),
+        "wreck": ([], [1, 2, 3], {"grey_hair": 0.1, "red_eyes": 0.1, "butterfly_hair_ornament": 0.1}, 0.002),
+    }
+    by = {name: S.score_images([im], tags, probs_fn=lambda c, p=pr: p, faces_fn=lambda i, f=fc: f, hands_fn=lambda i, h=hd: h,
+                               speck_fn=lambda i, s=sp: s)[0] for name, (fc, hd, pr, sp) in cases.items()}
+    assert by["ok"] == {"stars": 5, "flags": []}
+    assert by["off"] == {"stars": 3, "flags": ["red eyes 0.10", "no black butterfly hair ornament 0.20"]}, by["off"]
+    assert by["no face"]["stars"] == 3 and by["no face"]["flags"] == ["no face found"]
+    assert by["two faces"]["stars"] == 4 and by["two faces"]["flags"] == ["2 faces"]
+    assert by["hands"]["stars"] == 4 and by["hands"]["flags"] == ["3 hands"]
+    assert by["noise"]["stars"] == 4 and by["noise"]["flags"] == ["colour noise"]
+    assert by["wreck"]["stars"] == 1 and "no face found" in by["wreck"]["flags"]
+    # the probabilities come from the head crop (2.4 face widths); a tag WD14 doesn't know ("red hair bow") is never held against the picture
+    heads = []
+    S.score_images([im], tags, probs_fn=lambda c: heads.append(c.size) or good, faces_fn=lambda i: box, hands_fn=lambda i: [], speck_fn=None)
+    assert heads == [(288, 288)], heads
+    b = S.badge(Image.new("RGB", (200, 300), (128, 128, 128)), {"stars": 2, "flags": ["no face found"]})
+    assert b.size == (200, 300) and b.getpixel((2, 2)) != (128, 128, 128) and b.getpixel((190, 290)) == (128, 128, 128)
+    flat = Image.new("RGB", (300, 400), (180, 40, 40))                                        # a flat saturated picture is no speck
+    assert S.colour_specks(flat) == 0.0
+    spotty = Image.new("RGB", (300, 400), (200, 200, 200))
+    for x in range(10, 290, 20):
+        for y in range(10, 390, 20):
+            spotty.putpixel((x, y), (255, 0, 0))
+    assert 0 < S.colour_specks(spotty) < 0.01
+
+
 @test("Outfit batch: says which images WD14 doesn't see the card's colours in (and when all match)")
 def _():
     import re as _re
     from backend import identity_check as IC
-    saved = (IC.available, IC.probs)
+    from backend import image_score as IS
+    saved = (IC.available, IC.probs, IS.available)
     try:
         IC.available = lambda: True
+        IS.available = lambda: {"look": IC.available(), "faces": False, "hands": False}      # no detector models in the test
         # FakeSD paints (seed % 255, 40, 90): seed 12 is the off-model one
         IC.probs = lambda im: {"grey_hair": 0.9, "red_eyes": 0.05 if im.getpixel((0, 0))[0] == 12 else 0.9}
         with _BatchEnv() as E:
             msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11)[-1][1])
             assert "possibly off-model" in msg and "gown · seed 12 (red eyes 0.05)" in msg and "seed 11" not in msg, msg
+            assert "⭐ 4.5/5 on average" in msg, msg                                    # the three seed-12 images 4/5, the other three 5/5
             IC.probs = lambda im: {"grey_hair": 0.9, "red_eyes": 0.9}
             msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11)[-1][1])               # all reused: still checked
-            assert "match the card in all 6 image" in msg and "off-model" not in msg, msg
+            assert "match the card in all 6 image" in msg and "off-model" not in msg and "⭐ 5.0/5" in msg, msg
             IC.available = lambda: False                                                # model not cached: silent
             msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11)[-1][1])
-            assert "off-model" not in msg and "match the card" not in msg, msg
+            assert "off-model" not in msg and "match the card" not in msg and "⭐" not in msg, msg
     finally:
-        IC.available, IC.probs = saved
+        IC.available, IC.probs, IS.available = saved
 
 
 @test("Generate: 'Use img2img' with no image loaded says so instead of quietly making a text-to-image")
@@ -2827,7 +3116,7 @@ def _():
             assert ("no image is loaded" in _re.sub("<[^>]+>", " ", info)) == said, (use_i2i, info)
 
 
-@test("Generate: LMS / PNDM / Heun on an SDXL-family model get a warning (they garble SDXL pictures); other samplers and SD 1.5 don't")
+@test("Generate: PNDM / Heun on an SDXL-family model get the grain note (LMS / PNDM no longer garble since the lower-order fix); other samplers and SD 1.5 don't")
 def _():
     import re as _re
     with _BatchEnv() as E:
@@ -2839,9 +3128,10 @@ def _():
             imgs, info, _ = gen("1girl", "bad", sampler, 4, 6.0, 64, 64, 1, 5, None, 0.5, False,
                                 auto_quality=False, extra=None, progress=lambda *a, **k: None)
             assert len(imgs) == 1
-            return "garbles SDXL" in _re.sub("<[^>]+>", " ", info)
-        assert warned("illustrious", "PNDM") and warned("sdxl", "LMS") and warned("pony", "Heun")
-        assert not warned("illustrious", "Euler a") and not warned("sdxl", "UniPC") and not warned("sd15", "PNDM")
+            return "more grain" in _re.sub("<[^>]+>", " ", info)
+        assert warned("illustrious", "PNDM") and warned("pony", "Heun")
+        assert not warned("sdxl", "LMS") and not warned("illustrious", "Euler a") and not warned("sdxl", "UniPC")
+        assert not warned("sd15", "PNDM") and not warned("sd15", "Heun")
 
 
 @test("History index: text chunks only, refresh by mtime, search words / model / LoRA / favourites, thumbnails")
