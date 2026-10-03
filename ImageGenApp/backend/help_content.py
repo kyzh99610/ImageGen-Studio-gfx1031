@@ -327,10 +327,14 @@ def parameters_html() -> str:
              _cn("放大后用已加载模型分块低降噪重绘，超越高清修复的尺寸上限；降噪过高可能在分块里画出多余的脸。")],
             ["🖌 Inpaint",
              "Paint over any area and describe what should be there; only that area is redrawn, at native "
-             "resolution, with your model, LoRAs and seed. Good for small things (a hair pin at 0.9, an expression at "
-             "~0.5); it uses the evenly spaced version of your sampler so denoise means what it says. A whole outfit "
-             "recolour works better as same seed + edited prompt; 1.0 over a body-sized area draws a new person.",
-             _cn("涂抹要修改的区域并描述内容，仅重绘该区域。适合小物件（发饰约 0.9、表情约 0.5）；换整套衣服颜色请用同种子+改提示词。")],
+             "resolution, with your model, LoRAs and seed. Good for small things — measured: swapping a hair "
+             "ornament needs ~0.95 (0.9 leaves traces of the old shape, 0.75–0.8 gives a hybrid), an expression ~0.5 "
+             "deepens a smile and ~0.8 opens a closed mouth. It uses the evenly spaced version of your sampler so "
+             "denoise means what it says, but only int(steps × denoise) steps run: at 12 steps 0.75 and 0.8 (or 0.85 "
+             "and 0.9) are the same picture. A garment recolour can't be done this way (up to 0.95 the colour stays, "
+             "1.0 over a body-sized area draws a new figure) — use same seed + edited prompt.",
+             _cn("涂抹要修改的区域并描述内容，仅重绘该区域。适合小物件（换发饰约 0.95；表情约 0.5 微调、约 0.8 张嘴）；"
+                 "实际步数 = 步数×降噪（12 步时 0.75 与 0.8 结果相同）；换衣服颜色请用同种子+改提示词。")],
             ["⏩ DPM++ 2M AYS",
              "NVIDIA's Align-Your-Steps schedule: about the quality of 25 steps in 10–12. The Karras samplers "
              "really use Karras sigmas (as in A1111).",

@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 132-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 134-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 127 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 129 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -441,6 +441,23 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   weight 0.9 vs 0.75 and Euler a vs AYS 12 were not better on fresh paired seeds. Costs: weights ≥ 1.3 on eye tags, a
   non-native aspect (768×1344), CFG rescale ≥ 0.5, PAG 3. Variation strength 0.1 already moves the picture (|diff| ~25/255).
 
+### LoRA re-apply after a switch, offline LoRAs, commit factor, inpaint sweet spots (2026-10-02)
+- **LoRAs were not re-applied after a checkpoint switch** (since 2026-09-28): `app._ensure_model` puts the old LoRAs back with
+  `_reload_all_loras()` directly, but on a freshly loaded model the restore snapshot had never been started, so the call failed
+  (`'NoneType' object has no attribute 'has'`) and left unfused PEFT layers in the UNet; the next Generate's `_sync_loras`
+  papered over it. Both pipelines now start the snapshot there when it is missing.
+- **No LoRA loaded with `HF_HUB_OFFLINE=1`**: diffusers refuses to guess the `weight_name` of a local file offline; both
+  pipelines pass `weight_name=Path(path).name` (works online too).
+- **Commit factor for the first load of a process** 2.25 → **2.4** (measured 2.13–2.30× on 6.62 GB SDXL files; 2.25 let a
+  15.2–15.6 GB load start with 14.9 GB free). Later loads 1.17–1.95× (factor 2.05 stays). Same checkpoint + seed through every
+  route (Generate, cold load, switch, X/Y cell, batch): bit-identical (max 1/255).
+- **Inpaint sweet spots** (evenly spaced sampler): swapping a small object (a hair ornament) ~0.95 (0.9 can leave the old
+  outline), an expression 0.5 deepens a smile / 0.8 opens a mouth, a garment recolour can't be done (same seed + edited prompt).
+  Only `int(steps × denoise)` steps run, so at 12 steps 0.75 ≡ 0.8 and 0.85 ≡ 0.9. Pixels > 48 px outside the mask unchanged.
+- **Hard scenes:** the face pass helps in proportion to how small the face is — none at ≥ 25 % of the picture width, 0.35 is
+  enough for full body, 0.5–0.65 for a tiny figure in a wide shot; the hand pass only sharpens texture. Two character LoRAs in
+  one picture merge the characters (BREAK makes it worse); use the LoRA for one character and tags for the other.
+
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
 auto-quality tags: each tag once (key = lower-case, `_`→space, weight syntax removed), strongest weight wins,
@@ -674,6 +691,8 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
     → lower order at the end + never above order 2 on SDXL-family pipelines (2026-10-02).
 25. **SDXL checkpoint load killed the app (0xC0000005)** when Windows commit ran out → `commit_problem()` refuses with a message.
 26. **Upscale tab dropped the `imagegen` record** → `_carry_params()`.
+27. **LoRAs not re-applied after a checkpoint switch** (2026-09-28 → 10-02) → snapshot started in `_reload_all_loras` when missing.
+28. **No LoRA loaded with `HF_HUB_OFFLINE=1`** → `weight_name` passed to `load_lora_weights`.
 
 ## Troubleshooting
 
