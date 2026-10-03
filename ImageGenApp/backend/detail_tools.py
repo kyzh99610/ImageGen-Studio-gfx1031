@@ -354,11 +354,24 @@ def detect_faces(image: Image.Image, mode: str = "auto", max_faces: int = 4,
     return keep[: max(0, int(max_faces))]
 
 
+def size_aware_denoise(denoise: float, face_px: float) -> float:
+    """Face-pass denoise for a face `face_px` wide. Measured (round 4, SDXL 832×1216, 3 paired seeds): a ~50 px face
+    (wide shot, 6 % of the width) gained identity +2.0 at 0.35 but +2.6 at 0.65, a ~115 px face (full body) was as
+    good at 0.35 as at 0.65, and 0.8 turned a tiny face into somebody else. So small faces get at least 0.55 (≤ 60 px),
+    faces ≥ 110 px the slider's value, linear in between; never above max(slider, 0.65)."""
+    lo, hi, small = 60.0, 110.0, 0.55
+    if denoise >= small or face_px >= hi:
+        return denoise
+    want = small if face_px <= lo else small + (denoise - small) * (face_px - lo) / (hi - lo)
+    return round(min(max(denoise, 0.65), max(denoise, want)), 3)
+
+
 def face_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, denoise: float = 0.4,
                 steps: int = 20, cfg: float = 7.0, seed: int = -1, scheduler: str = "DPM++ 2M Karras",
                 clip_skip: int = 1, mode: str = "auto", face_prompt: str = "", max_faces: int = 4,
-                step_callback=None) -> tuple[Image.Image, int]:
-    """Re-draw each detected face at native resolution. Returns (image, faces fixed)."""
+                size_aware: bool = True, step_callback=None) -> tuple[Image.Image, int]:
+    """Re-draw each detected face at native resolution. Returns (image, faces fixed).
+    size_aware: tiny faces get a higher denoise (`size_aware_denoise`); the slider is the value for normal faces."""
     faces = detect_faces(image, mode, max_faces)
     if not faces:
         return image, 0
@@ -373,7 +386,8 @@ def face_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, den
         mask = Image.new("L", (W, H), 0)
         ImageDraw.Draw(mask).ellipse([x1 - mx, y1 - my, x2 + mx, y2 + my], fill=255)
         p = f"{prompt}, {face_prompt}" if face_prompt else prompt
-        out, _ = inpaint_region(sdp, out, mask, p, negative, steps=steps, cfg=cfg, denoise=denoise,
+        den = size_aware_denoise(denoise, fw) if size_aware else denoise
+        out, _ = inpaint_region(sdp, out, mask, p, negative, steps=steps, cfg=cfg, denoise=den,
                                 seed=(seed + n) % 2**32 if seed is not None and seed >= 0 else -1,
                                 scheduler=scheduler, clip_skip=clip_skip, padding=int(max(fw, fh) * 0.5),
                                 min_context=0, feather=max(3, fw // 20), step_callback=step_callback)
