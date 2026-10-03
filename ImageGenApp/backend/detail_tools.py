@@ -38,6 +38,13 @@ _HAND_REPO, _HAND_FILE = "deepghs/anime_hand_detection", "hand_detect_v1.0_s/mod
 _HAND_SHA256 = "408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0"
 _HAND_CONF = 0.45
 _hand_yolo = {}
+# deepghs anime eye detector (YOLOv8s, OpenRAIL, 44.6 MB ONNX). Run on the face crop, not the whole picture: on a
+# full-body 1664×2432 picture it found one eye of two, on the face crop both (scores 0.63–0.78 on a test character's eyes).
+_EYE_REPO, _EYE_FILE = "deepghs/anime_eye_detection", "eye_detect_v1.0_s/model.onnx"
+_EYE_SHA256 = "7c5f0259103cc407e2a0f0b047a51271246b9525d27920315295a54367c5c583"
+_EYE_LOCAL = MODELS_DIR / "detectors" / "anime_eye_detect_v1.0_s.onnx"
+_EYE_CONF = 0.4
+_eye_yolo = {}
 _cascades: dict = {}
 
 
@@ -219,8 +226,9 @@ def _confirm_hits(image: Image.Image, box, kind: str) -> int:
                if bx1 <= x + w / 2 <= bx2 and by1 <= y + h / 2 <= by2)
 
 
-def _onnx_session(cache: dict, repo: str, file: str, sha256: str, what: str, fallback: str):
-    """An ONNX detector from the HF hub (downloaded once, checksum-checked, ORT CPU), or None."""
+def _onnx_session(cache: dict, repo: str, file: str, sha256: str, what: str, fallback: str, local: Path | None = None):
+    """An ONNX detector from the HF hub (downloaded once, checksum-checked, ORT CPU), or None.
+    `local`: a copy placed in models/detectors/ by hand is used first when its checksum matches."""
     import time
     # a failed download is retried after 5 minutes (it used to stay off until a restart, and the
     # hand pass then said "no hands found"; audit F-18)
@@ -228,8 +236,12 @@ def _onnx_session(cache: dict, repo: str, file: str, sha256: str, what: str, fal
         return cache["sess"]
     sess = None
     try:
-        from huggingface_hub import hf_hub_download
-        path = hf_hub_download(repo, file)
+        if local is not None and Path(local).is_file() and \
+                hashlib.sha256(Path(local).read_bytes()).hexdigest() == sha256:
+            path = str(local)
+        else:
+            from huggingface_hub import hf_hub_download
+            path = hf_hub_download(repo, file)
         if hashlib.sha256(Path(path).read_bytes()).hexdigest() != sha256:
             print(f"[Detail] {what} model didn't match its checksum — {fallback}")
         else:
@@ -421,6 +433,115 @@ def hand_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, den
                                 scheduler=scheduler, clip_skip=clip_skip, padding=int(max(hw, hh) * 0.6),
                                 min_context=0, feather=max(3, hw // 12), step_callback=step_callback)
     return out, len(hands)
+
+
+# ── Eyes ──────────────────────────────────────────────────────────────────────
+def _eye_session():
+    return _onnx_session(_eye_yolo, _EYE_REPO, _EYE_FILE, _EYE_SHA256, "anime eye", "eye detail is off",
+                         local=_EYE_LOCAL)
+
+
+def eye_detector_available() -> bool:
+    return _eye_session() is not None
+
+
+def detect_eyes(image: Image.Image, faces=None, max_faces: int = 4,
+                conf: float = _EYE_CONF) -> list[list[tuple[int, int, int, int]]]:
+    """Eye boxes per face: [[eye, eye], …] in the order of `faces` (detected when not given); a face whose
+    eyes aren't found gets []. The detector runs on each face crop (+25 % margin) — on a whole full-body picture
+    it missed eyes it found on the crop — and keeps at most two plausible boxes per face: width 6–50 % of the
+    face, centre inside the face box and above 80 % of its height (no mouths, no eyes of a second face)."""
+    sess = _eye_session()
+    if sess is None:
+        return []
+    if faces is None:
+        faces = detect_faces(image, "anime", max_faces)
+    W, H = image.size
+    res = []
+    for x1, y1, x2, y2 in faces:
+        fw, fh = x2 - x1, y2 - y1
+        cx1, cy1 = max(0, x1 - fw // 4), max(0, y1 - fh // 4)
+        cx2, cy2 = min(W, x2 + fw // 4), min(H, y2 + fh // 4)
+        found = []
+        for (bx1, by1, bx2, by2), sc in _yolo_run(sess, image.crop((cx1, cy1, cx2, cy2)), conf):
+            b = (bx1 + cx1, by1 + cy1, bx2 + cx1, by2 + cy1)
+            mx, my = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+            if not (0.06 * fw <= b[2] - b[0] <= 0.5 * fw and x1 <= mx <= x2 and y1 <= my <= y1 + 0.8 * fh):
+                continue
+            found.append((b, sc))
+        found.sort(key=lambda bs: -bs[1])
+        keep = []
+        for b, _sc in found:
+            if any(_iou(b, k) >= 0.2 for k in keep):
+                continue
+            keep.append(b)
+        res.append(sorted(keep[:2]))
+    return res
+
+
+def colour_guard(before: Image.Image, after: Image.Image, iris_boxes, region=None,
+                 min_chroma: float = 12.0) -> Image.Image:
+    """`after` with its colour (Lab a/b) kept only where colour belongs: inside the eye boxes and only on pixels
+    that were already colourful in `before` (the iris). Everywhere else — grey bangs over the eye, eyelids, skin —
+    the brightness detail comes from `after` but the colour stays `before`'s. Stops a red iris prompt from tinting
+    the hair and face around it (seen on bangs over one eye). `region` limits the work (x1, y1, x2, y2)."""
+    import cv2
+    W, H = after.size
+    rx1, ry1, rx2, ry2 = region or (0, 0, W, H)
+    rx1, ry1, rx2, ry2 = max(0, rx1), max(0, ry1), min(W, rx2), min(H, ry2)
+    if rx2 <= rx1 or ry2 <= ry1:
+        return after
+    b = cv2.cvtColor(np.asarray(before.convert("RGB").crop((rx1, ry1, rx2, ry2))), cv2.COLOR_RGB2LAB).astype(np.float32)
+    a = cv2.cvtColor(np.asarray(after.convert("RGB").crop((rx1, ry1, rx2, ry2))), cv2.COLOR_RGB2LAB).astype(np.float32)
+    core = Image.new("L", (rx2 - rx1, ry2 - ry1), 0)
+    d = ImageDraw.Draw(core)
+    for x1, y1, x2, y2 in iris_boxes:
+        d.ellipse([x1 - rx1, y1 - ry1, x2 - rx1, y2 - ry1], fill=255)
+    chroma = np.hypot(b[..., 1] - 128.0, b[..., 2] - 128.0)
+    allow = (np.asarray(core) > 0) & (chroma >= min_chroma)
+    allow = cv2.dilate(allow.astype(np.uint8), np.ones((3, 3), np.uint8))
+    alpha = cv2.GaussianBlur(allow.astype(np.float32), (0, 0), 1.0)[..., None]
+    out = a.copy()
+    out[..., 1:] = alpha * a[..., 1:] + (1 - alpha) * b[..., 1:]
+    rgb = cv2.cvtColor(np.clip(out, 0, 255).round().astype(np.uint8), cv2.COLOR_LAB2RGB)
+    res = after.convert("RGB").copy()
+    res.paste(Image.fromarray(rgb), (rx1, ry1))
+    return res
+
+
+def eye_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, denoise: float = 0.3,
+               steps: int = 20, cfg: float = 7.0, seed: int = -1, scheduler: str = "DPM++ 2M Karras",
+               clip_skip: int = 1, eye_prompt: str = "", max_faces: int = 4, guard: bool = True,
+               step_callback=None) -> tuple[Image.Image, int]:
+    """Re-draw the eyes of each face at high resolution: one inpaint per face covering both eyes (so they match),
+    crop ≈ the eye pair + one eye width around it, then `colour_guard` so the iris colour can't bleed into bangs,
+    lids or skin. Returns (image, eyes re-drawn)."""
+    groups = [g for g in detect_eyes(image, max_faces=max_faces) if g]
+    if not groups:
+        return image, 0
+    from backend.sampling import uniform_variant
+    scheduler = uniform_variant(scheduler)
+    W, H = image.size
+    out = image
+    extra = eye_prompt or "detailed eyes, beautiful detailed eyes, eyelashes"
+    p = f"{prompt}, {extra}" if prompt else extra
+    for n, eyes in enumerate(groups):
+        mask = Image.new("L", (W, H), 0)
+        d = ImageDraw.Draw(mask)
+        ew = max(x2 - x1 for x1, _y1, x2, _y2 in eyes)
+        for x1, y1, x2, y2 in eyes:
+            mx, my = int((x2 - x1) * 0.2), int((y2 - y1) * 0.35)      # lashes and lids
+            d.ellipse([x1 - mx, y1 - my, x2 + mx, y2 + my], fill=255)
+        before = out
+        out, _ = inpaint_region(sdp, out, mask, p, negative, steps=steps, cfg=cfg, denoise=denoise,
+                                seed=(seed + 211 + n) % 2**32 if seed is not None and seed >= 0 else -1,
+                                scheduler=scheduler, clip_skip=clip_skip, padding=int(ew * 1.2),
+                                min_context=0, feather=max(2, ew // 10), step_callback=step_callback)
+        if guard:
+            gx1 = min(e[0] for e in eyes) - ew; gy1 = min(e[1] for e in eyes) - ew
+            gx2 = max(e[2] for e in eyes) + ew; gy2 = max(e[3] for e in eyes) + ew
+            out = colour_guard(before, out, eyes, (gx1, gy1, gx2, gy2))
+    return out, sum(len(g) for g in groups)
 
 
 # ── Tiled "SD upscale" detail pass ────────────────────────────────────────────

@@ -284,17 +284,31 @@ def parameters_html() -> str:
              "with (A1111 “Clip skip: 2”). SDXL always does this already.",
              _cn("2 = 使用文本编码器倒数第二层，多数 SD1.5 动漫模型推荐。SDXL 不受影响。")],
             ["✨ Face detail",
-             "Finds faces and re-draws each one at the model's native size with low denoise (0.3–0.45) — fixes "
-             "small or messy faces in full-body and group shots. Works after hires fix and in img2img too.",
-             _cn("检测人脸并以模型原生分辨率低降噪重绘，修复全身图/多人图中的小脸。")],
+             "Finds faces and re-draws each one at the model's native size — fixes small or messy faces. Measured: "
+             "no gain once the face is ≥ ~25 % of the picture width, a clear one below ~20 % (denoise 0.35), and for "
+             "tiny faces (a wide shot, ~6 %) 0.5–0.65 beats 0.35 — 0.8 can turn the face into somebody else; hires "
+             "fix 1.5× + face detail was best there. The pass uses your whole prompt for every face, so with two "
+             "character LoRAs in one picture it cannot keep the characters apart. Works after hires fix and in "
+             "img2img too.",
+             _cn("检测人脸并以模型原生分辨率重绘，修复小脸/乱脸。实测：脸宽 ≥ 画面约 25% 时无明显收益，低于约 20% 明显改善（降噪 0.35），"
+                 "远景小脸（约 6%）用 0.5–0.65 更好（0.8 可能把脸画成别人），配合高清修复 1.5× 最佳；每张脸都用整段提示词，"
+                 "含两个角色 LoRA 的图无法区分角色。")],
             ["✋ Hand detail",
              "Same idea for hands (anime hand detector, gloves count), run before the faces: 0.35 cleans up "
-             "smudged fingers, 0.45–0.5 redraws them. It can't reliably fix a wrong finger count, and it may "
+             "smudged fingers (in 7 test pairs it sharpened texture, never fixed a structure and now and then "
+             "added a small blob), 0.45–0.5 redraws them. It can't reliably fix a wrong finger count, and it may "
              "touch up hand-shaped things (a ship's turret) — at low denoise they stay what they were. Face and "
              "hand passes use the evenly spaced version of your sampler (Karras / AYS at the same denoise "
              "changed almost nothing).",
-             _cn("对手部做同样的重绘（动漫手部检测，手套也算），在脸部之前进行：0.35 清理手指，0.45–0.5 重画。"
+             _cn("对手部做同样的重绘（动漫手部检测，手套也算），在脸部之前进行：0.35 清理手指（实测只增强纹理，未修正结构），0.45–0.5 重画。"
                  "无法保证修正手指数量。脸/手重绘使用均匀步长版本的采样器。")],
+            ["👁 Eye detail",
+             "Finds the eyes (anime eye detector, on each face) and re-draws both eyes of a face in one pass at high "
+             "resolution, after the face pass: 0.25 fixes a malformed eye (one under bangs) and sharpens, 0.3–0.35 adds definition, 0.45+ adds stray sparkles. Pupil / iris detail needs pixels: in an 832×1216 picture an eye is ~45 px, after a 2× upscale or hires fix the pass draws real pupils. "
+             "A colour guard keeps the new colour inside the iris: bangs over an eye, lids and skin keep their own "
+             "colour and only get sharper, so a red iris can't tint the hair.",
+             _cn("检测眼睛并在脸部重绘之后以高分辨率重绘双眼：0.25 修正变形的眼睛并锐化，0.3–0.35 更清晰，0.45 以上会出现多余高光；瞳孔细节需要先放大或高清修复。"
+                 "颜色保护只让虹膜内取新颜色，遮眼的刘海、眼睑和皮肤保持原色，不会被红色虹膜染色。")],
             ["⚖️ Prompt weights & colour bleeding",
              "(tag:1.3) works like A1111 now (Settings → Prompt weights): the app used to apply weights 2–5× harder, so "
              "weighted background / lighting / colour tags flooded their colour onto the character. If a scene colour "
