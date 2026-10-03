@@ -904,7 +904,7 @@ def _():
     from backend import model_manager as MM
     tmp = Path(tempfile.mkdtemp())
     f = tmp / "big.safetensors"
-    f.write_bytes(b"\0" * (4 << 20))                          # 4 MB stands in for a 6.6 GB checkpoint (need = 2.0 × its size)
+    f.write_bytes(b"\0" * (4 << 20))                          # 4 MB stands in for a 6.6 GB checkpoint (need = 2.05–2.4 × its size)
     assert MM.commit_problem(str(tmp / "missing.safetensors")) is None and MM.commit_problem("org/repo") is None
     with patch.object(MM, "avail_commit_gb", return_value=0.001):
         msg = MM.commit_problem(str(f))
@@ -915,6 +915,9 @@ def _():
         assert MM.commit_problem(str(f)) is None              # unknown → never blocks
     free = MM.avail_commit_gb()
     assert free is None or 0 < free < 4096, free               # the real Win32 call works on this machine
+    # measured peaks for a 6.62 GB anime SDXL file (2026-10-01/02): first load of a process 15.6 GB, later loads 13.5 GB —
+    # the factors must not drop below what a real load takes (a too-lenient preflight lets the load crash the app)
+    assert MM.LOAD_COMMIT_FACTOR_FIRST * 6.62 >= 15.6 and MM.LOAD_COMMIT_FACTOR * 6.62 >= 13.5 and MM.LOAD_COMMIT_FACTOR_FIRST > MM.LOAD_COMMIT_FACTOR
     from backend.sdxl_pipeline import SDXLPipeline
     from backend.sd_pipeline import SDPipeline
     for cls in (SDXLPipeline, SDPipeline):                     # both refuse before they touch the file
@@ -2760,6 +2763,76 @@ def _():
         assert all(torch.equal(p.detach(), orig[n]) for n, p in pipe.unet.named_parameters())
         sdp.load_lora(str(tmp / "a.safetensors"), 0.8, slot=0); sdp.unload_loras()
         assert all(torch.equal(p.detach(), orig[n]) for n, p in pipe.unet.named_parameters())
+    finally:
+        sdp._unload()
+
+
+@test("LoRA files load with HF_HUB_OFFLINE=1 (diffusers then demands a weight_name: every LoRA failed for offline users)")
+def _():
+    import torch
+    from safetensors.torch import save_file
+    try:
+        from transformers import CLIPTokenizer
+        tok = CLIPTokenizer.from_pretrained("stable-diffusion-v1-5/stable-diffusion-v1-5", subfolder="tokenizer",
+                                            local_files_only=True)
+    except Exception:
+        raise Skip("SD 1.5 CLIP tokenizer not in .hf_cache")
+    sdp, pipe = _tiny_sd(tok)
+    tmp = Path(_tf.mkdtemp())
+    mods = dict(pipe.unet.named_modules())
+    name = next(n for n, m in mods.items() if isinstance(m, torch.nn.Linear) and n.endswith("attn1.to_q"))
+    g = torch.Generator().manual_seed(3)
+    key = "lora_unet_" + name.replace(".", "_")
+    down = torch.randn(4, mods[name].in_features, generator=g) * 0.1
+    up = torch.randn(mods[name].out_features, 4, generator=g) * 0.1
+    save_file({key + ".lora_down.weight": down, key + ".lora_up.weight": up, key + ".alpha": torch.tensor(4.0)},
+              str(tmp / "a.safetensors"))
+    w = lambda: dict(pipe.unet.named_parameters())[name + ".weight"].detach().clone()
+    before = w()
+    try:
+        with patch("diffusers.loaders.lora_base.HF_HUB_OFFLINE", True):
+            msg = sdp.load_lora(str(tmp / "a.safetensors"), 0.8, slot=0)
+        assert msg.startswith("✅"), msg
+        assert (w() - (before + 0.8 * (up @ down))).abs().max().item() < 1e-6
+        sdp.unload_loras()
+        assert torch.equal(w(), before)
+    finally:
+        sdp._unload()
+
+
+@test("LoRAs are re-applied on a freshly loaded model (the checkpoint-switch path): fused, no leftover PEFT layers, restores exactly")
+def _():
+    import torch
+    from safetensors.torch import save_file
+    try:
+        from transformers import CLIPTokenizer
+        tok = CLIPTokenizer.from_pretrained("stable-diffusion-v1-5/stable-diffusion-v1-5", subfolder="tokenizer",
+                                            local_files_only=True)
+    except Exception:
+        raise Skip("SD 1.5 CLIP tokenizer not in .hf_cache")
+    sdp, pipe = _tiny_sd(tok)
+    tmp = Path(_tf.mkdtemp())
+    mods = dict(pipe.unet.named_modules())
+    name = next(n for n, m in mods.items() if isinstance(m, torch.nn.Linear) and n.endswith("attn1.to_q"))
+    g = torch.Generator().manual_seed(3)
+    key = "lora_unet_" + name.replace(".", "_")
+    down = torch.randn(4, mods[name].in_features, generator=g) * 0.1
+    up = torch.randn(mods[name].out_features, 4, generator=g) * 0.1
+    save_file({key + ".lora_down.weight": down, key + ".lora_up.weight": up, key + ".alpha": torch.tensor(4.0)},
+              str(tmp / "a.safetensors"))
+    w = lambda: dict(pipe.unet.named_parameters())[name + ".weight"].detach().clone()
+    peft_layers = lambda: sum(1 for m in pipe.unet.modules() if hasattr(m, "lora_A"))
+    before = w()
+    try:
+        # what app._ensure_model does after load_model(): put the saved adapters back and call _reload_all_loras() itself
+        # (not load_lora) — it used to raise "'NoneType' object has no attribute 'has'" (no restore snapshot on a fresh model)
+        # and left the unfused LoRA layers in the UNet
+        assert getattr(sdp, "_snap", None) is None and sdp._clean_unet_state is None
+        sdp._lora_adapters = {0: ("a.safetensors", str(tmp / "a.safetensors"), 0.8)}
+        sdp._reload_all_loras()
+        assert (w() - (before + 0.8 * (up @ down))).abs().max().item() < 1e-6 and peft_layers() == 0
+        sdp.unload_loras()
+        assert torch.equal(w(), before) and peft_layers() == 0
     finally:
         sdp._unload()
 

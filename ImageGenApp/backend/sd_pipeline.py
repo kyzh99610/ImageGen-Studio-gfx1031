@@ -816,6 +816,11 @@ class SDPipeline:
             if not self._lora_adapters:
                 return
 
+            if self._clean_unet_state is None:
+                # a freshly loaded model whose LoRAs are put back after a checkpoint switch (app._ensure_model calls this
+                # directly, not load_lora): it is LoRA-free right now, and snapshot_wrapped() needs the snapshot below
+                self._snapshot_clean_state()
+
             # 3. Fuse each LoRA in slot order onto the restored base weights.
             #    Always use the same adapter name (_LORA_ADAPTER) so PEFT never
             #    creates parallel default_0/default_1/… slots with conflicting ranks.
@@ -832,7 +837,9 @@ class SDPipeline:
                           f"{f', {skipped} unmatched' if skipped else ''}) fused at ×{weight:.2f}")
                     continue
                 try:
-                    self.pipe.load_lora_weights(path, adapter_name=_LORA_ADAPTER)
+                    # weight_name: with HF_HUB_OFFLINE=1 diffusers refuses to guess it ("you must specify a `weight_name`")
+                    # and every LoRA failed; a full file path plus its own name works online and offline
+                    self.pipe.load_lora_weights(path, weight_name=Path(path).name, adapter_name=_LORA_ADAPTER)
                 except Exception as e:
                     err = str(e)
                     if "Target modules" in err and "not found in the base model" in err:
