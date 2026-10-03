@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 134-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 135-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 129 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 130 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -223,6 +223,16 @@ regeneration measured 0.63/255.
   fingertips), crop ≈ 2.2× the hand, seed + 101 + n, runs **before** the face pass. SDXL ~25 s per hand, SD 1.5 ~5 s. UI: "✋ Also re-draw hands" + "Hand denoise" (default 0.35) in the face accordion;
   extra keys `hd_on` / `hd_denoise` appended after `cfg_rescale` everywhere (positional API: 38 args); record
   `hand_detail {denoise}`, A1111 "Hand detail: denoise X". It cleans up fingers; it can't reliably fix a finger count.
+- **Eye detail (2026-10-03)**: `detect_eyes()` = `deepghs/anime_eye_detection` `eye_detect_v1.0_s/model.onnx` (OpenRAIL,
+  44.6 MB, SHA-256 pinned; a hand-placed copy `models/detectors/anime_eye_detect_v1.0_s.onnx` is used first), conf 0.4, run
+  on each **face crop** (+25 %): on a 2× full-body picture the whole-image run found 1 eye of 2, the crop both. Boxes kept:
+  width 6–50 % of the face, centre in the face above 80 % of its height, ≤ 2. `eye_detail()`: one inpaint per face over both
+  eyes, seed + 211 + n, evenly spaced sampler, runs **after** the face pass. **`colour_guard()`**: brightness from the redraw
+  everywhere, Lab colour only inside the eye boxes on pixels that were already colourful — grey bangs over an eye, lids and
+  skin keep their colour (grey pixels around the eyes that gained colour: 1.0–1.2 % without the guard, 0.2–0.8 % with it,
+  on 5 anime test pictures). 0.25 fixes a malformed eye under bangs, 0.45 adds stray sparkles → default **0.3**. At
+  832×1216 an eye is ~45 px, so the pass fixes shape; after a 2× upscale it draws pupils. SDXL ~12 s per face. Extra keys
+  `ed_on` / `ed_denoise` after `hd_denoise` (positional API: 40 args); record `eye_detail {denoise}`.
 - **Detail passes use the evenly spaced sampler** (`sampling.uniform_variant`: DPM++ 2M Karras/AYS → DPM++ 2M, Euler
   AYS → Euler, DPM++ SDE Karras → DPM++ SDE). With the real Karras / AYS schedules (since the sampler fix) img2img
   starts at much lower noise, so face detail at 0.35 hardly changed a face: SDXL, same image, face 9.7/255 and hand
