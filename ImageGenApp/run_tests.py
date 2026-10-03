@@ -1787,14 +1787,14 @@ def _():
              patch("backend.model_manager.list_loras", return_value=[("l.safetensors", "/m/l.safetensors")]), \
              patch("backend.model_manager.list_vaes", return_value=[]):
             out = fn("do_card_load")("G", "(no outfit tags)", "", "", "/m/wai.safetensors")
-            assert len(out) == 24, len(out)
+            assert len(out) == 26, len(out)            # + eye detail on / denoise
             assert out[0].get("__type__") == "update" and out[2] == "none"                         # checkpoint kept, profile has no LoRA
             assert (out[12], out[13]) == (4.5, 20) and out[14] == "DPM++ 2M Karras", out[12:15]
             assert (out[16], out[18], out[19], out[20], out[21]) == (2.0, True, True, 0.35, False), out[16:23]
-            assert "profile for wai.safetensors" in out[23]
+            assert "profile for wai.safetensors" in out[-1]
             out = fn("do_card_load")("G", "(no outfit tags)", "", "", "/m/base.safetensors")      # no profile for this one: the card
             assert out[0] == "/m/base.safetensors" and out[2] == "/m/l.safetensors" and out[3] == 0.7
-            assert (out[12], out[13], out[14]) == (6.0, 12, "Euler a") and out[16].get("__type__") == "update" and "profile" not in out[23]
+            assert (out[12], out[13], out[14]) == (6.0, 12, "Euler a") and out[16].get("__type__") == "update" and "profile" not in out[-1]
         # 📌 Save as this checkpoint's profile, then 💾 Save current setup must keep the profiles
         ck, lo = tmp / "sdxl.safetensors", tmp / "l.safetensors"
         ck.write_bytes(b"x")
@@ -2472,6 +2472,61 @@ def _():
     ups = _app._plan_extra_updates(_app._restore_plan(meta))
     assert ups[-2:] == [True, 0.3] and ups[-4:-2] == [True, 0.45], ups
     assert "eye detail" in _app._plan_summary(_app._restore_plan(meta))
+
+
+
+@test("Round-4 follow-ups: tiny faces get a higher face denoise, inpaint runs the Steps value, truncated uploads fail loudly, eye detail in card profiles")
+def _():
+    import io
+    from PIL import Image, ImageDraw
+    from PIL.PngImagePlugin import PngInfo
+    import app as _app
+    from backend import detail_tools as dt
+    from backend.character_cards import clean_card
+    from backend.png_info import read_image_metadata
+    # size-aware face denoise: ≤ 60 px → 0.55, ≥ 110 px → the slider, linear between, never lowers a high slider
+    sad = dt.size_aware_denoise
+    assert sad(0.35, 50) == 0.55 and sad(0.35, 60) == 0.55 and sad(0.35, 120) == 0.35 and sad(0.35, 110) == 0.35
+    assert 0.35 < sad(0.35, 85) < 0.55 and sad(0.7, 40) == 0.7 and sad(0.6, 40) == 0.6
+    seen = []
+    orig_df, orig_inp = dt.detect_faces, dt.inpaint_region
+    try:
+        dt.detect_faces = lambda *a, **k: [(10, 10, 60, 60), (100, 100, 260, 260)]       # 50 px and 160 px
+        dt.inpaint_region = lambda sdp, im, mask, *a, **k: (seen.append(k["denoise"]), (im, 0))[1]
+        dt.face_detail(object(), Image.new("RGB", (400, 400)), "x", denoise=0.35)
+        assert seen == [0.55, 0.35], seen
+        seen.clear()
+        dt.face_detail(object(), Image.new("RGB", (400, 400)), "x", denoise=0.35, size_aware=False)
+        assert seen == [0.35, 0.35], seen
+    finally:
+        dt.detect_faces, dt.inpaint_region = orig_df, orig_inp
+    # 🖌 Inpaint: the Steps value is what runs (0.75 and 0.8 were the same picture at 12 steps)
+    import inspect
+    for steps in (12, 20, 30):
+        for den in (0.4, 0.5, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0):
+            assert int(_app._inpaint_steps(steps, den) * den) == steps, (steps, den)
+    assert len({_app._inpaint_steps(12, d) for d in (0.75, 0.8)}) == 2
+    src = inspect.getsource(_app._build_generate_tab)
+    assert "steps=_inpaint_steps(steps, denoise)" in src
+    # truncated files: generation inputs fail instead of decoding to a half-black picture; metadata still reads
+    from PIL import ImageFile
+    assert ImageFile.LOAD_TRUNCATED_IMAGES is False
+    info = PngInfo(); info.add_text("parameters", "1girl\nSteps: 20, Sampler: Euler a, CFG scale: 7, Seed: 5")
+    buf = io.BytesIO(); Image.new("RGB", (64, 64), (200, 30, 40)).save(buf, "PNG", pnginfo=info)
+    data = buf.getvalue()
+    with _tf.TemporaryDirectory() as d:
+        f = Path(d) / "half.png"
+        f.write_bytes(data[:len(data) - 40])          # cut inside the image data
+        try:
+            Image.open(f).load()
+            raise AssertionError("a truncated PNG loaded silently")
+        except OSError:
+            pass
+        assert read_image_metadata(f)["seed"] == 5
+    # card profiles carry eye detail (0 = off, else its denoise; the slider starts at 0.1)
+    c = clean_card({"name": "t", "profiles": {"a.safetensors": {"eye_detail": 0.3, "face_detail": 0.35}}})
+    assert c["profiles"]["a.safetensors"]["eye_detail"] == 0.3
+    assert clean_card({"name": "t", "profiles": {"a.safetensors": {"eye_detail": 9}}}) is not None
 
 
 @test("GPU events share one queue slot (Generate during an X/Y grid crashed the process); Stop stays free")

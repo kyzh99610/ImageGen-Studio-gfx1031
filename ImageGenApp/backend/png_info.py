@@ -31,8 +31,11 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
     if isinstance(image_or_path, (str, Path)):
         # Read and close: an open handle keeps the file locked on Windows
         with Image.open(str(image_or_path)) as f:
-            f.load()
-            img = f.copy()
+            try:
+                f.load()
+                img = f.copy()
+            except OSError:      # truncated / half-written: its text chunks (read at open) still say how it was made
+                img = Image.new("RGB", f.size)
             img.info = dict(f.info)
     else:
         img = image_or_path

@@ -76,7 +76,8 @@ def _fill_settings(d: dict, out: dict) -> dict:
 
 
 # quality boosters a per-checkpoint profile may carry (0 = off; face / hand detail = the denoise strength)
-_BOOSTERS = (("pag", 0.0, 6.0), ("cfg_rescale", 0.0, 1.0), ("face_detail", 0.0, 0.8), ("hand_detail", 0.0, 0.7))
+_BOOSTERS = (("pag", 0.0, 6.0), ("cfg_rescale", 0.0, 1.0), ("face_detail", 0.0, 0.8), ("hand_detail", 0.0, 0.7),
+             ("eye_detail", 0.0, 0.6))
 
 
 def _clean_profile(p) -> dict | None:

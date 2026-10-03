@@ -106,7 +106,10 @@ import faulthandler
 faulthandler.enable(all_threads=True)
 import gradio as gr
 from PIL import Image, ImageFile
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+# Off (it was on): with it a truncated upload decoded silently into a half-black picture that img2img / inpaint /
+# upscale then used (round 4: an inpaint source read as its first 19 rows). Readers that browse files (History,
+# PNG Info, metadata) catch the error themselves.
+ImageFile.LOAD_TRUNCATED_IMAGES = False
 
 # ── Local imports ──────────────────────────────────────────────────────────────
 from config import (
@@ -852,6 +855,19 @@ def _carry_params(src_img, note: str | None):
     return info
 
 
+def _inpaint_steps(steps, denoise) -> int:
+    """Schedule length for an inpaint pass so that int(length × denoise) = the Steps value (A1111's behaviour): the
+    pass used to run int(steps × denoise), so at 12 steps 0.75 and 0.8 were the same picture and 0.4 ran 4 steps."""
+    import math
+    steps, den = int(steps), max(0.05, float(denoise))
+    n = math.ceil(steps / den)
+    while n > 1 and int((n - 1) * den) >= steps:     # float rounding can make ceil() one too long
+        n -= 1
+    while int(n * den) < steps:
+        n += 1
+    return min(150, n)
+
+
 def _editor_parts(val):
     """(background image, mask of everything painted) from a gr.ImageEditor value."""
     import numpy as _np
@@ -1238,8 +1254,8 @@ def _build_generate_tab():
                             with gr.Row():
                                 fd_denoise_sl = gr.Slider(0.1, 0.8, value=_ls.get("fd_denoise", 0.4), step=0.05,
                                                           label="Face denoise",
-                                                          info="0.3 = touch-up · 0.4 = fix details · 0.5–0.65 = tiny faces (wide shots) · "
-                                                               "0.8 = can become a different face")
+                                                          info="For normal faces: 0.3 = touch-up · 0.4 = fix details. Tiny faces (≤ ~60 px, wide "
+                                                               "shots) are raised to 0.55 automatically · 0.8 = can become a different face")
                                 fd_mode_rb = gr.Radio(["auto", "anime", "photo"],
                                                       value=_ls.get("fd_mode") if _ls.get("fd_mode") in
                                                       ("auto", "anime", "photo") else "auto",
@@ -1325,7 +1341,7 @@ def _build_generate_tab():
                             with gr.Row():
                                 inp_denoise_sl = gr.Slider(0.1, 1.0, value=0.75, step=0.05, label="Inpaint denoise",
                                                            info="0.5 = adjust (expression) · 0.8 = redraw · 0.95 = swap a small object · "
-                                                                "1.0 = ignore what's there. Steps run = steps × denoise.")
+                                                                "1.0 = ignore what's there. The Steps value runs at every denoise.")
                                 inp_pad_sl = gr.Slider(0, 256, value=48, step=8, label="Context padding (px)",
                                                        info="Surroundings the model sees around the painted area.")
                             gr.HTML('<p style="color:#a6adc8;font-size:13px;margin:2px 0;">Uses the prompt, '
@@ -2932,7 +2948,7 @@ def _build_generate_tab():
             progress(step / total, desc=f"Inpainting: step {step}/{total}")
         t0 = time.time()
         try:
-            out, used = inpaint_region(sd, image, mask, prompt or "", neg_prompt or "", steps=steps, cfg=cfg,
+            out, used = inpaint_region(sd, image, mask, prompt or "", neg_prompt or "", steps=_inpaint_steps(steps, denoise), cfg=cfg,
                                        denoise=denoise, seed=seed, scheduler=scheduler, clip_skip=cs,
                                        padding=int(_num(padding, 48)), step_callback=cb)
         except _GenerationAborted:
@@ -3291,7 +3307,7 @@ def _build_generate_tab():
     def do_card_load(name, outfit, scene, neg, cur_model=None):
         from backend.character_cards import load_card, card_prompt, card_for_checkpoint
         from backend.model_manager import list_checkpoints, list_loras, list_vaes
-        n_out = 23
+        n_out = 25
         card = load_card(name) if name and name != "(none)" else None
         if not card:
             return (*[gr.update()] * n_out, '<p style="color:#f9e2af;font-size:13px;">⚠ Pick a card first.</p>')
@@ -3323,10 +3339,11 @@ def _build_generate_tab():
         negative = merge_prompts(neg or "", card["negative"]) if card.get("negative") else gr.update()
         g = lambda k: card[k] if k in card else gr.update()
         # boosters only when the profile has them (face / hand detail: 0 = off, else the denoise strength)
-        fd, hd = card.get("face_detail"), card.get("hand_detail")
+        fd, hd, ed = card.get("face_detail"), card.get("hand_detail"), card.get("eye_detail")
         boost = [g("pag"), g("cfg_rescale"), g("freeu"),
                  gr.update() if fd is None else fd > 0, gr.update() if not fd else fd,
-                 gr.update() if hd is None else hd > 0, gr.update() if not hd else hd]
+                 gr.update() if hd is None else hd > 0, gr.update() if not hd else hd,
+                 gr.update() if ed is None else ed > 0, gr.update() if not ed else ed]
         msg = (f'<p style="color:#a6e3a1;font-size:13px;margin:2px 0;">✅ Loaded {html.escape(card["name"])}'
                + (f' — {html.escape(outfit)}' if outfit and outfit != _NO_OUTFIT else "")
                + (f' · 📌 profile for {html.escape(profile)}' if profile else "") + "</p>"
@@ -3363,7 +3380,7 @@ def _build_generate_tab():
                 f'prompt is its tags; outfits kept). Edit settings/characters/{html.escape(n)}.json to fine-tune.</p>')
 
     def do_card_profile(name, model, vae, l1, w1, l2, w2, l3, w3, neg, w, h, cfg, steps, sched, cs,
-                        pag, freeu, rescale, fd_on, fd_den, hd_on, hd_den):
+                        pag, freeu, rescale, fd_on, fd_den, hd_on, hd_den, ed_on=False, ed_den=0.3):
         """Remember the current LoRA weights, settings and boosters as the card's profile for the selected
         checkpoint (🎴 Load applies it whenever that checkpoint is selected)."""
         from backend.character_cards import load_card, save_card
@@ -3378,7 +3395,8 @@ def _build_generate_tab():
             "vae": Path(str(vae)).name if vae and vae != "none" and Path(str(vae)).is_file() else None,
             "negative": neg or "", "width": w, "height": h, "cfg": cfg, "steps": steps, "scheduler": sched,
             "clip_skip": cs, "pag": pag or 0.0, "freeu": bool(freeu), "cfg_rescale": rescale or 0.0,
-            "face_detail": (fd_den or 0.0) if fd_on else 0.0, "hand_detail": (hd_den or 0.0) if hd_on else 0.0}}
+            "face_detail": (fd_den or 0.0) if fd_on else 0.0, "hand_detail": (hd_den or 0.0) if hd_on else 0.0,
+            "eye_detail": (ed_den or 0.0) if ed_on else 0.0}}
         try:
             save_card(card)
         except (OSError, ValueError) as e:
@@ -3413,12 +3431,13 @@ def _build_generate_tab():
         [card_dd, outfit_dd, card_scene_txt, neg_prompt_txt, model_dd],
         [model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3,
          prompt_txt, neg_prompt_txt, width_sl, height_sl, cfg_sl, steps_sl, scheduler_dd, clip_skip_rb,
-         pag_sl, cfg_rescale_sl, freeu_cb, fd_cb, fd_denoise_sl, hd_cb, hd_denoise_sl, card_status])
+         pag_sl, cfg_rescale_sl, freeu_cb, fd_cb, fd_denoise_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl,
+         card_status])
     card_profile_btn.click(
         do_card_profile,
         [card_dd, model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3,
          neg_prompt_txt, width_sl, height_sl, cfg_sl, steps_sl, scheduler_dd, clip_skip_rb,
-         pag_sl, freeu_cb, cfg_rescale_sl, fd_cb, fd_denoise_sl, hd_cb, hd_denoise_sl],
+         pag_sl, freeu_cb, cfg_rescale_sl, fd_cb, fd_denoise_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl],
         [card_status])
     card_save_btn.click(
         do_card_save,

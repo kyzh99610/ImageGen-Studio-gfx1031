@@ -286,12 +286,13 @@ def parameters_html() -> str:
             ["✨ Face detail",
              "Finds faces and re-draws each one at the model's native size — fixes small or messy faces. Measured: "
              "no gain once the face is ≥ ~25 % of the picture width, a clear one below ~20 % (denoise 0.35), and for "
-             "tiny faces (a wide shot, ~6 %) 0.5–0.65 beats 0.35 — 0.8 can turn the face into somebody else; hires "
+             "tiny faces (a wide shot, ~6 %) 0.5–0.65 beats 0.35, so faces ≤ ~60 px get at least 0.55 automatically (blended up to "
+             "110 px; the slider is the value for normal faces) — 0.8 can turn the face into somebody else; hires "
              "fix 1.5× + face detail was best there. The pass uses your whole prompt for every face, so with two "
              "character LoRAs in one picture it cannot keep the characters apart. Works after hires fix and in "
              "img2img too.",
              _cn("检测人脸并以模型原生分辨率重绘，修复小脸/乱脸。实测：脸宽 ≥ 画面约 25% 时无明显收益，低于约 20% 明显改善（降噪 0.35），"
-                 "远景小脸（约 6%）用 0.5–0.65 更好（0.8 可能把脸画成别人），配合高清修复 1.5× 最佳；每张脸都用整段提示词，"
+                 "远景小脸（约 6%）用 0.5–0.65 更好，≤ 约 60 像素的脸会自动提高到至少 0.55（0.8 可能把脸画成别人），配合高清修复 1.5× 最佳；每张脸都用整段提示词，"
                  "含两个角色 LoRA 的图无法区分角色。")],
             ["✋ Hand detail",
              "Same idea for hands (anime hand detector, gloves count), run before the faces: 0.35 cleans up "
@@ -344,11 +345,10 @@ def parameters_html() -> str:
              "resolution, with your model, LoRAs and seed. Good for small things — measured: swapping a hair "
              "ornament needs ~0.95 (0.9 leaves traces of the old shape, 0.75–0.8 gives a hybrid), an expression ~0.5 "
              "deepens a smile and ~0.8 opens a closed mouth. It uses the evenly spaced version of your sampler so "
-             "denoise means what it says, but only int(steps × denoise) steps run: at 12 steps 0.75 and 0.8 (or 0.85 "
-             "and 0.9) are the same picture. A garment recolour can't be done this way (up to 0.95 the colour stays, "
+             "denoise means what it says, and the Steps value is what runs at any denoise (as in A1111). A garment recolour can't be done this way (up to 0.95 the colour stays, "
              "1.0 over a body-sized area draws a new figure) — use same seed + edited prompt.",
              _cn("涂抹要修改的区域并描述内容，仅重绘该区域。适合小物件（换发饰约 0.95；表情约 0.5 微调、约 0.8 张嘴）；"
-                 "实际步数 = 步数×降噪（12 步时 0.75 与 0.8 结果相同）；换衣服颜色请用同种子+改提示词。")],
+                 "任何降噪下都按设定步数运行；换衣服颜色请用同种子+改提示词。")],
             ["⏩ DPM++ 2M AYS",
              "NVIDIA's Align-Your-Steps schedule: about the quality of 25 steps in 10–12. The Karras samplers "
              "really use Karras sigmas (as in A1111).",
