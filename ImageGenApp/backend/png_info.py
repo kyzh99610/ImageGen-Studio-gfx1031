@@ -195,6 +195,9 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
     m = re.search(r"\bHand detail: denoise ([0-9.]+)", param_text)
     if m:
         result["hand_detail"] = {"denoise": float(m.group(1))}
+    m = re.search(r"\bEye detail: denoise ([0-9.]+)", param_text)
+    if m:
+        result["eye_detail"] = {"denoise": float(m.group(1))}
 
     # ImageGen Studio's own record: exact model / VAE / LoRA files and weights
     rec = _parse_json(info.get("imagegen")) if "imagegen" in info else None
@@ -221,7 +224,7 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
                                         for l in rec["loras"] if isinstance(l, dict) and l.get("file"))
         if rec.get("vae"):
             result["vae"] = (rec["vae"] or {}).get("file")
-        for k in ("clip_skip", "var_seed", "var_strength", "hires", "face_detail", "hand_detail", "inpaint_padding", "emphasis",
+        for k in ("clip_skip", "var_seed", "var_strength", "hires", "face_detail", "hand_detail", "eye_detail", "inpaint_padding", "emphasis",
                   "pag_scale", "freeu", "cfg_rescale"):
             if rec.get(k) is not None:
                 result[k] = rec[k]
@@ -339,6 +342,8 @@ def format_png_info_html(meta: dict[str, Any]) -> str:
         badges.append(f'<span style="background:#313244;color:#f9e2af;padding:3px 8px;border-radius:4px;font-size:13px;">✨ Face detail: <b>denoise {meta["face_detail"].get("denoise")}</b></span>')
     if isinstance(meta.get("hand_detail"), dict):
         badges.append(f'<span style="background:#313244;color:#f9e2af;padding:3px 8px;border-radius:4px;font-size:13px;">✋ Hand detail: <b>denoise {meta["hand_detail"].get("denoise")}</b></span>')
+    if isinstance(meta.get("eye_detail"), dict):
+        badges.append(f'<span style="background:#313244;color:#f9e2af;padding:3px 8px;border-radius:4px;font-size:13px;">👁 Eye detail: <b>denoise {meta["eye_detail"].get("denoise")}</b></span>')
     if meta.get("model_hash"):
         badges.append(f'<span style="background:#313244;color:#a6adc8;padding:3px 8px;border-radius:4px;font-size:13px;">#️⃣ Model hash: <b>{meta["model_hash"]}</b></span>')
     badge_html = " ".join(badges)

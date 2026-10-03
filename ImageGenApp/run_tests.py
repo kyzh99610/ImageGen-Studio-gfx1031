@@ -2406,9 +2406,72 @@ def _():
         meta = read_image_metadata(f)
     assert meta["hand_detail"] == {"denoise": 0.45}, meta.get("hand_detail")
     ups = _app._plan_extra_updates(_app._restore_plan(meta))
-    assert ups[-2:] == [True, 0.45] and ups[8] is True, ups
+    assert ups[-4:-2] == [True, 0.45] and ups[8] is True, ups
     ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
-    assert ups0[-2] is False
+    assert ups0[-4] is False
+
+
+@test("Eye detail: eyes per face (plausibility filter), colour guard keeps a red iris off grey bangs, one pass per face, A1111 text + restore")
+def _():
+    import numpy as np
+    from PIL import Image, ImageDraw
+    from PIL.PngImagePlugin import PngInfo
+    import app as _app
+    from backend import detail_tools as dt
+    from backend.png_info import read_image_metadata
+    face = (100, 100, 300, 300)
+    orig_run, orig_sess, orig_inp = dt._yolo_run, dt._eye_session, dt.inpaint_region
+    try:
+        dt._eye_session = lambda: object()
+        # boxes come back in crop coordinates (crop starts at face - 25 % = (50, 50))
+        dt._yolo_run = lambda sess, im, conf, side=640: [
+            ((110, 120, 150, 140), 0.8), ((200, 118, 245, 140), 0.75),   # two eyes
+            ((112, 121, 149, 139), 0.6),                                  # the same eye again
+            ((150, 230, 200, 250), 0.7),                                  # a mouth: too low in the face
+            ((60, 60, 300, 120), 0.9)]                                    # too wide for an eye
+        got = dt.detect_eyes(Image.new("RGB", (400, 400)), faces=[face])
+        assert got == [[(160, 170, 200, 190), (250, 168, 295, 190)]], got
+        dt._eye_session = lambda: None
+        assert dt.detect_eyes(Image.new("RGB", (400, 400)), faces=[face]) == []
+        # colour guard: a grey strand over a red iris stays grey, skin keeps its hue, the iris takes the new colour
+        before = Image.new("RGB", (100, 60), (200, 170, 160)); d = ImageDraw.Draw(before)
+        d.ellipse([30, 15, 70, 45], fill=(200, 30, 40)); d.rectangle([45, 0, 52, 60], fill=(150, 150, 155))
+        after = before.copy(); ImageDraw.Draw(after).rectangle([20, 10, 80, 50], fill=(150, 20, 220))
+        g = np.asarray(dt.colour_guard(before, after, [(30, 15, 70, 45)])).astype(int)
+        strand, iris, skin = g[30, 48], g[30, 35], g[12, 22]
+        assert abs(strand[0] - strand[2]) < 12 and abs(strand[0] - strand[1]) < 12, strand      # still grey
+        assert iris[2] > iris[1] + 60, iris                                                      # new (violet) colour
+        assert skin[0] > skin[2], skin                                                           # skin hue kept
+        # one inpaint per face covering both eyes, evenly spaced sampler, seed + 211
+        calls = []
+        dt._eye_session = lambda: object()
+        dt.inpaint_region = lambda sdp, im, mask, *a, **k: (calls.append((np.asarray(mask), k)), (im, 0))[1]
+        dt.detect_faces_orig = dt.detect_faces
+        dt.detect_faces = lambda image, mode="auto", max_faces=4, min_frac=0.03: [face]
+        out, n = dt.eye_detail(None, Image.new("RGB", (400, 400)), "x", seed=5, scheduler="DPM++ 2M AYS")
+        assert n == 2 and len(calls) == 1, (n, len(calls))
+        m, k = calls[0]
+        assert m[180, 180] == 255 and m[179, 272] == 255 and m[260, 200] == 0          # both eyes, not the mouth
+        assert k["scheduler"] == "DPM++ 2M" and k["seed"] == 216, k
+    finally:
+        dt._yolo_run, dt._eye_session, dt.inpaint_region = orig_run, orig_sess, orig_inp
+        if hasattr(dt, "detect_faces_orig"):
+            dt.detect_faces = dt.detect_faces_orig
+            del dt.detect_faces_orig
+    ex = _app._clean_extra(dict(ed_on=1, ed_denoise=5))
+    assert ex["ed_on"] is True and ex["ed_denoise"] == 0.6 and _app._clean_extra({})["ed_denoise"] == 0.3
+    rec = _app._gen_record(None, prompt="x", steps=20, eye_detail={"denoise": 0.3})
+    assert "Eye detail: denoise 0.3" in _app._params_text(rec)
+    info = PngInfo(); info.add_text("parameters", "1girl\nSteps: 20, Sampler: Euler a, CFG scale: 7, Seed: 1, "
+                                    "Hand detail: denoise 0.45, Eye detail: denoise 0.3")
+    with _tf.TemporaryDirectory() as d:
+        f = Path(d) / "e.png"
+        Image.new("RGB", (8, 8)).save(f, pnginfo=info)
+        meta = read_image_metadata(f)
+    assert meta["eye_detail"] == {"denoise": 0.3}, meta.get("eye_detail")
+    ups = _app._plan_extra_updates(_app._restore_plan(meta))
+    assert ups[-2:] == [True, 0.3] and ups[-4:-2] == [True, 0.45], ups
+    assert "eye detail" in _app._plan_summary(_app._restore_plan(meta))
 
 
 @test("GPU events share one queue slot (Generate during an X/Y grid crashed the process); Stop stays free")
@@ -3039,7 +3102,7 @@ class _BatchEnv:
     def run_xy(self, x_axis, x_vals):
         args = ["x.safetensors", "none", "none", 0.7, "none", 0.7, "none", 0.7, False, "1girl", "bad", "Euler a", 4, 6.0,
                 64, 64, 1, 5, None, 0.5, False, 1, -1, 0.0, False, 1.5, 0.45, 14, "Lanczos", False, 0.35, "auto", "",
-                0.0, False, 0.0, False, 0.35, x_axis, x_vals, "none", ""]
+                0.0, False, 0.0, False, 0.35, False, 0.35, x_axis, x_vals, "none", ""]
         return self.xy(*args, progress=lambda *a, **k: None)
 
 

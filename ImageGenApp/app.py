@@ -740,6 +740,8 @@ def _clean_extra(extra: dict | None) -> dict:
         "cfg_rescale": min(1.0, max(0.0, _num(e.get("cfg_rescale"), 0.0))),
         "hd_on": bool(e.get("hd_on")),
         "hd_denoise": min(0.7, max(0.1, _num(e.get("hd_denoise"), 0.35))),
+        "ed_on": bool(e.get("ed_on")),
+        "ed_denoise": min(0.6, max(0.1, _num(e.get("ed_denoise"), 0.3))),
     }
 
 
@@ -1228,7 +1230,7 @@ def _build_generate_tab():
                                 value=_ls.get("hires_upscaler") if _ls.get("hires_upscaler") in _hires_ups else "Lanczos",
                                 info="Lanczos is instant; Real-ESRGAN gives sharper line art (a few seconds more).")
                         with gr.Accordion("✨ Face & hand detail — re-draw faces / hands at full resolution "
-                                          "(ADetailer-style)", open=bool(_ls.get("fd_on") or _ls.get("hd_on"))):
+                                          "(ADetailer-style)", open=bool(_ls.get("fd_on") or _ls.get("hd_on") or _ls.get("ed_on"))):
                             fd_cb = gr.Checkbox(
                                 label="Enable face detail", value=bool(_ls.get("fd_on", False)),
                                 info="Finds faces and re-draws each one at the model's native size — small faces "
@@ -1236,7 +1238,8 @@ def _build_generate_tab():
                             with gr.Row():
                                 fd_denoise_sl = gr.Slider(0.1, 0.8, value=_ls.get("fd_denoise", 0.4), step=0.05,
                                                           label="Face denoise",
-                                                          info="0.3 = touch-up · 0.4 = fix details · 0.6 = new face")
+                                                          info="0.3 = touch-up · 0.4 = fix details · 0.5–0.65 = tiny faces (wide shots) · "
+                                                               "0.8 = can become a different face")
                                 fd_mode_rb = gr.Radio(["auto", "anime", "photo"],
                                                       value=_ls.get("fd_mode") if _ls.get("fd_mode") in
                                                       ("auto", "anime", "photo") else "auto",
@@ -1255,6 +1258,16 @@ def _build_generate_tab():
                                                           label="Hand denoise",
                                                           info="0.3 = touch-up · 0.45 = redraw fingers · higher "
                                                                "can turn things near a hand into hands")
+                            with gr.Row():
+                                ed_cb = gr.Checkbox(
+                                    label="👁 Also re-draw eyes", value=bool(_ls.get("ed_on", False)),
+                                    info="Finds the eyes (anime eye detector) and re-draws both eyes of each face "
+                                         "at high resolution, after the face pass. The iris colour is kept to the "
+                                         "iris, so it can't tint bangs over the eye or the skin. ~5–25 s per face.")
+                                ed_denoise_sl = gr.Slider(0.1, 0.6, value=_ls.get("ed_denoise", 0.3), step=0.05,
+                                                          label="Eye denoise",
+                                                          info="0.25 = fix / sharpen · 0.3–0.35 = more definition · 0.45+ adds "
+                                                               "stray sparkles. Pupils need the pixels: hires / upscale first")
                         with gr.Accordion("🎚 Quality boosters — PAG, FreeU, CFG rescale",
                                           open=bool(_ls.get("pag_scale") or _ls.get("freeu"))):
                             with gr.Row():
@@ -1676,12 +1689,13 @@ def _build_generate_tab():
                 'and stays ready; a running generation ends after its current step.)</p>')
 
     def _detail_pass(kind, imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress):
-        """Face or hand detail on every image (same seed per image, low denoise)."""
+        """Face, hand or eye detail on every image (same seed per image, low denoise)."""
         import math
-        from backend.detail_tools import face_detail, hand_detail
+        from backend.detail_tools import face_detail, hand_detail, eye_detail
         face = kind == "face"
-        den = ex["fd_denoise"] if face else ex["hd_denoise"]
-        label, icon, what = ("Face", "✨", "face") if face else ("Hand", "✋", "hand")
+        den = {"face": ex["fd_denoise"], "hand": ex["hd_denoise"], "eye": ex["ed_denoise"]}[kind]
+        label, icon, what = {"face": ("Face", "✨", "face"), "hand": ("Hand", "✋", "hand"),
+                             "eye": ("Eye", "👁", "eye")}[kind]
         t0, out, found, errors = time.time(), [], [], []
         # ~half the main steps actually run (ADetailer runs steps × denoise). SDXL A/B at 1024²:
         # 0.8× (~22 steps) ~45 s per face, 0.5× (~14) ~28 s, faces no worse
@@ -1701,6 +1715,8 @@ def _build_generate_tab():
                 if face:
                     res, n = face_detail(sd, im, prompt, neg_prompt, mode=ex["fd_mode"], face_prompt=ex["fd_prompt"],
                                          **kw)
+                elif kind == "eye":
+                    res, n = eye_detail(sd, im, prompt, neg_prompt, **kw)
                 else:
                     res, n = hand_detail(sd, im, prompt, neg_prompt, **kw)
             except _GenerationAborted:
@@ -1716,10 +1732,14 @@ def _build_generate_tab():
         note = (f'<br>{icon} {label} detail: {sum(found)} {what}(s) re-drawn '
                 f'({", ".join(str(n) for n in found)}) · denoise {den:g} · {time.time() - t0:.1f}s'
                 if sum(found) else f'<br>{icon} {label} detail: no {what}s found' if not errors else '')
-        if not face and not sum(found) and not errors:
+        if kind == "hand" and not sum(found) and not errors:
             from backend.detail_tools import hand_detector_available
             if not hand_detector_available():
                 note = "<br>✋ Hand detail skipped: the hand detector couldn't be downloaded (retried in 5 min)."
+        if kind == "eye" and not sum(found) and not errors:
+            from backend.detail_tools import eye_detector_available
+            if not eye_detector_available():
+                note = "<br>👁 Eye detail skipped: the eye detector couldn't be loaded (retried in 5 min)."
         if errors:   # it used to say "no faces found" when the pass had failed
             note += (f'<br><span style="color:#f38ba8;">{icon} {label} detail failed on {len(errors)} image(s): '
                      f'{html.escape(errors[0])}</span>')
@@ -1870,7 +1890,8 @@ def _build_generate_tab():
                 ), pipe=sd)
                 # SmartSplit runs plain txt2img only: say which settings it didn't apply (audit F-27)
                 skipped = [lbl for lbl, on in (("hires fix", ex["hires_on"]), ("face detail", ex["fd_on"]),
-                                                ("hand detail", ex["hd_on"]), ("PAG", ex["pag_scale"] > 0),
+                                                ("hand detail", ex["hd_on"]), ("eye detail", ex["ed_on"]),
+                                                ("PAG", ex["pag_scale"] > 0),
                                                 ("FreeU", ex["freeu"]), ("CFG rescale", ex["cfg_rescale"] > 0),
                                                 ("CLIP skip", ex["clip_skip"] > 1),
                                                 ("variation seed", ex["var_strength"] > 0)) if on]
@@ -1904,7 +1925,7 @@ def _build_generate_tab():
                 )
             seeds = list(getattr(sd, "last_seeds", None) or [seed])
             var_seeds = list(getattr(sd, "last_var_seeds", None) or []) if ex["var_strength"] > 0 else []
-            hires_note = fd_note = hd_note = ""
+            hires_note = fd_note = hd_note = ed_note = ""
             # Stop / an error during a later pass keeps the images of the last finished stage (they
             # used to be thrown away with the whole run — a 25 s base image lost to a hires OOM).
             halted = ""
@@ -1947,9 +1968,13 @@ def _build_generate_tab():
             if ex["fd_on"] and imgs and not halted:
                 fd_note = _post_pass("face detail", lambda: _detail_pass(
                     "face", imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress))
+            # eyes last: the face pass would otherwise redraw them again at its lower resolution
+            if ex["ed_on"] and imgs and not halted:
+                ed_note = _post_pass("eye detail", lambda: _detail_pass(
+                    "eye", imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress))
             halt_note = (f'<br><span style="color:#fab387;">{halted} — saved the images from before it.</span>'
                          if halted else "")
-            info_html = (f'<p style="color:#a6adc8;font-size:13px;">{info}{hires_note}{hd_note}{fd_note}'
+            info_html = (f'<p style="color:#a6adc8;font-size:13px;">{info}{hires_note}{hd_note}{fd_note}{ed_note}'
                          f'{halt_note}{tags_note}</p>')
             if use_i2i and init_img is not None and imgs:
                 width, height = imgs[0].size   # img2img keeps the input's size
@@ -1969,6 +1994,7 @@ def _build_generate_tab():
                 **({"face_detail": {"denoise": ex["fd_denoise"], "detector": ex["fd_mode"],
                                     "prompt": ex["fd_prompt"]}} if fd_note else {}),
                 **({"hand_detail": {"denoise": ex["hd_denoise"]}} if hd_note else {}),
+                **({"eye_detail": {"denoise": ex["ed_denoise"]}} if ed_note else {}),
                 **({"strength": strength, "source_image": Path(src).name if src else None} if i2i else {}),
                 **({"prompt_template": template["prompt"],
                     "negative_template": template["negative"] or None} if template else {}),
@@ -2019,14 +2045,14 @@ def _build_generate_tab():
         clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
         hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
         fd_on=False, fd_denoise=0.4, fd_mode="auto", fd_prompt="",
-        pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35,
+        pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35, ed_on=False, ed_denoise=0.3,
     ):
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
                                   hires_on=hires_on, hires_scale=hires_scale, hires_denoise=hires_denoise,
                                   hires_steps=hires_steps, hires_upscaler=hires_upscaler, fd_on=fd_on,
                                   fd_denoise=fd_denoise, fd_mode=fd_mode, fd_prompt=fd_prompt,
                                   pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale,
-                                  hd_on=hd_on, hd_denoise=hd_denoise))
+                                  hd_on=hd_on, hd_denoise=hd_denoise, ed_on=ed_on, ed_denoise=ed_denoise))
         import random
         # Guard against double-start
         if _autoloop_active.is_set():
@@ -2447,7 +2473,7 @@ def _build_generate_tab():
     # ── Settings save/load wiring ─────────────────────────────────────────
     _EXTRA_KEYS = ["clip_skip", "var_seed", "var_strength", "hires_on", "hires_scale", "hires_denoise", "hires_steps",
                    "hires_upscaler", "fd_on", "fd_denoise", "fd_mode", "fd_prompt", "pag_scale", "freeu", "cfg_rescale",
-                   "hd_on", "hd_denoise"]
+                   "hd_on", "hd_denoise", "ed_on", "ed_denoise"]
 
     def do_save_settings(prompt, neg, sched, steps, cfg, w, h, batch, seed, name,
                          model, vae, l1, w1, l2, w2, l3, w3, auto_q, sel_img, imgs, *extras):
@@ -2519,7 +2545,7 @@ def _build_generate_tab():
             ex = _clean_extra(d["extra"])
             extra_ups = [ex[k] for k in _EXTRA_KEYS]
             on = [lbl for k, lbl in (("hires_on", "hires fix"), ("fd_on", "face detail"), ("hd_on", "hand detail"),
-                                        ("freeu", "FreeU")) if ex[k]]
+                                        ("ed_on", "eye detail"), ("freeu", "FreeU")) if ex[k]]
             if ex["pag_scale"]:
                 on.append(f"PAG {ex['pag_scale']:g}")
             if on:
@@ -2529,7 +2555,7 @@ def _build_generate_tab():
 
     _settings_extra = [clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
                        hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
-                       pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl]
+                       pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl]
     settings_save_btn.click(
         do_save_settings,
         [prompt_txt, neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl,
@@ -2699,7 +2725,7 @@ def _build_generate_tab():
                        clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
                        hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
                        fd_on=False, fd_denoise=0.4, fd_mode="auto", fd_prompt="",
-                       pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35,
+                       pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35, ed_on=False, ed_denoise=0.3,
                        progress=gr.Progress()):
         _generation_abort.clear()          # a new run starts; Stop from here on counts
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
@@ -2707,7 +2733,7 @@ def _build_generate_tab():
                                   hires_steps=hires_steps, hires_upscaler=hires_upscaler, fd_on=fd_on,
                                   fd_denoise=fd_denoise, fd_mode=fd_mode, fd_prompt=fd_prompt,
                                   pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale,
-                                  hd_on=hd_on, hd_denoise=hd_denoise))
+                                  hd_on=hd_on, hd_denoise=hd_denoise, ed_on=ed_on, ed_denoise=ed_denoise))
         w1, w2, w3 = (_num(w, 0.8) for w in (w1, w2, w3))
         ok, status = _ensure_model(model_path, vae_path, progress)
         if _generation_abort.is_set():
@@ -2737,6 +2763,7 @@ def _build_generate_tab():
             fd_mode=extra["fd_mode"], fd_prompt=extra["fd_prompt"],
             pag_scale=extra["pag_scale"], freeu=extra["freeu"], cfg_rescale=extra["cfg_rescale"],
             hd_on=extra["hd_on"], hd_denoise=extra["hd_denoise"],
+            ed_on=extra["ed_on"], ed_denoise=extra["ed_denoise"],
         ))
         seeds = getattr(sd, "last_seeds", None) or []
         return (imgs, info_html, last, status, (list(seeds) if imgs else gr.update()),
@@ -2750,7 +2777,7 @@ def _build_generate_tab():
         init_image, strength_sl, use_i2i_cb,
         clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
         hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
-        pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl,
+        pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl,
     ]
     gen_event = generate_btn.click(
         lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
@@ -2767,7 +2794,7 @@ def _build_generate_tab():
                    scheduler, steps, cfg, width, height, batch, seed, init_img, strength, use_i2i,
                    clip_skip, var_seed, var_strength, hires_on, hires_scale, hires_denoise, hires_steps,
                    hires_upscaler, fd_on, fd_denoise, fd_mode, fd_prompt, pag_scale, freeu, cfg_rescale,
-                   hd_on, hd_denoise, x_axis, x_text, y_axis, y_text,
+                   hd_on, hd_denoise, ed_on, ed_denoise, x_axis, x_text, y_axis, y_text,
                    progress=gr.Progress()):
         import random
         _generation_abort.clear()
@@ -2794,7 +2821,7 @@ def _build_generate_tab():
                           hires_scale=hires_scale, hires_denoise=hires_denoise, hires_steps=hires_steps,
                           hires_upscaler=hires_upscaler, fd_on=fd_on, fd_denoise=fd_denoise, fd_mode=fd_mode,
                           fd_prompt=fd_prompt, pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale,
-                          hd_on=hd_on, hd_denoise=hd_denoise)
+                          hd_on=hd_on, hd_denoise=hd_denoise, ed_on=ed_on, ed_denoise=ed_denoise)
         cells, t0, lora_w_now, model_now = [], time.time(), None, model_path
         cell_seeds = []
         total = len(xs) * len(ys)
@@ -2985,11 +3012,11 @@ def _build_generate_tab():
                         lora_dd3, lora_weight3, strength_sl, use_i2i_cb, i2i_restore_html,
                         clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl,
                         hires_denoise_sl, hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb,
-                        fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, recreate_btn]
+                        fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, recreate_btn]
 
     def on_i2i_drop(img, restore):
         keep = [gr.update()] * 18
-        tail = [gr.update()] * 17 + [gr.update(visible=False)]
+        tail = [gr.update()] * 19 + [gr.update(visible=False)]
         if img is None:
             return (*keep, gr.update(), "", *tail)
         if not restore:
@@ -3106,7 +3133,7 @@ def _build_generate_tab():
             loop_max_batches, loop_delay,
             clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
             hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
-            pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl,
+            pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl,
         ],
         [output_gallery, gen_info, loop_status, last_generated_images, last_seed_state],
     )
@@ -3407,7 +3434,7 @@ def _build_generate_tab():
                       auto_quality, prompt, neg_prompt, scheduler, steps, cfg, width, height, batch, seed, init_img,
                       strength, use_i2i, clip_skip, var_seed, var_strength, hires_on, hires_scale, hires_denoise,
                       hires_steps, hires_upscaler, fd_on, fd_denoise, fd_mode, fd_prompt, pag_scale, freeu,
-                      cfg_rescale, hd_on, hd_denoise, progress=gr.Progress()):
+                      cfg_rescale, hd_on, hd_denoise, ed_on=False, ed_denoise=0.3, progress=gr.Progress()):
         """Generate every outfit of the card with the current settings (after 🎴 Load) and the same seeds for
         each outfit, then a labelled contact sheet. Finished outfit/seed pairs are remembered per card
         (outputs/card_batches/<card>.json) and skipped next time while the settings are unchanged."""
@@ -3441,7 +3468,7 @@ def _build_generate_tab():
                                   hires_scale=hires_scale, hires_denoise=hires_denoise, hires_steps=hires_steps,
                                   hires_upscaler=hires_upscaler, fd_on=fd_on, fd_denoise=fd_denoise, fd_mode=fd_mode,
                                   fd_prompt=fd_prompt, pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale,
-                                  hd_on=hd_on, hd_denoise=hd_denoise))
+                                  hd_on=hd_on, hd_denoise=hd_denoise, ed_on=ed_on, ed_denoise=ed_denoise))
         idx_path = OUTPUTS_DIR / "card_batches" / f"{safe_name(card['name']) or 'card'}.json"
         try:
             index = _json.loads(idx_path.read_text(encoding="utf-8")) if idx_path.exists() else {}
@@ -3564,7 +3591,7 @@ def _build_generate_tab():
         "vae": vae_dd,
         "extra": [clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl,
                   hires_denoise_sl, hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb,
-                  fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl],
+                  fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl],
         "lora_dd1": lora_dd,
         "lora_w1": lora_weight,
         "lora_w2": lora_weight2,
@@ -4161,7 +4188,7 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
             if img is None:
                 return (*[gr.update()] * 16,
                         '<p style="color:#f38ba8;font-size:13px;">⚠ No image loaded in PNG Info.</p>',
-                        *[gr.update()] * 17)
+                        *[gr.update()] * 19)
             plan = _restore_plan(read_png_info(img))
             u = lambda v: gr.update() if v is None else v
             lora_ups = [gr.update()] * 6
@@ -6281,6 +6308,7 @@ def _restore_plan(meta: dict) -> dict:
     plan["hires"] = meta.get("hires") if isinstance(meta.get("hires"), dict) else None
     plan["face_detail"] = meta.get("face_detail") if isinstance(meta.get("face_detail"), dict) else None
     plan["hand_detail"] = meta.get("hand_detail") if isinstance(meta.get("hand_detail"), dict) else None
+    plan["eye_detail"] = meta.get("eye_detail") if isinstance(meta.get("eye_detail"), dict) else None
     plan["pag_scale"] = float(_num(meta.get("pag_scale"), 0.0))
     plan["freeu"] = bool(meta.get("freeu"))
     plan["cfg_rescale"] = float(_num(meta.get("cfg_rescale"), 0.0))
@@ -6310,6 +6338,8 @@ def _plan_extra_updates(plan: dict) -> list:
                             fd_prompt=fd.get("prompt")))
     hd = plan.get("hand_detail") or {}
     hdx = _clean_extra(dict(hd_on=bool(hd), hd_denoise=hd.get("denoise")))
+    ed = plan.get("eye_detail") or {}
+    edx = _clean_extra(dict(ed_on=bool(ed), ed_denoise=ed.get("denoise")))
     return [ex["clip_skip"], ex["var_seed"], ex["var_strength"], bool(h),
             ex["hires_scale"] if h else keep, ex["hires_denoise"] if h else keep,
             ex["hires_steps"] if h else keep, ex["hires_upscaler"] if h else keep,
@@ -6318,7 +6348,8 @@ def _plan_extra_updates(plan: dict) -> list:
             # boosters are part of how the image looks: always set (off when the record has none)
             *(lambda b: [b["pag_scale"], b["freeu"], b["cfg_rescale"]])(_clean_extra(dict(
                 pag_scale=plan.get("pag_scale"), freeu=plan.get("freeu"), cfg_rescale=plan.get("cfg_rescale")))),
-            bool(hd), hdx["hd_denoise"] if hd else keep]
+            bool(hd), hdx["hd_denoise"] if hd else keep,
+            bool(ed), edx["ed_denoise"] if ed else keep]
 
 
 def _plan_summary(plan: dict) -> str:
@@ -6343,6 +6374,8 @@ def _plan_summary(plan: dict) -> str:
         bits.append(f"face detail (denoise {plan['face_detail'].get('denoise')})")
     if plan.get("hand_detail"):
         bits.append(f"hand detail (denoise {plan['hand_detail'].get('denoise')})")
+    if plan.get("eye_detail"):
+        bits.append(f"eye detail (denoise {plan['eye_detail'].get('denoise')})")
     if plan.get("scheduler"):
         bits.append(plan["scheduler"])
     out = ", ".join(bits)
@@ -6498,6 +6531,8 @@ def _params_text(rec: dict) -> str:
         parts.append(f"Face detail: denoise {fd['denoise']:g} ({fd['detector']})")
     if (rec.get("hand_detail") or {}).get("denoise") is not None:
         parts.append(f"Hand detail: denoise {_num(rec['hand_detail']['denoise'], 0.35):g}")
+    if (rec.get("eye_detail") or {}).get("denoise") is not None:
+        parts.append(f"Eye detail: denoise {_num(rec['eye_detail']['denoise'], 0.3):g}")
     if rec.get("emphasis") == "compel":
         parts.append("Emphasis: Compel")
     if rec.get("pag_scale"):
