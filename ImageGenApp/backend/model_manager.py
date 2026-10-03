@@ -55,11 +55,14 @@ def safetensors_problem(path: str) -> str:
 # Loading a checkpoint maps the file copy-on-write (charged as Windows commit in full) while `.to(cuda)` copies the weights
 # to the GPU — and under ZLUDA GPU allocations are charged as commit too (2 GB on the GPU = 2 GB less free commit). Measured
 # 2026-10-01 for 6.5-6.6 GB SDXL files: a load peaks at 2.04x the file size, the first load of a process at 2.25-2.4x
-# (14.55 GB and 15.6 GB for two 6.5 GB anime SDXL files). When other programs have used up the commit limit (RAM + page file)
-# the load does not fail cleanly: the process dies with an access violation inside safetensors' load_file — and with it the
-# queue, an outfit batch…
+# (14.55 GB and 15.6 GB for two 6.5 GB anime SDXL files). Re-measured 2026-10-02 with the larger page file (fresh app, system-wide
+# free commit sampled every 0.25 s): first loads 15.2 GB (2.30x) and 14.1 GB (2.13x) for two 6.62 GB anime SDXL files, seven
+# in-app SDXL -> SDXL switches with a LoRA fused 1.2-1.95x. The first-load numbers wobble by ~1 GB between identical files (other
+# programs' commit moves during the load), so the first-load factor sits above the highest one seen. When other programs have used
+# up the commit limit (RAM + page file) the load does not fail cleanly: the process dies with an access violation inside
+# safetensors' load_file — and with it the queue, an outfit batch…
 LOAD_COMMIT_FACTOR = 2.05          # later loads
-LOAD_COMMIT_FACTOR_FIRST = 2.25    # the first load in a process (kernel / context set-up on top)
+LOAD_COMMIT_FACTOR_FIRST = 2.4     # the first load in a process (kernel / context set-up on top)
 _first_load = [True]
 
 

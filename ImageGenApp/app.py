@@ -1311,7 +1311,8 @@ def _build_generate_tab():
                                 eraser=gr.Eraser(default_size=40))
                             with gr.Row():
                                 inp_denoise_sl = gr.Slider(0.1, 1.0, value=0.75, step=0.05, label="Inpaint denoise",
-                                                           info="0.4 = adjust · 0.75 = redraw · 1.0 = ignore what's there")
+                                                           info="0.5 = adjust (expression) · 0.8 = redraw · 0.95 = swap a small object · "
+                                                                "1.0 = ignore what's there. Steps run = steps × denoise.")
                                 inp_pad_sl = gr.Slider(0, 256, value=48, step=8, label="Context padding (px)",
                                                        info="Surroundings the model sees around the painted area.")
                             gr.HTML('<p style="color:#a6adc8;font-size:13px;margin:2px 0;">Uses the prompt, '

@@ -1002,6 +1002,11 @@ class SDXLPipeline:
                 _patch_unet_for_dml(self.pipe.unet)
             return
 
+        if self._clean_unet_state is None:
+            # a freshly loaded model whose LoRAs are put back after a checkpoint switch (app._ensure_model calls this
+            # directly, not load_lora): it is LoRA-free right now, and snapshot_wrapped() needs the snapshot below
+            self._snapshot_clean_state()
+
         # ── DML: fuse on CPU (PEFT ops unreliable on DirectML). CUDA/ZLUDA fuses
         # in place: moving the 5 GB UNet to CPU crashes inside ZLUDA (access
         # violation in Module.cpu()), and it's ~13 GB of PCIe traffic per change.
@@ -1035,7 +1040,8 @@ class SDXLPipeline:
                           f"{f', {skipped} unmatched' if skipped else ''}) fused at ×{weight:.2f}")
                     continue
                 try:
-                    self.pipe.load_lora_weights(path, adapter_name=_LORA_ADAPTER)
+                    # weight_name: with HF_HUB_OFFLINE=1 diffusers refuses to guess it ("you must specify a `weight_name`")
+                    self.pipe.load_lora_weights(path, weight_name=Path(path).name, adapter_name=_LORA_ADAPTER)
                 except Exception as e:
                     err = str(e)
                     if "Target modules" in err and "not found in the base model" in err:
