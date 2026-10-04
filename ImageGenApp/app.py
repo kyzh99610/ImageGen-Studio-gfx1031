@@ -1327,8 +1327,8 @@ def _build_generate_tab():
                                          "reliably fix a wrong finger count. ~5–15 s per hand.")
                                 hd_denoise_sl = gr.Slider(0.1, 0.7, value=_ls.get("hd_denoise", 0.35), step=0.05,
                                                           label="Hand denoise",
-                                                          info="0.3 = touch-up · 0.45 = redraw fingers · higher "
-                                                               "can turn things near a hand into hands")
+                                                          info="0.3–0.35 = touch-up · 0.45–0.55 = more hand-shaped, can invent things · it never fixes a finger "
+                                                               "count (a broken hand: another seed, or 🖌 Inpaint at ~0.8)")
                             with gr.Row():
                                 ed_cb = gr.Checkbox(
                                     label="👁 Also re-draw eyes", value=bool(_ls.get("ed_on", False)),
@@ -1395,8 +1395,8 @@ def _build_generate_tab():
                                 eraser=gr.Eraser(default_size=40))
                             with gr.Row():
                                 inp_denoise_sl = gr.Slider(0.1, 1.0, value=0.75, step=0.05, label="Inpaint denoise",
-                                                           info="0.5 = adjust (expression) · 0.8 = redraw · 0.95 = swap a small object · "
-                                                                "1.0 = ignore what's there. The Steps value runs at every denoise.")
+                                                           info="0.5 = adjust (expression) · 0.8 = redraw · 1.0 = ignore what's there (swap a small object: 0.95 "
+                                                                "leaves its old shape showing as lace — 🦋 Swap below does it at 1.0). The Steps value runs at every denoise.")
                                 inp_pad_sl = gr.Slider(0, 256, value=48, step=8, label="Context padding (px)",
                                                        info="Surroundings the model sees around the painted area.")
                             gr.HTML('<p style="color:#a6adc8;font-size:13px;margin:2px 0;">Uses the prompt, '
@@ -1404,6 +1404,12 @@ def _build_generate_tab():
                                     'changes; it is redrawn at the model\'s native resolution, so small areas '
                                     '(hands, faces) get full detail. Describe what should be there.</p>')
                             inp_btn = gr.Button("🖌 Inpaint", variant="primary", size="sm")
+                            with gr.Row():
+                                inp_swap_txt = gr.Textbox(value="", label="🦋 Swap a hair accessory — what should be there instead?", scale=3,
+                                                          placeholder="black butterfly hair ornament",
+                                                          info="Paint over the whole old accessory (what is outside the paint stays), type the new one. One pass at denoise 1.0 "
+                                                               "with a hair-only prompt + this text — at 0.9–0.95 the old shape still shows through as lace. Not there? Try another seed.")
+                                inp_swap_btn = gr.Button("🦋 Swap", size="sm", scale=1)
 
 
                             gr.Markdown("---")
@@ -3035,6 +3041,69 @@ def _build_generate_tab():
                + (f'<br><span style="color:#f9e2af;">Adjusted: {"; ".join(fixes)}</span>' if fixes else "")
                + "</p>")
         return [out], msg, status, [out], [used]
+
+    @gpu_job
+    def do_swap_ui(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, prompt, neg_prompt, scheduler,
+                   steps, cfg, seed, clip_skip, editor, padding, item, progress=gr.Progress()):
+        """🦋 Swap a hair accessory: paint over the old one, name the new one — one inpaint at denoise 1.0 with a hair-only
+        prompt (detail_tools.swap_item). At 0.9–0.95 the old shape still shows through as lace."""
+        from backend.detail_tools import SWAP_MIN_PADDING, swap_item, swap_prompt_from
+        _generation_abort.clear()
+        item = (item or "").strip()
+        image, mask = _editor_parts(editor)
+        if image is None:
+            return [], '<p style="color:#f38ba8;">❌ Upload an image in the Inpaint box first.</p>', \
+                gr.update(), gr.update(), gr.update()
+        if mask is None:
+            return [], '<p style="color:#f38ba8;">❌ Paint over the accessory you want to replace.</p>', \
+                gr.update(), gr.update(), gr.update()
+        if not item:
+            return [], '<p style="color:#f38ba8;">❌ Type what should be there instead (e.g. black butterfly hair ornament).</p>', \
+                gr.update(), gr.update(), gr.update()
+        image, fixed = _fit_init_image(image, max_side=2048)
+        if fixed:
+            mask = mask.resize(image.size, Image.NEAREST)
+        steps, cfg, _w, _h, _b, seed, _d, fixes = _clean_gen_args(steps, cfg, 512, 512, 1, seed, 1.0, img2img=True)
+        ok, status = _ensure_model(model_path, vae_path, progress)
+        if not ok:
+            return [], (status if isinstance(status, str) else ""), status, gr.update(), gr.update()
+        err = _sync_loras([(lora1, _num(w1, 0.8)), (lora2, _num(w2, 0.7)), (lora3, _num(w3, 0.7))], progress)
+        if err:
+            return [], f'<p style="color:#f38ba8;">❌ LoRA problem: {err}</p>', status, gr.update(), gr.update()
+        cs = 2 if int(_num(clip_skip, 1)) >= 2 else 1
+        pad = max(int(_num(padding, 48)), SWAP_MIN_PADDING)
+
+        def cb(step, total):
+            if _generation_abort.is_set():
+                raise _GenerationAborted()
+            progress(step / total, desc=f"Swapping: step {step}/{total}")
+        t0 = time.time()
+        try:
+            out, used = swap_item(sd, image, mask, item, prompt or "", neg_prompt or "", steps=steps, cfg=cfg, seed=seed,
+                                  scheduler=scheduler, clip_skip=cs, padding=pad, step_callback=cb)
+        except _GenerationAborted:
+            return [], '<p style="color:#fab387;">⏹ Swap stopped.</p>', status, gr.update(), gr.update()
+        except Exception as e:
+            return [], f'<p style="color:#f38ba8;">❌ Swap failed: {html.escape(str(e)[:300])}</p>', \
+                status, gr.update(), gr.update()
+        saved = _save_outputs([out], dict(mode="inpaint", prompt=swap_prompt_from(prompt or "", item), negative_prompt=neg_prompt or "",
+                                          steps=steps, cfg_scale=cfg, seeds=[used], scheduler=scheduler,
+                                          width=out.width, height=out.height, strength=1.0, inpaint_padding=pad,
+                                          inpaint_swap=item, clip_skip=cs if cs > 1 else None), pipe=sd)
+        msg = (f'<p style="color:#a6adc8;font-size:13px;">🦋 Swapped for “{html.escape(item)}” (seed {used}) in '
+               f'{time.time() - t0:.1f}s · Saved: {saved[0].name if saved else "-"}'
+               + (f'<br><span style="color:#f9e2af;">Adjusted: {"; ".join(fixes)}</span>' if fixes else "")
+               + "</p>")
+        return [out], msg, status, [out], [used]
+
+    inp_swap_event = inp_swap_btn.click(
+        lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
+    ).then(
+        do_swap_ui,
+        [model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3, prompt_txt,
+         neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl, seed_num, clip_skip_rb, inp_editor, inp_pad_sl, inp_swap_txt],
+        [output_gallery, gen_info, model_status, last_generated_images, last_seed_state],
+    )
 
     inp_event = inp_btn.click(
         lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],

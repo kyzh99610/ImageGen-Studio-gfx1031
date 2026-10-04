@@ -112,6 +112,7 @@ window, shows a loading screen while it starts, and frees the GPU when you close
   resumable. **🗂 History** tab: search every output by prompt words, model, LoRA or seed, ⭐ favourites, one click
   back to its exact settings. **✨ SD detail pass** in the Upscale tab: tiled low-denoise redraw with your model,
   beyond what hires fix can reach.
+- **🦋 Swap a hair accessory:** paint over the old one, name the new one (Inpaint accordion).
 - **✨ Polish:** one click sets hires fix / face / eye detail for the framing (portrait, cowboy shot, full body, wide shot).
 - **🌡 Pause while hot:** waits before each picture / pass until the laptop has cooled (Settings, off by default).
 - **🌡 Cool mode:** for laptops that switch off under long GPU runs — a short pause after every sampling step, same pictures.
@@ -196,7 +197,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 148 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload).
+That runs 149 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload).
 
 ## Credits and licenses
 

@@ -639,6 +639,43 @@ def eye_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, deno
     return out, sum(len(g) for g in groups)
 
 
+# ── Swap a hair accessory ─────────────────────────────────────────────────────
+# 🖌 Inpaint over an old ornament at 0.9–0.95 leaves its lattice showing as lace (round 6: a butterfly in 8 of 8, the old shape in all 8); at 1.0
+# nothing of it survives (denoise 1.0 starts from noise inside the mask). But the whole prompt then draws its own scene into the crop — the canon
+# pin's "lace, mesh" tags gave a net round / instead of the butterfly on 2 of 4 seeds — so the swap prompts with what belongs in the crop only:
+# the quality, subject and hair tags of the prompt (never its tags about the accessory that is there now) and the new item. Round 7 (hassakuXL,
+# the X-lattice clip → a black butterfly, 4 seeds): one pass at 1.0 with that prompt = a clean butterfly on every seed; erasing the old clip first
+# (1.0, hair-only prompt) and drawing at 0.9 gave a second butterfly or a web, never a better one.
+SWAP_DENOISE = 1.0
+SWAP_MIN_PADDING = 64        # the model needs hair / face round the spot to place and size the item
+_SWAP_KEEP = re.compile(r"hair|bangs|strand|ponytail|braid|twintail|sidelock|ahoge|forehead", re.I)
+_SWAP_OLD = re.compile(r"ornament|clip|hairpin|hair ?stick|barrette|hair ?band|headband|headdress|ribbon|\bbow\b|scrunchie|tiara|crown|\bhat\b|bonnet|"
+                       r"\bveil\b|flower|butterfly|\blace\b|\bmesh\b|accessor", re.I)
+
+
+def swap_prompt_from(prompt: str, item: str) -> str:
+    """The prompt of a swap pass: the quality and subject tags of `prompt` and its hair tags (minus the ones that name an accessory), then
+    `item` at weight 1.2 — the scene, outfit and the old accessory stay out, the crop is only hair."""
+    from backend.prompt_tools import _is_quality, join_tags, split_tags
+    keep = []
+    for tag in split_tags(prompt or ""):
+        core = re.sub(r"[()\\]", "", tag).lower()
+        if _SWAP_OLD.search(core):
+            continue
+        if _is_quality(tag) or re.fullmatch(r"\d?(girl|girls|boy|boys)|solo", core.split(":")[0].strip()) or _SWAP_KEEP.search(core):
+            keep.append(tag)
+    return join_tags(keep + [f"({item.strip()}:1.2)"])
+
+
+def swap_item(sdp, image: Image.Image, mask: Image.Image, item: str, prompt: str, negative: str = "", *,
+              steps: int = 12, cfg: float = 6.0, seed: int = -1, scheduler: str = "DPM++ 2M Karras",
+              clip_skip: int = 1, padding: int = SWAP_MIN_PADDING, step_callback=None) -> tuple[Image.Image, int]:
+    """Draw `item` (e.g. "black butterfly hair ornament") where `mask` is painted — over an old accessory: one inpaint at denoise 1.0 with
+    `swap_prompt_from`. Returns (image, seed used). `steps` is the number of sampling steps (the schedule length at 1.0)."""
+    return inpaint_region(sdp, image, mask, swap_prompt_from(prompt, item), negative, steps=steps, cfg=cfg, denoise=SWAP_DENOISE, seed=seed,
+                          scheduler=scheduler, clip_skip=clip_skip, padding=max(int(padding), SWAP_MIN_PADDING), step_callback=step_callback)
+
+
 # ── Tiled "SD upscale" detail pass ────────────────────────────────────────────
 def tile_boxes(W: int, H: int, tile: int, overlap: int) -> list[tuple[int, int, int, int]]:
     """Overlapping tile boxes (x1, y1, x2, y2) of at most tile×tile covering W×H; edge tiles are shifted
