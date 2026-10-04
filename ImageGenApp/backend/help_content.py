@@ -286,13 +286,14 @@ def parameters_html() -> str:
             ["✨ Face detail",
              "Finds faces and re-draws each one at the model's native size — fixes small or messy faces. Measured: "
              "no gain once the face is ≥ ~25 % of the picture width, a clear one below ~20 % (denoise 0.35), and for "
-             "tiny faces (a wide shot, ~6 %) 0.5–0.65 beats 0.35, so faces ≤ ~60 px get at least 0.55 automatically (blended up to "
-             "110 px; the slider is the value for normal faces) — 0.8 can turn the face into somebody else; hires "
-             "fix 1.5× + face detail was best there. The pass uses your whole prompt for every face, so with two "
+             "small faces 0.55 beats 0.35 (+0.2 to +0.5 identity at 60–130 px, and the hair pin comes back more often; a wide "
+             "shot, ~6 %, gains most), so faces ≤ ~100 px get at least 0.55 automatically (blended down to the slider's value "
+             "at ~150 px; the slider is the value for big faces) — 0.8 can turn the face into somebody else; hires "
+             "fix 1.5× + face detail was best for the smallest faces. The pass uses your whole prompt for every face, so with two "
              "character LoRAs in one picture it cannot keep the characters apart. Works after hires fix and in "
              "img2img too.",
              _cn("检测人脸并以模型原生分辨率重绘，修复小脸/乱脸。实测：脸宽 ≥ 画面约 25% 时无明显收益，低于约 20% 明显改善（降噪 0.35），"
-                 "远景小脸（约 6%）用 0.5–0.65 更好，≤ 约 60 像素的脸会自动提高到至少 0.55（0.8 可能把脸画成别人），配合高清修复 1.5× 最佳；每张脸都用整段提示词，"
+                 "小脸用 0.55 比 0.35 更好（60–130 像素处身份相似度 +0.2～+0.5，发饰也更常出现，远景约 6% 收益最大），≤ 约 100 像素的脸会自动提高到至少 0.55（约 150 像素以上用滑块值；0.8 可能把脸画成别人），最小的脸配合高清修复 1.5× 最佳；每张脸都用整段提示词，"
                  "含两个角色 LoRA 的图无法区分角色。")],
             ["✋ Hand detail",
              "Same idea for hands (anime hand detector, gloves count), run before the faces: 0.35 cleans up "
@@ -305,11 +306,37 @@ def parameters_html() -> str:
                  "无法保证修正手指数量。脸/手重绘使用均匀步长版本的采样器。")],
             ["👁 Eye detail",
              "Finds the eyes (anime eye detector, on each face) and re-draws both eyes of a face in one pass at high "
-             "resolution, after the face pass: 0.25 fixes a malformed eye (one under bangs) and sharpens, 0.3–0.35 adds definition, 0.45+ adds stray sparkles. Pupil / iris detail needs pixels: in an 832×1216 picture an eye is ~45 px, after a 2× upscale or hires fix the pass draws real pupils. "
+             "resolution, after the face pass, with a prompt of only the eye tags (colour, gaze, expression, glasses…) plus “detailed eyes, "
+             "detailed pupils, iris detail”: 0.3 tidies a malformed eye (one under bangs), the default 0.4 adds iris / pupil structure "
+             "(Laplacian energy of the eyes +17 % over the old pass, no colour bleed; closed or half-closed eyes, glasses and bangs stay as they were), "
+             "0.5+ redraws the eye and can add stray marks. At ~45 px per eye (832×1216) it is a cleanup — pupil and iris rings need pixels: "
+             "after hires fix or a 2× upscale the same pass draws them (about +12 % more detail again). "
+             "The prompt also says “round pupils” and the negative “slit pupils, cat eyes” — without them “detailed pupils” drew bold "
+             "outlined slit pupils on some checkpoints; if your own prompt names a pupil shape (slit pupils, heart-shaped pupils, @_@ …) "
+             "the pass leaves the shape to it. Pony models come out softer after any eye pass (about −27 % sharpness at 0.25–0.4): leave it off there. "
              "A colour guard keeps the new colour inside the iris: bangs over an eye, lids and skin keep their own "
              "colour and only get sharper, so a red iris can't tint the hair.",
-             _cn("检测眼睛并在脸部重绘之后以高分辨率重绘双眼：0.25 修正变形的眼睛并锐化，0.3–0.35 更清晰，0.45 以上会出现多余高光；瞳孔细节需要先放大或高清修复。"
+             _cn("检测眼睛并在脸部重绘之后以高分辨率重绘双眼，提示词只含眼睛相关标签加“detailed eyes, detailed pupils, iris detail”：0.3 修正变形的眼睛，默认 0.4 增加虹膜/瞳孔结构"
+                 "（眼部细节能量比旧方法 +17%，无串色；闭眼/半闭眼、眼镜、刘海保持不变），0.5 以上会重画眼睛并可能出现杂点；832×1216 图中眼睛约 45 像素，"
+                 "瞳孔与虹膜环需要像素：先高清修复或 2× 放大再重绘可画出（再多约 12% 细节）。"
+                 "提示词还含“round pupils”，反向提示词含“slit pupils, cat eyes”——否则“detailed pupils”在部分模型上会画出粗黑边的竖瞳；"
+                 "若你的提示词自己指定了瞳孔形状（slit pupils、heart-shaped pupils、@_@ 等），则保持你的设定。Pony 系模型做任何眼部重绘都会变软"
+                 "（0.25–0.4 时清晰度约 −27%）：建议对 Pony 关闭。"
                  "颜色保护只让虹膜内取新颜色，遮眼的刘海、眼睑和皮肤保持原色，不会被红色虹膜染色。")],
+            ["✨ Polish (Generate tab)",
+             "The dropdown above Hires fix — Portrait / Cowboy shot / Full body / Wide shot, or Auto (reads the framing tags in the prompt) — "
+             "fills hires fix, face detail and eye detail with the recipe for that framing: eyes only for a portrait or cowboy shot (the face is "
+             "≥ ~24 % of the width, where face detail changes nothing), hires 1.5× + eyes for a full body, hires 1.5× + face + eyes for a wide shot. "
+             "The note shows how many times the plain picture's time it costs (≈ 1.4× / 1.4× / 4.1× / 4.8×; measured chains came out cheaper). "
+             "Eye detail is skipped on Pony models (it blurs them). Measured (2 seeds each): at a cowboy shot "
+             "(face 24–28 %) nothing in the chain changes identity — it is insurance; for a full body the plain face is often damaged and hires 1.5× + eyes "
+             "fixes it best (identity score 0.937 → 0.967, the hair pin .42 → .90, face ×1.3 sharper) — the face pass on top of hires adds nothing. "
+             "Hands are left out: the hand pass cleans texture but never fixed a finger count. Change any control afterwards.",
+             _cn("高清修复上方的下拉框：人像 / 牛仔镜头 / 全身 / 远景（或“自动”，读取提示词里的构图标签）按构图一键填好高清修复、脸部与眼部重绘："
+                 "人像和牛仔镜头只重绘眼睛（脸宽 ≥ 约 24%，脸部重绘无效），全身 高清修复 1.5×+眼，远景 高清修复 1.5×+脸+眼；提示条显示约为普通出图的几倍时间（实测更省时）。"
+                 "实测（各 2 个种子）：牛仔镜头（脸宽 24–28%）整条链几乎不改变相似度，只是保险；全身图的原始脸常有损坏，高清修复 1.5×+眼睛修得最好"
+                 "（相似度 0.937→0.967，发饰 .42→.90，脸部清晰度 ×1.3），在其上再做脸部重绘没有额外收益。"
+                 "不含手部重绘（只改善纹理，不能修正手指数）。之后仍可调整任何控件。")],
             ["⚖️ Prompt weights & colour bleeding",
              "(tag:1.3) works like A1111 now (Settings → Prompt weights): the app used to apply weights 2–5× harder, so "
              "weighted background / lighting / colour tags flooded their colour onto the character. If a scene colour "
@@ -329,9 +356,14 @@ def parameters_html() -> str:
              "with the current settings, then a labelled contact sheet. Pairs already made with the same settings "
              "are skipped, so a stopped run resumes. Every picture gets a ⭐ rating (n/5) on the sheet from CPU checks "
              "whose models are already cached: one face / at most two hands, the card's hair and eye colours and its "
-             "hair pin on the head crop, colour noise — with the reasons for anything below 5.",
+             "hair pin on the head crop, colour noise — with the reasons for anything below 5. After “🧬 Learn her look” (3 or more "
+             "pictures of her with a face ≥ 100 px — outfit, pose and lighting don't matter; the first use downloads the 150 MB CCIP "
+             "anime-character model) it also flags a face that is further from her than her own pictures are. Measured on 247 existing "
+             "pictures: her own held-out pictures flagged ~3 %, a no-LoRA look-alike with her tags up to ~1 in 5, another character with her "
+             "tags up to ~1 in 3 (tighter references catch more), another girl every time; faces under 100 px are not judged. A warning, not a verdict.",
              _cn("角色卡 →“生成所有服装”：每套服装 × N 个种子（种子相同便于对比），最后生成对比图；已生成的会跳过，可断点续跑。"
-                 "对比图上每张图有 ⭐ 评分（n/5）：一张脸/至多两只手、角色卡的发色瞳色与发饰、彩色噪点（仅用已缓存的模型在 CPU 上检查）。")],
+                 "对比图上每张图有 ⭐ 评分（n/5）：一张脸/至多两只手、角色卡的发色瞳色与发饰、彩色噪点（仅用已缓存的模型在 CPU 上检查）。"
+                 "用“🧬 Learn her look”（3 张以上她的图，脸宽 ≥ 100 像素，服装/姿势/光线不限；首次使用会下载 150 MB 的 CCIP 动漫角色识别模型）学习后还会标出比她本人图更不像她的脸（247 张现有图实测：她自己的图误报约 3%，同标签无 LoRA 的相似脸最多约 1/5，同标签的其他角色最多约 1/3（参考图越相近检出越多），其他女孩 100%；小于 100 像素的脸不判断）。仅作提示，不是定论。")],
             ["🗂 History",
              "Search everything in outputs/ by prompt words, model, LoRA or seed; ⭐ favourites; open an image in PNG "
              "Info → Send to Generate to restore exactly how it was made.",

@@ -4,7 +4,8 @@ makes that character come out right — checkpoint, LoRAs + weights, the charact
 named outfits (tag sets), an optional negative, size, CFG, steps, sampler and CLIP skip.
 "Build from LoRA" fills one in from the LoRA's Civitai trigger prompts and training tags.
 A card may also carry `profiles`: per-checkpoint overrides (LoRA weights, CFG, sampler, boosters …) that
-🎴 Load applies when the checkpoint selected in the Generate tab has one.
+🎴 Load applies when the checkpoint selected in the Generate tab has one, and an `identity` (the mean CCIP head
+feature of reference pictures, backend/identity_score) that the outfit batch's ⭐ rating compares new pictures with.
 """
 from __future__ import annotations
 
@@ -138,6 +139,11 @@ def clean_card(d) -> dict | None:
                 profiles[Path(ck).name] = prof
     if profiles:
         card["profiles"] = profiles
+    if d.get("identity") is not None:
+        from backend.identity_score import clean_identity       # numpy only; the card file keeps the reference look (⭐ "looks like her")
+        ident = clean_identity(d["identity"])
+        if ident:
+            card["identity"] = ident
     return card
 
 
