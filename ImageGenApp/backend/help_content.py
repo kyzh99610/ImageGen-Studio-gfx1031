@@ -287,13 +287,13 @@ def parameters_html() -> str:
              "Finds faces and re-draws each one at the model's native size — fixes small or messy faces. Measured: "
              "no gain once the face is ≥ ~25 % of the picture width, a clear one below ~20 % (denoise 0.35), and for "
              "small faces 0.55 beats 0.35 (+0.2 to +0.5 identity at 60–130 px, and the hair pin comes back more often; a wide "
-             "shot, ~6 %, gains most), so faces ≤ ~100 px get at least 0.55 automatically (blended down to the slider's value "
+             "shot, ~6 %, gains most), so faces ≤ ~100 px get at least 0.55 automatically, tiny ones ≤ ~60 px 0.65 (blended down to the slider's value "
              "at ~150 px; the slider is the value for big faces) — 0.8 can turn the face into somebody else; hires "
              "fix 1.5× + face detail was best for the smallest faces. The pass uses your whole prompt for every face, so with two "
              "character LoRAs in one picture it cannot keep the characters apart. Works after hires fix and in "
              "img2img too.",
              _cn("检测人脸并以模型原生分辨率重绘，修复小脸/乱脸。实测：脸宽 ≥ 画面约 25% 时无明显收益，低于约 20% 明显改善（降噪 0.35），"
-                 "小脸用 0.55 比 0.35 更好（60–130 像素处身份相似度 +0.2～+0.5，发饰也更常出现，远景约 6% 收益最大），≤ 约 100 像素的脸会自动提高到至少 0.55（约 150 像素以上用滑块值；0.8 可能把脸画成别人），最小的脸配合高清修复 1.5× 最佳；每张脸都用整段提示词，"
+                 "小脸用 0.55 比 0.35 更好（60–130 像素处身份相似度 +0.2～+0.5，发饰也更常出现，远景约 6% 收益最大），≤ 约 100 像素的脸会自动提高到至少 0.55，≤ 约 60 像素的提高到 0.65（约 150 像素以上用滑块值；0.8 可能把脸画成别人），最小的脸配合高清修复 1.5× 最佳；每张脸都用整段提示词，"
                  "含两个角色 LoRA 的图无法区分角色。")],
             ["✋ Hand detail",
              "Same idea for hands (anime hand detector, gloves count), run before the faces: 0.35 cleans up "
@@ -323,6 +323,13 @@ def parameters_html() -> str:
                  "若你的提示词自己指定了瞳孔形状（slit pupils、heart-shaped pupils、@_@ 等），则保持你的设定。Pony 系模型做任何眼部重绘都会变软"
                  "（0.25–0.4 时清晰度约 −27%）：建议对 Pony 关闭。"
                  "颜色保护只让虹膜内取新颜色，遮眼的刘海、眼睑和皮肤保持原色，不会被红色虹膜染色。")],
+            ["🌡 Cool mode / pause while hot (Settings)",
+             "For laptops that switch themselves off under long GPU runs. Cool mode pauses after every sampling step (1.5 = the GPU "
+             "works ~40 % of the time; same pictures, slower). Pause while hot waits before each picture and each hires / face / eye "
+             "pass until the thermal zone is 8 °C under the limit you set (90 suits the RX 6800M laptop, which switched off after "
+             "minutes at 96 °C). Stop ends any wait. Both are off by default and saved for the next start.",
+             _cn("笔记本长时间满载会自动关机时使用。冷却模式在每个采样步之后暂停（1.5 = GPU 约 40% 时间工作，画面不变，速度变慢）；"
+                 "过热暂停会在每张图和每个高清修复/脸/眼重绘之前等待，直到温度比设定值低 8 °C（RX 6800M 笔记本建议 90）。停止按钮可结束等待。默认关闭，设置会保存。")],
             ["✨ Polish (Generate tab)",
              "The dropdown above Hires fix — Portrait / Cowboy shot / Full body / Wide shot, or Auto (reads the framing tags in the prompt) — "
              "fills hires fix, face detail and eye detail with the recipe for that framing: eyes only for a portrait or cowboy shot (the face is "
@@ -357,13 +364,14 @@ def parameters_html() -> str:
              "are skipped, so a stopped run resumes. Every picture gets a ⭐ rating (n/5) on the sheet from CPU checks "
              "whose models are already cached: one face / at most two hands, the card's hair and eye colours and its "
              "hair pin on the head crop, colour noise — with the reasons for anything below 5. After “🧬 Learn her look” (3 or more "
-             "pictures of her with a face ≥ 100 px — outfit, pose and lighting don't matter; the first use downloads the 150 MB CCIP "
-             "anime-character model) it also flags a face that is further from her than her own pictures are. Measured on 247 existing "
+             "pictures of her with a face ≥ 100 px — pose and lighting don't matter, but hair and headwear do: include the hats, ponytails and buns of the "
+             "outfits you will judge; the first use downloads the 150 MB CCIP anime-character model) it also flags a face that is further from her than her own pictures are. Measured on 247 existing "
              "pictures: her own held-out pictures flagged ~3 %, a no-LoRA look-alike with her tags up to ~1 in 5, another character with her "
-             "tags up to ~1 in 3 (tighter references catch more), another girl every time; faces under 100 px are not judged. A warning, not a verdict.",
+             "tags up to ~1 in 3 (tighter references catch more), another girl every time; faces under 100 px are not judged. A warning, not a verdict. With 12 plain daylight references 15 of the 33 outfits of the v3 card were flagged although every picture was her "
+             "(a hat, ponytail or buns shifts CCIP's fingerprint; references that include such outfits flagged 11 %, and the message then says \"check by eye\").",
              _cn("角色卡 →“生成所有服装”：每套服装 × N 个种子（种子相同便于对比），最后生成对比图；已生成的会跳过，可断点续跑。"
                  "对比图上每张图有 ⭐ 评分（n/5）：一张脸/至多两只手、角色卡的发色瞳色与发饰、彩色噪点（仅用已缓存的模型在 CPU 上检查）。"
-                 "用“🧬 Learn her look”（3 张以上她的图，脸宽 ≥ 100 像素，服装/姿势/光线不限；首次使用会下载 150 MB 的 CCIP 动漫角色识别模型）学习后还会标出比她本人图更不像她的脸（247 张现有图实测：她自己的图误报约 3%，同标签无 LoRA 的相似脸最多约 1/5，同标签的其他角色最多约 1/3（参考图越相近检出越多），其他女孩 100%；小于 100 像素的脸不判断）。仅作提示，不是定论。")],
+                 "用“🧬 Learn her look”（3 张以上她的图，脸宽 ≥ 100 像素，姿势/光线不限，但发型和头饰有影响：请包含要检查的服装里的帽子、马尾、丸子头；首次使用会下载 150 MB 的 CCIP 动漫角色识别模型）学习后还会标出比她本人图更不像她的脸（247 张现有图实测：她自己的图误报约 3%，同标签无 LoRA 的相似脸最多约 1/5，同标签的其他角色最多约 1/3（参考图越相近检出越多），其他女孩 100%；小于 100 像素的脸不判断）。仅作提示，不是定论。参考图只有普通日光照时，v3 角色卡 33 套服装里有 15 套被标记（其实每张都是她）：帽子、马尾、丸子头会改变 CCIP 指纹；参考图包含这类服装后误报降到 11%，提示会写“请肉眼检查”。")],
             ["🗂 History",
              "Search everything in outputs/ by prompt words, model, LoRA or seed; ⭐ favourites; open an image in PNG "
              "Info → Send to Generate to restore exactly how it was made.",
@@ -375,11 +383,11 @@ def parameters_html() -> str:
             ["🖌 Inpaint",
              "Paint over any area and describe what should be there; only that area is redrawn, at native "
              "resolution, with your model, LoRAs and seed. Good for small things — measured: swapping a hair "
-             "ornament needs ~0.95 (0.9 leaves traces of the old shape, 0.75–0.8 gives a hybrid), an expression ~0.5 "
-             "deepens a smile and ~0.8 opens a closed mouth. It uses the evenly spaced version of your sampler so "
+             "ornament needs ~0.95 and the old shape still shows through as lace (0.9 and below: more of it, 0.75–0.85 gives a hybrid), an expression ~0.5 "
+             "deepens a smile and ~0.65–0.8 opens a closed mouth (waiIllustrious opens it at ~0.5). It uses the evenly spaced version of your sampler so "
              "denoise means what it says, and the Steps value is what runs at any denoise (as in A1111). A garment recolour can't be done this way (up to 0.95 the colour stays, "
              "1.0 over a body-sized area draws a new figure) — use same seed + edited prompt.",
-             _cn("涂抹要修改的区域并描述内容，仅重绘该区域。适合小物件（换发饰约 0.95；表情约 0.5 微调、约 0.8 张嘴）；"
+             _cn("涂抹要修改的区域并描述内容，仅重绘该区域。适合小物件（换发饰约 0.95，旧饰品的线条仍会隐约残留；表情约 0.5 微调、约 0.65–0.8 张嘴）；"
                  "任何降噪下都按设定步数运行；换衣服颜色请用同种子+改提示词。")],
             ["⏩ DPM++ 2M AYS",
              "NVIDIA's Align-Your-Steps schedule: about the quality of 25 steps in 10–12. The Karras samplers "

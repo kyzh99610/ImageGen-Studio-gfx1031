@@ -156,9 +156,9 @@ try:                                   # Settings → Prompt weights (saved choi
     _set_emphasis(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("emphasis", "a1111"))
 except Exception:
     pass
-try:                                   # Settings → Cool mode (saved choice)
-    from backend import sampling as _smp0
-    _smp0.set_cool(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("cool", 0.0))
+try:                                   # Settings → Cool mode / pause while hot (saved choices)
+    from backend import sampling as _smp0, thermal as _thm0
+    _thm0.apply_saved(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")), _smp0)
 except Exception:
     pass
 
@@ -865,9 +865,37 @@ def _carry_params(src_img, note: str | None):
     return info
 
 
+def _thermal_wait(progress=None) -> float:
+    """Settings → 🌡 pause while hot: wait until the laptop is cooler before a picture or a post pass (Stop ends the wait).
+    Returns the seconds waited."""
+    from backend import thermal
+
+    def say(text):
+        try:
+            if progress is not None:
+                progress(0, desc=text)
+        except Exception:
+            pass
+    return thermal.wait_cool(_generation_abort.is_set, say)
+
+
 def _eye_pass_skipped(pipe) -> bool:
     """The eye pass is skipped on Pony-family checkpoints: it softened them at every denoise (round 5, −28 % eye detail)."""
     return str(getattr(pipe, "model_family", "") or "").lower() == "pony"
+
+
+_HAIR_COVER = re.compile(r"\b(hat|cap|bonnet|beret|veil|tiara|crown|headdress|headband|visor|beanie|goggles|headwear|hood|helmet|wig|bun|buns|"
+                         r"hair bun|ponytail|twintails|braid|braids|hairband|mask on head)\b", re.I)
+
+
+def _flag_text(card: dict, outfit: str, flags) -> str:
+    """The ⭐ flags of one picture as the outfit batch message shows them. A "not her?" flag on an outfit whose text changes the hair or head
+    (hat, ponytail, buns, veil …) says so: CCIP reads hair and headwear as part of the character — round 6 flagged 15 of the 33 outfits of the v3 card with
+    12 daylight references (every picture was her by eye; references that include such outfits flag 11 %)."""
+    txt = ", ".join(flags)
+    if any(str(f).startswith("not her?") for f in flags) and _HAIR_COVER.search((card.get("outfits") or {}).get(outfit, "") or ""):
+        txt += " — a hat / hairstyle in this outfit lowers it: check by eye"
+    return txt
 
 
 def _inpaint_steps(steps, denoise) -> int:
@@ -1119,7 +1147,7 @@ def _build_generate_tab():
                         card_build_btn = gr.Button("🧩 Build from LoRA slot 1", size="sm")
                     card_profile_btn = gr.Button("📌 Save as this checkpoint's profile", size="sm")
                     with gr.Accordion("🧬 Learn her look — so the ⭐ rating can flag a face that isn't hers", open=False):
-                        card_ident_files = gr.File(label="Pictures of her (3 or more, faces ≥ 100 px — outfits and lighting don't matter)",
+                        card_ident_files = gr.File(label="Pictures of her (3 or more, faces ≥ 100 px — pose and lighting don't matter; include the hats / hairstyles you want judged)",
                                                    file_count="multiple", file_types=["image"])
                         card_ident_btn = gr.Button("🧬 Learn from these pictures (first use downloads CCIP, 150 MB)", size="sm")
                     card_status = gr.HTML("")
@@ -1282,7 +1310,7 @@ def _build_generate_tab():
                                 fd_denoise_sl = gr.Slider(0.1, 0.8, value=_ls.get("fd_denoise", 0.4), step=0.05,
                                                           label="Face denoise",
                                                           info="For big faces (≥ ~150 px): 0.3 = touch-up · 0.4 = fix details. Small faces (≤ ~100 px: "
-                                                               "wide and full-body shots) are raised to 0.55 automatically · 0.8 = can become a different face")
+                                                               "wide and full-body shots) are raised to 0.55, tiny ones (≤ ~60 px) to 0.65 automatically · 0.8 = can become a different face")
                                 fd_mode_rb = gr.Radio(["auto", "anime", "photo"],
                                                       value=_ls.get("fd_mode") if _ls.get("fd_mode") in
                                                       ("auto", "anime", "photo") else "auto",
@@ -1841,6 +1869,9 @@ def _build_generate_tab():
         #  here would discard a Stop pressed while the model was loading)
         if _generation_abort.is_set():
             return [], '<p style="color:#fab387;">⏹ Generation stopped.</p>', []
+        cool_wait = [_thermal_wait(progress)]          # Settings → 🌡 pause while hot (off unless set)
+        if _generation_abort.is_set():
+            return [], '<p style="color:#fab387;">⏹ Generation stopped.</p>', []
         steps, cfg, width, height, batch, seed, strength, fixes = _clean_gen_args(
             steps, cfg, width, height, batch, seed, strength, img2img=bool(use_i2i and init_img is not None))
         if use_i2i and init_img is None:
@@ -1976,6 +2007,9 @@ def _build_generate_tab():
             def _post_pass(label, run):
                 nonlocal imgs, halted
                 try:
+                    cool_wait[0] += _thermal_wait(progress)
+                    if _generation_abort.is_set():
+                        raise _GenerationAborted()
                     imgs, note = run()
                     return note
                 except _GenerationAborted:
@@ -2022,6 +2056,7 @@ def _build_generate_tab():
             halt_note = (f'<br><span style="color:#fab387;">{halted} — saved the images from before it.</span>'
                          if halted else "")
             info_html = (f'<p style="color:#a6adc8;font-size:13px;">{info}{hires_note}{hd_note}{fd_note}{ed_note}{ed_skip}'
+                         f'{"<br>🌡 Paused " + _fmt_elapsed(cool_wait[0]) + " to let the laptop cool" if cool_wait[0] >= 1 else ""}'
                          f'{halt_note}{tags_note}</p>')
             if use_i2i and init_img is not None and imgs:
                 width, height = imgs[0].size   # img2img keeps the input's size
@@ -3687,7 +3722,7 @@ def _build_generate_tab():
             ident = f"<br>⭐ {sum(r['stars'] for r in scored) / len(scored):.1f}/5 on average"
             if bad:
                 ident += ('<br><span style="color:#f9e2af;">⚠ possibly off-model or damaged: '
-                          + "; ".join(f'{html.escape(str(o))} · seed {s_} ({html.escape(", ".join(f))})' for o, s_, f in bad[:8])
+                          + "; ".join(f'{html.escape(str(o))} · seed {s_} ({html.escape(_flag_text(card, o, f))})' for o, s_, f in bad[:8])
                           + (f" … and {len(bad) - 8} more" if len(bad) > 8 else "") + "</span>")
             elif looked and face_checked:
                 ident += f"<br>✅ hair / eye colours (WD14) and faces (CCIP) match the card in all {n_real} image(s)"
@@ -5948,6 +5983,23 @@ def _build_settings_tab():
                     return (f'<p style="color:#a6e3a1;font-size:13px;">✅ Cool mode: pause {f:g}× the step time</p>' if f
                             else '<p style="color:#a6adc8;font-size:13px;">Cool mode off</p>')
                 cool_sl.release(on_cool, [cool_sl], [cool_status])
+                from backend import thermal as _thm
+                _t_now = _thm.read_temp()
+                therm_sl = gr.Slider(0, 96, value=_thm.GUARD["limit"], step=1,
+                                     label="Pause while hotter than (°C) — 0 = off",
+                                     info="Before each picture and each hires / face / eye pass, wait until the laptop's thermal "
+                                          "zone is 8 °C below this. The RX 6800M laptop switched off after minutes at 96 °C; 90 "
+                                          "is a sensible value there. "
+                                          + (f"Now: {_t_now:.0f} °C." if _t_now is not None else "This PC reports no thermal zone.")
+                                          + " Saved for the next start.")
+                therm_status = gr.HTML("")
+
+                def on_therm(v):
+                    f = _thm.set_limit(v)
+                    _save_pref("thermal_limit", f)
+                    return (f'<p style="color:#a6e3a1;font-size:13px;">✅ Pausing above {f:g} °C (resume at {f - 8:g} °C)</p>'
+                            if f else '<p style="color:#a6adc8;font-size:13px;">Pause while hot: off</p>')
+                therm_sl.release(on_therm, [therm_sl], [therm_status])
                 gr.Markdown("### 🖥 GPU")
 
                 # ── GPU picker ──────────────────────────────────────────────

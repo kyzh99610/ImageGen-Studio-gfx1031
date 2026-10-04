@@ -40,7 +40,7 @@ _HAND_SHA256 = "408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0
 _HAND_CONF = 0.45
 _hand_yolo = {}
 # deepghs anime eye detector (YOLOv8s, OpenRAIL, 44.6 MB ONNX). Run on the face crop, not the whole picture: on a
-# full-body 1664×2432 picture it found one eye of two, on the face crop both (scores 0.63–0.78 on a test character's eyes).
+# full-body 1664×2432 picture it found one eye of two, on the face crop both (scores 0.63–0.78 on her eyes).
 _EYE_REPO, _EYE_FILE = "deepghs/anime_eye_detection", "eye_detect_v1.0_s/model.onnx"
 _EYE_SHA256 = "7c5f0259103cc407e2a0f0b047a51271246b9525d27920315295a54367c5c583"
 _EYE_LOCAL = MODELS_DIR / "detectors" / "anime_eye_detect_v1.0_s.onnx"
@@ -376,11 +376,17 @@ def size_aware_denoise(denoise: float, face_px: float) -> float:
     tiny face into somebody else; round 5 — 62–90 px (n 4) 0.55 +0.48 ± 0.14 (the old blend to 0.35 at 110 px: +0.32), 90–130 px (n 8) 0.55
     +0.21 ± 0.09 / 0.65 +0.31 ± 0.14 (the old rule left them at 0.35: +0.02), ≥ 130 px (n 3) no difference; at ≤ 104 px the hair pin came back more
     often at 0.55 (pin probability 0.39 → 0.63 at 62–90 px, 0.62 → 0.78 at 90–130 px). So faces ≤ 100 px get at least 0.55, faces ≥ 150 px the
-    slider's value, linear in between; never above max(slider, 0.65)."""
-    lo, hi, small = 100.0, 150.0, 0.55
-    if denoise >= small or face_px >= hi:
+    slider's value, linear in between; never above max(slider, 0.65). Round 6: faces ≤ 62 px (n 4) 0.65 over 0.55 +0.50 ± 0.24 (3 of 4
+    better), the direction of round 4's +0.57 (0.65 over 0.35, 3/3 seeds) — so the tiniest faces (≤ 60 px) get 0.65, blending to 0.55 at 100 px."""
+    lo, hi, small, tiny, tiny_px = 100.0, 150.0, 0.55, 0.65, 60.0
+    if denoise >= tiny or face_px >= hi:
         return denoise
-    want = small if face_px <= lo else small + (denoise - small) * (face_px - lo) / (hi - lo)
+    if face_px <= tiny_px:
+        want = tiny
+    elif face_px <= lo:
+        want = tiny + (small - tiny) * (face_px - tiny_px) / (lo - tiny_px)
+    else:
+        want = small + (denoise - small) * (face_px - lo) / (hi - lo)
     return round(min(max(denoise, 0.65), max(denoise, want)), 3)
 
 

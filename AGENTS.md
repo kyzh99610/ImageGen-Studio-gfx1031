@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 146-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 148-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 141 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 143 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -499,6 +499,24 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   Adrenalin) powered off under minutes of full load; 1.5 kept long runs alive. Check: same picture (max 1/255), 22.4 → 37.6 s,
   run mean thermal zone 92.4 → 89.1 °C.
 - X/Y axes "Face denoise" / "Hand denoise" / "Eye denoise"; `TEST_ONLY=<regex>` runs part of the suite.
+
+### Laptop heat: pause while hot, cool-mode measurements, smaller fixes (2026-10-04)
+- **🌡 Pause while hot** (`backend/thermal.py`, Settings, pref `thermal_limit`, 0 = off): `read_temp()` reads the hottest
+  `\Thermal Zone Information(*)\Temperature` via PDH (ctypes, ~1 s, None off Windows). Before every picture (so every X/Y
+  cell, outfit-batch picture, Auto-Loop batch) and every hires / hand / face / eye pass, `wait_cool()` waits at ≥ limit until
+  ≤ limit − 8 (2 s polls, Stop ends it, max 15 min); inside a sampling pass the step callback acts only as an emergency brake
+  (≥ limit + 6, resume at the limit). An in-pass check at the limit itself turned every hires pass stop-go (8.7 instead of
+  3.9 min per picture) without lowering the peaks, and pausing big passes longer made them slower and no cooler — both tried
+  and dropped; the cool-mode pause is uniform.
+- **Measured on a laptop RX 6800M** (Polish Full body = hires 1.5× + eyes, 832×1216 → 1248×1824, thermal zone every 5 s):
+  cool mode alone is not enough (3.0: median 91 °C, 12 % of readings ≥ 94); **cool 1.5 + pause above 88: 3.9–4.8 min per
+  picture, longest stretch ≥ 94 °C 12–36 s** (the laptop had switched off after 3–4 min pinned at 96); 2.0 is slower, not
+  cooler, once the chassis is heat-soaked. Never below 1.5 there. A less aggressive power plan helps more than any setting.
+- Tests no longer read the user's saved cool / pause preferences (`thermal.apply_saved` skips them under `IMAGEGEN_TESTS=1`).
+- Face detail: faces ≤ 60 px get 0.65 (0.65 over 0.55: +0.50 ± 0.24 identity on four ≤ 62 px faces), 0.55 at 100 px,
+  the slider at 150 px.
+- The outfit batch's "not her?" flag says "check by eye" when the outfit changes the hair or head (hat, ponytail, buns…): CCIP
+  reads hair and headwear as part of the character.
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the

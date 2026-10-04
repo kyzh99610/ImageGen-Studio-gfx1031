@@ -353,10 +353,30 @@ def set_cool(factor) -> float:
     return COOL["factor"]
 
 
+def _size_factor(kw) -> float:
+    """Bigger passes pause longer: × (megapixels / 1.05), 1–3. Round 6: the 1248×1824 hires pass (2.3 MP) pinned the thermal
+    zone at 95–96 °C even at cool 1.5 while the 832×1216 base passes (1.0 MP) did not; at the same pause ratio a long big pass
+    heat-soaks the laptop, so it gets a lower duty cycle."""
+    try:
+        lat = kw.get("latents") if isinstance(kw, dict) else None
+        if lat is None:
+            return 1.0
+        mp = int(lat.shape[-1]) * int(lat.shape[-2]) * 64 / 1e6
+        return min(3.0, max(1.0, mp / 1.05))
+    except Exception:
+        return 1.0
+
+
+_THERM_EVERY = 10.0     # seconds between thermal-zone reads inside a pass (a PDH read takes ~1 s)
+
+
 def _cool_callback(orig):
-    """Wrap a diffusers callback_on_step_end: after each step, wait COOL × the step's real GPU time."""
+    """Wrap a diffusers callback_on_step_end: after each step, wait COOL × (size factor) × the step's real GPU time; with
+    Settings → pause while hot on, also check the thermal zone every ~10 s and wait there until it has cooled (the same
+    rule as between pictures), so a single long hires pass can't heat-soak the laptop either."""
     import time
     last = [time.perf_counter()]
+    checked = [time.perf_counter()]
 
     def cb(pipe, i, t, kw):
         out = orig(pipe, i, t, kw) if orig is not None else kw
@@ -367,12 +387,19 @@ def _cool_callback(orig):
         except Exception:
             pass
         now = time.perf_counter()
-        pause = COOL["factor"] * (now - last[0])
+        pause = COOL["factor"] * (now - last[0])     # uniform: scaling by pass size was slower and not cooler (round 6)
         end = now + pause
         while pause > 0 and time.perf_counter() < end:
             if should_stop is not None and should_stop():
                 break
             time.sleep(min(0.25, max(0.0, end - time.perf_counter())))
+        try:
+            from backend import thermal
+            if thermal.GUARD["limit"] and time.perf_counter() - checked[0] >= _THERM_EVERY:
+                checked[0] = time.perf_counter()
+                thermal.wait_cool(should_stop, in_pass=True)
+        except Exception:
+            pass
         last[0] = time.perf_counter()
         return out if out is not None else kw
     return cb
@@ -409,7 +436,9 @@ def run_pipe(sdp, pipe, kind: str, **call):
     # finishes; a Stop mid-run must not leave them in place for the next plain run.
     procs = dict(unet.attn_processors) if target is not pipe else None
     _seed_sde_noise(target.scheduler, call)
-    if COOL["factor"] > 0:
+    from backend import thermal
+    if (COOL["factor"] > 0 or thermal.GUARD["limit"]) and (
+            "callback_on_step_end" in call or "callback_on_step_end" in _call_params(type(target))):
         call["callback_on_step_end"] = _cool_callback(call.get("callback_on_step_end"))
     try:
         with torch.no_grad():
