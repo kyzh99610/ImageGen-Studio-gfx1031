@@ -2675,6 +2675,76 @@ def _():
 
 
 
+@test("🦋 Swap a hair accessory: hair-only prompt + the item, one inpaint at denoise 1.0 (≥ 64 px context); the box, the button and the GPU job exist")
+def _():
+    import re as _re
+    from PIL import Image
+    import app as _app
+    from backend import detail_tools as dt
+    canon = ("masterpiece, best quality, 1girl, solo, (heroine \\(original\\):1.1), red eyes, grey hair, long hair, (black butterfly hair ornament:1.2), lace, mesh, "
+             "hair ornament, hair between eyes, hair ribbon, mature female, cowboy shot, white dress, simple background")
+    p = dt.swap_prompt_from(canon, " red ribbon ")
+    tags = [t.strip() for t in p.split(",")]
+    assert tags[-1] == "(red ribbon:1.2)" and tags[:2] == ["masterpiece", "best quality"], p
+    for keep in ("1girl", "solo", "grey hair", "long hair", "hair between eyes"):
+        assert keep in tags, (keep, p)
+    for gone in ("butterfly", "lace", "mesh", "ornament", "ribbon", "white dress", "cowboy shot", "simple background", "red eyes", "heroine"):
+        assert gone not in p.replace("(red ribbon:1.2)", ""), (gone, p)
+    assert dt.swap_prompt_from("", "bow") == "(bow:1.2)"                                   # nothing to keep: just the item
+    seen = {}
+    orig = dt.inpaint_region
+    try:
+        dt.inpaint_region = lambda sdp, im, mask, prompt, neg, **k: (seen.update(prompt=prompt, neg=neg, **k), (im, 7))[1]
+        im, m = Image.new("RGB", (256, 256)), Image.new("L", (256, 256), 255)
+        out, used = dt.swap_item(object(), im, m, "red ribbon", canon, "bad hands", steps=12, cfg=6.0, seed=5, padding=16)
+        assert used == 7 and out is im
+        assert seen["denoise"] == 1.0 and seen["padding"] == 64 and seen["steps"] == 12 and seen["neg"] == "bad hands" and seen["seed"] == 5, seen
+        assert seen["prompt"].endswith("(red ribbon:1.2)") and "ornament" not in seen["prompt"], seen["prompt"]
+        dt.swap_item(object(), im, m, "red ribbon", canon, "", padding=200)
+        assert seen["padding"] == 200                                                      # a wider context the user chose is kept
+    finally:
+        dt.inpaint_region = orig
+    import inspect
+    src = inspect.getsource(_app._build_generate_tab)
+    assert _re.search(r"@gpu_job\s+def do_swap_ui", src) and "inp_swap_btn.click" in src and "inp_swap_txt" in src and "swap_item(sd," in src
+    fs = [f for f in _app.build_app().fns if getattr(f.fn, "__name__", "") == "do_swap_ui"]
+    assert fs and all(f.concurrency_id == "gpu" and f.concurrency_limit == 1 for f in fs), "the swap is a GPU job"
+    # the handler itself (the UI build only constructs it): a fake editor value, the model / LoRA / save steps stubbed, the inpaint recorded
+    run, saved = fs[0].fn, {}
+    editor = {"background": Image.new("RGB", (128, 128), (200, 200, 200)), "layers": [Image.new("RGBA", (128, 128), (255, 255, 255, 255))]}
+    class FakeSD:                       # "the model is already loaded, no LoRA wanted": _ensure_model and _sync_loras return at once
+        pipe, current_model, _last_vae_path, _lora_adapters = object(), "m", None, {}
+    keep = (_app.sd, _app._save_outputs, dt.inpaint_region)
+    try:
+        _app.sd = FakeSD()
+        _app._save_outputs = lambda imgs, meta, pipe=None: (saved.update(meta=meta), [Path("swapped.png")])[1]
+        dt.inpaint_region = lambda sdp, im, mask, prompt, neg, **k: (saved.update(call=dict(prompt=prompt, neg=neg, **k)), (im, 11))[1]
+        quiet = lambda *a, **k: None
+        args = ("m", "none", "none", 0.8, "none", 0.7, "none", 0.7, canon, "bad hands", "DPM++ 2M Karras", 12, 6.0, 5, 1)
+        res = run(*args, editor, 48, "red ribbon", progress=quiet)
+        assert len(res[0]) == 1 and "Swapped for" in res[1] and "swapped.png" in res[1], res
+        c, m = saved["call"], saved["meta"]
+        assert c["denoise"] == 1.0 and c["padding"] == 64 and c["steps"] == 12 and c["prompt"].endswith("(red ribbon:1.2)") and c["neg"] == "bad hands", c
+        assert m["mode"] == "inpaint" and m["strength"] == 1.0 and m["inpaint_swap"] == "red ribbon" and m["inpaint_padding"] == 64 and m["seeds"] == [11], m
+        saved.clear()
+        res = run(*args, editor, 48, "  ", progress=quiet)                              # no item: refused, nothing drawn
+        assert not res[0] and "what should be there" in res[1] and "call" not in saved, res
+        res = run(*args, {"background": editor["background"], "layers": []}, 48, "red ribbon", progress=quiet)     # nothing painted
+        assert not res[0] and "Paint over" in res[1] and "call" not in saved, res
+        def stopped(*a, **k):                                                              # Stop pressed during the pass
+            raise _app._GenerationAborted()
+        dt.inpaint_region = stopped
+        res = run(*args, editor, 48, "red ribbon", progress=quiet)
+        assert not res[0] and "stopped" in res[1] and "meta" not in saved, res
+        def broken(*a, **k):
+            raise RuntimeError("the sampler produced NaN latents, so nothing was changed")
+        dt.inpaint_region = broken
+        res = run(*args, editor, 48, "red ribbon", progress=quiet)                        # a failed pass says so, nothing is saved
+        assert not res[0] and "Swap failed" in res[1] and "NaN" in res[1] and "meta" not in saved, res
+    finally:
+        _app.sd, _app._save_outputs, dt.inpaint_region = keep
+
+
 @test("Cool mode pauses after every sampling step (factor × step time, Stop ends the pause); Pony skips the eye pass; Cowboy Polish = eyes only")
 def _():
     import time

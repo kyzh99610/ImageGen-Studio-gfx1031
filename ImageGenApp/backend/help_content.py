@@ -297,13 +297,16 @@ def parameters_html() -> str:
                  "含两个角色 LoRA 的图无法区分角色。")],
             ["✋ Hand detail",
              "Same idea for hands (anime hand detector, gloves count), run before the faces: 0.35 cleans up "
-             "smudged fingers (in 7 test pairs it sharpened texture, never fixed a structure and now and then "
-             "added a small blob), 0.45–0.5 redraws them. It can't reliably fix a wrong finger count, and it may "
-             "touch up hand-shaped things (a ship's turret) — at low denoise they stay what they were. Face and "
+             "smudged fingers. Measured on 11 genuinely broken hands (10 on SD 1.5, 1 on SDXL): 0.35–0.55 turned blobs and mitten fists into hand-shaped fists in about "
+             "half of them and **never fixed a finger count or an untangled pair** (a peace sign with three fingers stayed at three in all six passes), and at 0.45–0.55 it once drew a "
+             "small figure into the hand's box; a hand-only prompt, more context and hires fix first changed little (hires first fixed 1 of 10). Re-drawing the hand at 0.8 "
+             "gave a correct hand in 2 of 10 (plus 4 plausible ones with another glove, prop or pose); at 1.0 it invents objects. For a broken hand: another seed first, or 🖌 Inpaint "
+             "over the hand at ~0.8 with 'detailed hands, five fingers' and a few seeds. The pass may touch up hand-shaped things (a ship's turret) — at low denoise they stay what they were. Face and "
              "hand passes use the evenly spaced version of your sampler (Karras / AYS at the same denoise "
              "changed almost nothing).",
-             _cn("对手部做同样的重绘（动漫手部检测，手套也算），在脸部之前进行：0.35 清理手指（实测只增强纹理，未修正结构），0.45–0.5 重画。"
-                 "无法保证修正手指数量。脸/手重绘使用均匀步长版本的采样器。")],
+             _cn("对手部做同样的重绘（动漫手部检测，手套也算），在脸部之前进行：0.35 清理手指。实测 11 只真正画坏的手：0.35–0.55 约一半能把团块/连指拳变成有手形的拳头，"
+                 "但从未修正手指数量或缠在一起的双手；0.8 重画 10 只中有 2 只得到正确的手（另有 4 只合理但手套/道具/姿势变了），1.0 会凭空画出物品。"
+                 "手画坏了：先换种子，或用 🖌 Inpaint 在约 0.8 下涂抹手部并多试几个种子。脸/手重绘使用均匀步长版本的采样器。")],
             ["👁 Eye detail",
              "Finds the eyes (anime eye detector, on each face) and re-draws both eyes of a face in one pass at high "
              "resolution, after the face pass, with a prompt of only the eye tags (colour, gaze, expression, glasses…) plus “detailed eyes, "
@@ -382,12 +385,12 @@ def parameters_html() -> str:
              _cn("放大后用已加载模型分块低降噪重绘，超越高清修复的尺寸上限；降噪过高可能在分块里画出多余的脸。")],
             ["🖌 Inpaint",
              "Paint over any area and describe what should be there; only that area is redrawn, at native "
-             "resolution, with your model, LoRAs and seed. Good for small things — measured: swapping a hair "
-             "ornament needs ~0.95 and the old shape still shows through as lace (0.9 and below: more of it, 0.75–0.85 gives a hybrid), an expression ~0.5 "
+             "resolution, with your model, LoRAs and seed. Good for small things — measured: to swap a hair "
+             "ornament use 🦋 Swap (paint over the whole old one — what is outside the paint stays —, type the new one: a single pass at denoise 1.0 with a hair-only prompt — at 0.9–0.95 the old shape still shows through as lace, 0.75–0.85 gives a hybrid), an expression ~0.5 "
              "deepens a smile and ~0.65–0.8 opens a closed mouth (waiIllustrious opens it at ~0.5). It uses the evenly spaced version of your sampler so "
              "denoise means what it says, and the Steps value is what runs at any denoise (as in A1111). A garment recolour can't be done this way (up to 0.95 the colour stays, "
              "1.0 over a body-sized area draws a new figure) — use same seed + edited prompt.",
-             _cn("涂抹要修改的区域并描述内容，仅重绘该区域。适合小物件（换发饰约 0.95，旧饰品的线条仍会隐约残留；表情约 0.5 微调、约 0.65–0.8 张嘴）；"
+             _cn("涂抹要修改的区域并描述内容，仅重绘该区域。适合小物件（换发饰请用 🦋 Swap：涂抹旧饰品、输入新饰品，降噪 1.0、仅用发型提示词；0.9–0.95 旧饰品的线条仍会隐约残留；表情约 0.5 微调、约 0.65–0.8 张嘴）；"
                  "任何降噪下都按设定步数运行；换衣服颜色请用同种子+改提示词。")],
             ["⏩ DPM++ 2M AYS",
              "NVIDIA's Align-Your-Steps schedule: about the quality of 25 steps in 10–12. The Karras samplers "

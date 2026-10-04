@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 148-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 149-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 143 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 144 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -517,6 +517,18 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   the slider at 150 px.
 - The outfit batch's "not her?" flag says "check by eye" when the outfit changes the hair or head (hat, ponytail, buns…): CCIP
   reads hair and headwear as part of the character.
+
+### 🦋 Swap a hair accessory, what the hand pass can and can't do (2026-10-04)
+- **🦋 Swap** (Inpaint accordion; `detail_tools.swap_item` / `swap_prompt_from`): paint over the whole old accessory, name the new
+  one → one inpaint at denoise **1.0** with a prompt of only the quality, subject and hair tags (never the tags naming the old
+  accessory, the outfit or the scene) + the item at 1.2, padding ≥ 64 px. Inpainting over an old ornament at 0.9–0.95 left its
+  shape showing through as lace on every seed; 1.0 with the full prompt drew the prompt's own scene into the crop; erasing first
+  and drawing at 0.9 was never better. Measured on an anime SDXL checkpoint: a clean replacement on 4 of 4 seeds; other items
+  (ribbon, bow, flower, hairpin) shown in 14 of 15 draws, but colour words are often ignored.
+- **Hand detail can't repair a broken hand:** on 11 genuinely broken hands (mostly SD 1.5 — an SDXL checkpoint drew 1 broken hand
+  in 48) the pass at 0.35–0.55 never fixed a finger count or a tangle (it turned blobs into fists in about half); hires first fixed
+  1 of 10, a hand-only re-draw at 0.8 2 of 10 (+4 plausible but changed), 1.0 invents objects. Re-roll the seed or inpaint the
+  hand by hand. Help and the hint say so.
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
