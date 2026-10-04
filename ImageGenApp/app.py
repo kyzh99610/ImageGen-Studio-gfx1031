@@ -156,6 +156,11 @@ try:                                   # Settings → Prompt weights (saved choi
     _set_emphasis(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("emphasis", "a1111"))
 except Exception:
     pass
+try:                                   # Settings → Cool mode (saved choice)
+    from backend import sampling as _smp0
+    _smp0.set_cool(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("cool", 0.0))
+except Exception:
+    pass
 
 # ── Singleton service objects (created once at startup) ────────────────────────
 sd       = SDPipeline()       # active pipeline — swapped to SDXLPipeline when SDXL model loaded
@@ -174,6 +179,11 @@ _smartsplit_pipe:   SmartSplitPipeline | None   = None
 
 # ── Generation abort flag ──────────────────────────────────────────────────────
 _generation_abort = threading.Event()
+try:                                   # Stop ends a cool-mode pause early
+    from backend import sampling as _smp1
+    _smp1.should_stop = _generation_abort.is_set
+except Exception:
+    pass
 _autoloop_active  = threading.Event()   # set = looping, clear = stopped
 # One GPU job at a time. Gradio's shared queue slot alone isn't enough: a Stop with `cancels=`
 # cancelled the asyncio task and handed the slot to the next job while the stopped job's thread
@@ -744,7 +754,7 @@ def _clean_extra(extra: dict | None) -> dict:
         "hd_on": bool(e.get("hd_on")),
         "hd_denoise": min(0.7, max(0.1, _num(e.get("hd_denoise"), 0.35))),
         "ed_on": bool(e.get("ed_on")),
-        "ed_denoise": min(0.6, max(0.1, _num(e.get("ed_denoise"), 0.3))),
+        "ed_denoise": min(0.6, max(0.1, _num(e.get("ed_denoise"), 0.4))),      # = detail_tools.EYE_DENOISE
     }
 
 
@@ -756,7 +766,7 @@ _SDXL_BAD_SAMPLERS = ("PNDM", "Heun")
 _SDXL_FAMILIES = ("sdxl", "pony", "illustrious")
 
 _XY_AXES = ["none", "CFG", "Steps", "Sampler", "Seed", "LoRA 1 weight", "CLIP skip", "Hires denoise",
-            "PAG scale", "CFG rescale", "Prompt S/R", "Checkpoint"]
+            "Face denoise", "Hand denoise", "Eye denoise", "PAG scale", "CFG rescale", "Prompt S/R", "Checkpoint"]
 
 
 def _xy_values(axis: str, text: str) -> tuple[list, str]:
@@ -853,6 +863,11 @@ def _carry_params(src_img, note: str | None):
     if src.get("imagegen"):
         info.add_itxt("imagegen", str(src["imagegen"]))
     return info
+
+
+def _eye_pass_skipped(pipe) -> bool:
+    """The eye pass is skipped on Pony-family checkpoints: it softened them at every denoise (round 5, −28 % eye detail)."""
+    return str(getattr(pipe, "model_family", "") or "").lower() == "pony"
 
 
 def _inpaint_steps(steps, denoise) -> int:
@@ -1103,6 +1118,10 @@ def _build_generate_tab():
                         card_save_btn = gr.Button("💾 Save current setup", size="sm")
                         card_build_btn = gr.Button("🧩 Build from LoRA slot 1", size="sm")
                     card_profile_btn = gr.Button("📌 Save as this checkpoint's profile", size="sm")
+                    with gr.Accordion("🧬 Learn her look — so the ⭐ rating can flag a face that isn't hers", open=False):
+                        card_ident_files = gr.File(label="Pictures of her (3 or more, faces ≥ 100 px — outfits and lighting don't matter)",
+                                                   file_count="multiple", file_types=["image"])
+                        card_ident_btn = gr.Button("🧬 Learn from these pictures (first use downloads CCIP, 150 MB)", size="sm")
                     card_status = gr.HTML("")
                     with gr.Row():
                         card_batch_seeds = gr.Number(value=2, precision=0, minimum=1, maximum=8,
@@ -1226,6 +1245,14 @@ def _build_generate_tab():
                                     0, 1, value=0, step=0.01, label="Variation strength",
                                     info="0 = off · 0.05–0.1 = a close relative (pose and details shift, the character stays) · "
                                          "0.25+ = mostly a new picture · 1 = the variation seed's own image. Keep the main seed fixed.")
+                        from backend import polish as _polish
+                        with gr.Row():
+                            polish_dd = gr.Dropdown(
+                                ["(off)", "Auto"] + list(_polish.SHOTS), value="(off)", scale=3,
+                                label="✨ Polish — fill hires fix / face / hand / eye detail for this kind of picture",
+                                info="Sets the controls below to the recipe measured for the framing (Help → ✨ Polish). "
+                                     "Auto reads the framing tags in the prompt. Change anything afterwards.")
+                            polish_note = gr.HTML("")
                         with gr.Accordion("🔍 Hires fix — generate small, then refine at a higher resolution",
                                           open=bool(_ls.get("hires_on"))):
                             hires_cb = gr.Checkbox(
@@ -1254,8 +1281,8 @@ def _build_generate_tab():
                             with gr.Row():
                                 fd_denoise_sl = gr.Slider(0.1, 0.8, value=_ls.get("fd_denoise", 0.4), step=0.05,
                                                           label="Face denoise",
-                                                          info="For normal faces: 0.3 = touch-up · 0.4 = fix details. Tiny faces (≤ ~60 px, wide "
-                                                               "shots) are raised to 0.55 automatically · 0.8 = can become a different face")
+                                                          info="For big faces (≥ ~150 px): 0.3 = touch-up · 0.4 = fix details. Small faces (≤ ~100 px: "
+                                                               "wide and full-body shots) are raised to 0.55 automatically · 0.8 = can become a different face")
                                 fd_mode_rb = gr.Radio(["auto", "anime", "photo"],
                                                       value=_ls.get("fd_mode") if _ls.get("fd_mode") in
                                                       ("auto", "anime", "photo") else "auto",
@@ -1280,10 +1307,10 @@ def _build_generate_tab():
                                     info="Finds the eyes (anime eye detector) and re-draws both eyes of each face "
                                          "at high resolution, after the face pass. The iris colour is kept to the "
                                          "iris, so it can't tint bangs over the eye or the skin. ~5–25 s per face.")
-                                ed_denoise_sl = gr.Slider(0.1, 0.6, value=_ls.get("ed_denoise", 0.3), step=0.05,
+                                ed_denoise_sl = gr.Slider(0.1, 0.6, value=_ls.get("ed_denoise", 0.4), step=0.05,
                                                           label="Eye denoise",
-                                                          info="0.25 = fix / sharpen · 0.3–0.35 = more definition · 0.45+ adds "
-                                                               "stray sparkles. Pupils need the pixels: hires / upscale first")
+                                                          info="0.25–0.3 = tidy up · 0.4 = more iris / pupil detail · 0.5+ redraws the "
+                                                               "eye (stray marks). Pupils need the pixels: hires / upscale first")
                         with gr.Accordion("🎚 Quality boosters — PAG, FreeU, CFG rescale",
                                           open=bool(_ls.get("pag_scale") or _ls.get("freeu"))):
                             with gr.Row():
@@ -1985,12 +2012,16 @@ def _build_generate_tab():
                 fd_note = _post_pass("face detail", lambda: _detail_pass(
                     "face", imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress))
             # eyes last: the face pass would otherwise redraw them again at its lower resolution
-            if ex["ed_on"] and imgs and not halted:
+            ed_skip = ""
+            if ex["ed_on"] and imgs and not halted and _eye_pass_skipped(sd):
+                # round 5: the eye pass softened the Pony checkpoint by 28 % at every denoise (4 bases) — skip, and say so
+                ed_skip = '<br>👁 Eye detail skipped: it blurs Pony-family models (measured −28 % eye detail).'
+            elif ex["ed_on"] and imgs and not halted:
                 ed_note = _post_pass("eye detail", lambda: _detail_pass(
                     "eye", imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress))
             halt_note = (f'<br><span style="color:#fab387;">{halted} — saved the images from before it.</span>'
                          if halted else "")
-            info_html = (f'<p style="color:#a6adc8;font-size:13px;">{info}{hires_note}{hd_note}{fd_note}{ed_note}'
+            info_html = (f'<p style="color:#a6adc8;font-size:13px;">{info}{hires_note}{hd_note}{fd_note}{ed_note}{ed_skip}'
                          f'{halt_note}{tags_note}</p>')
             if use_i2i and init_img is not None and imgs:
                 width, height = imgs[0].size   # img2img keeps the input's size
@@ -2061,7 +2092,7 @@ def _build_generate_tab():
         clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
         hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
         fd_on=False, fd_denoise=0.4, fd_mode="auto", fd_prompt="",
-        pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35, ed_on=False, ed_denoise=0.3,
+        pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35, ed_on=False, ed_denoise=0.4,
     ):
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
                                   hires_on=hires_on, hires_scale=hires_scale, hires_denoise=hires_denoise,
@@ -2741,7 +2772,7 @@ def _build_generate_tab():
                        clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
                        hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
                        fd_on=False, fd_denoise=0.4, fd_mode="auto", fd_prompt="",
-                       pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35, ed_on=False, ed_denoise=0.3,
+                       pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35, ed_on=False, ed_denoise=0.4,
                        progress=gr.Progress()):
         _generation_abort.clear()          # a new run starts; Stop from here on counts
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
@@ -2856,6 +2887,9 @@ def _build_generate_tab():
                         elif axis == "LoRA 1 weight": p["lw"] = v
                         elif axis == "CLIP skip": p["extra"]["clip_skip"] = v
                         elif axis == "Hires denoise": p["extra"].update(hires_on=True, hires_denoise=v)
+                        elif axis == "Face denoise": p["extra"].update(fd_on=True, fd_denoise=v)
+                        elif axis == "Hand denoise": p["extra"].update(hd_on=True, hd_denoise=v)
+                        elif axis == "Eye denoise": p["extra"].update(ed_on=True, ed_denoise=v)
                         elif axis == "PAG scale": p["extra"]["pag_scale"] = v
                         elif axis == "CFG rescale": p["extra"]["cfg_rescale"] = v
                         elif axis == "Prompt S/R": p["prompt"] = p["prompt"].replace(vals[0], v)
@@ -3021,6 +3055,23 @@ def _build_generate_tab():
         wh = _parse_size_preset(label)
         return (wh[0], wh[1]) if wh else (gr.update(), gr.update())
     size_preset_dd.change(on_size_preset, [size_preset_dd], [width_sl, height_sl])
+
+    # ✨ Polish: the detail passes' controls take the recipe for the picture's framing (backend/polish.py)
+    _polish_outs = [hires_cb, hires_scale_sl, hires_denoise_sl, hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, hd_cb,
+                    hd_denoise_sl, ed_cb, ed_denoise_sl]
+    _polish_keys = ["hires_on", "hires_scale", "hires_denoise", "hires_steps", "hires_upscaler", "fd_on", "fd_denoise",
+                    "hd_on", "hd_denoise", "ed_on", "ed_denoise"]
+
+    def on_polish(choice, prompt):
+        from backend import polish as _pl
+        name = _pl.shot_type(prompt) if choice == "Auto" else choice
+        r = _pl.recipe(name)
+        if not r:
+            return [gr.update()] * len(_polish_outs) + [""]
+        return ([gr.update(value=r[k]) if k in r else gr.update() for k in _polish_keys]
+                + [f'<p style="color:#a6e3a1;font-size:13px;">✨ {html.escape(name)}: {html.escape(_pl.summary(name))} '
+                   f'— about {_pl.time_factor(name):g}× the time of the plain picture.</p>'])
+    polish_dd.input(on_polish, [polish_dd, prompt_txt], _polish_outs + [polish_note])
 
     # ── Dropping an image into img2img brings back how it was made ───────────
     _restore_outputs = [prompt_txt, neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl, width_sl, height_sl,
@@ -3289,6 +3340,7 @@ def _build_generate_tab():
                 f'{html.escape(card.get("checkpoint") or "current checkpoint")} · {html.escape(loras)} · '
                 f'{len(card["outfits"])} outfit(s)'
                 + (f' · 📌 {len(card["profiles"])} checkpoint profile(s)' if card.get("profiles") else "")
+                + (f' · 🧬 face learned from {card["identity"]["n"]} pictures' if card.get("identity") else "")
                 + f'<br><code>{html.escape(card["tags"])}</code></p>')
 
     def on_card_pick(name):
@@ -3369,7 +3421,7 @@ def _build_generate_tab():
                           if l and l != "none"],
                 "tags": prompt or "", "outfits": old.get("outfits") or {}, "negative": neg or "",
                 "width": w, "height": h, "cfg": cfg, "steps": steps, "scheduler": sched, "clip_skip": cs,
-                "profiles": old.get("profiles") or {}}
+                "profiles": old.get("profiles") or {}, "identity": old.get("identity"), "notes": old.get("notes")}
         try:
             save_card(card)
         except (OSError, ValueError) as e:
@@ -3380,7 +3432,7 @@ def _build_generate_tab():
                 f'prompt is its tags; outfits kept). Edit settings/characters/{html.escape(n)}.json to fine-tune.</p>')
 
     def do_card_profile(name, model, vae, l1, w1, l2, w2, l3, w3, neg, w, h, cfg, steps, sched, cs,
-                        pag, freeu, rescale, fd_on, fd_den, hd_on, hd_den, ed_on=False, ed_den=0.3):
+                        pag, freeu, rescale, fd_on, fd_den, hd_on, hd_den, ed_on=False, ed_den=0.4):
         """Remember the current LoRA weights, settings and boosters as the card's profile for the selected
         checkpoint (🎴 Load applies it whenever that checkpoint is selected)."""
         from backend.character_cards import load_card, save_card
@@ -3403,6 +3455,48 @@ def _build_generate_tab():
             return f'<p style="color:#f38ba8;font-size:13px;">❌ {html.escape(str(e))}</p>'
         return (f'<p style="color:#a6e3a1;font-size:13px;">📌 Saved the profile of <b>{html.escape(card["name"])}</b> for '
                 f'<b>{html.escape(key)}</b> — 🎴 Load applies it whenever this checkpoint is selected.</p>')
+
+    def do_card_identity(name, files, progress=gr.Progress()):
+        """🧬 Learn the selected card's look from pictures of the character (CPU: anime face detector + CCIP); the ⭐ rating of an
+        outfit batch then flags a face that is further from them than her own pictures are. The first use downloads CCIP (150 MB, OpenRAIL)."""
+        from PIL import Image as _I
+        from backend.character_cards import load_card, save_card
+        from backend import ccip as _ccip, identity_score as _ids
+        warn = lambda m: f'<p style="color:#f9e2af;font-size:13px;">⚠ {m}</p>'
+        card = load_card(name) if name and name != "(none)" else None
+        if not card:
+            return warn("Pick a card first.")
+        paths = [getattr(f, "name", f) for f in (files or [])]
+        if len(paths) < _ids.MIN_REFS:
+            return warn(f"Add at least {_ids.MIN_REFS} pictures of her.")
+        if not _ccip.available():
+            progress(0, desc=f"Downloading CCIP ({_ccip.SIZE_MB} MB, once)…")
+            try:
+                _ccip.download()
+            except Exception as e:
+                return warn(f"Could not download CCIP: {html.escape(str(e).splitlines()[0][:160] if str(e) else type(e).__name__)}")
+
+        def pictures():
+            for i, p in enumerate(paths):
+                progress(i / len(paths), desc=f"Reading picture {i + 1}/{len(paths)}")
+                try:
+                    with _I.open(p) as im:
+                        yield im.convert("RGB")
+                except Exception:
+                    continue
+        ident = _ids.build_identity(pictures())
+        if not ident:
+            return warn(f"Fewer than {_ids.MIN_REFS} of those pictures have a face of at least {_ids.MIN_FACE_PX} px that the anime face "
+                        f"detector finds — nothing learned.")
+        card["identity"] = ident
+        try:
+            save_card(card)
+        except (OSError, ValueError) as e:
+            return f'<p style="color:#f38ba8;font-size:13px;">❌ {html.escape(str(e))}</p>'
+        return (f'<p style="color:#a6e3a1;font-size:13px;">🧬 Learned <b>{html.escape(card["name"])}</b> from {ident["n"]} of {len(paths)} '
+                f'pictures (no face, or under {_ids.MIN_FACE_PX} px, are skipped; they agree to {ident["mean"]:.2f} ± {ident["sd"]:.2f}). '
+                f'“🎴▶ Generate every outfit” now flags a face that is further from her than her own pictures are — about 1 in 30 of hers, '
+                f'up to 1 in 5 of a no-LoRA look-alike, another girl every time.</p>')
 
     def do_card_build(name, lora, weight, model):
         from backend.character_cards import card_from_lora, load_card, save_card, safe_name
@@ -3444,6 +3538,7 @@ def _build_generate_tab():
         [card_name_txt, model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3,
          prompt_txt, neg_prompt_txt, width_sl, height_sl, cfg_sl, steps_sl, scheduler_dd, clip_skip_rb],
         [card_dd, outfit_dd, card_status])
+    card_ident_btn.click(do_card_identity, [card_dd, card_ident_files], [card_status])
     card_build_btn.click(do_card_build, [card_name_txt, lora_dd, lora_weight, model_dd],
                          [card_dd, outfit_dd, card_name_txt, card_status])
 
@@ -3453,7 +3548,7 @@ def _build_generate_tab():
                       auto_quality, prompt, neg_prompt, scheduler, steps, cfg, width, height, batch, seed, init_img,
                       strength, use_i2i, clip_skip, var_seed, var_strength, hires_on, hires_scale, hires_denoise,
                       hires_steps, hires_upscaler, fd_on, fd_denoise, fd_mode, fd_prompt, pag_scale, freeu,
-                      cfg_rescale, hd_on, hd_denoise, ed_on=False, ed_denoise=0.3, progress=gr.Progress()):
+                      cfg_rescale, hd_on, hd_denoise, ed_on=False, ed_denoise=0.4, progress=gr.Progress()):
         """Generate every outfit of the card with the current settings (after 🎴 Load) and the same seeds for
         each outfit, then a labelled contact sheet. Finished outfit/seed pairs are remembered per card
         (outputs/card_batches/<card>.json) and skipped next time while the settings are unchanged."""
@@ -3562,14 +3657,17 @@ def _build_generate_tab():
         # ⭐ rating (CPU, only the checks whose models are already cached): one face / ≤ 2 hands, the card's hair / eye
         # colours and hair pin on the head crop (scene colour leaking into the eyes was the first thing to go), colour
         # noise. Written onto the contact sheet; the pictures themselves stay clean.
-        scored, sheet_cells, looked = [], list(cells), False
+        scored, sheet_cells, looked, face_checked = [], list(cells), False, False
         try:
             from backend import image_score as _is
             can = _is.available()
             if n_real and any(can.values()):
-                scored = _is.score_images(cells[:n_real], card.get("tags", ""))
+                scored = _is.score_images(cells[:n_real], card.get("tags", ""), identity=card.get("identity"))
                 sheet_cells = [_is.badge(c, r) for c, r in zip(cells, scored)]
                 looked = bool(can["look"] and _is.ic.traits(card.get("tags", "")))
+                from backend import identity_score as _ids
+                face_checked = bool(card.get("identity") and card["identity"].get("model") == _ids.MODEL_TAG
+                                    and can.get("identity") and can.get("faces"))      # learned with another model: not judged, so no "match"
         except Exception as e:
             print(f"[Score] skipped: {e}")
         while len(cells) % n_seeds:                     # stopped mid-row: pad with blanks (contact sheet only)
@@ -3591,8 +3689,12 @@ def _build_generate_tab():
                 ident += ('<br><span style="color:#f9e2af;">⚠ possibly off-model or damaged: '
                           + "; ".join(f'{html.escape(str(o))} · seed {s_} ({html.escape(", ".join(f))})' for o, s_, f in bad[:8])
                           + (f" … and {len(bad) - 8} more" if len(bad) > 8 else "") + "</span>")
+            elif looked and face_checked:
+                ident += f"<br>✅ hair / eye colours (WD14) and faces (CCIP) match the card in all {n_real} image(s)"
             elif looked:
                 ident += f"<br>✅ hair / eye colours match the card in all {n_real} image(s) (WD14)"
+            elif face_checked:
+                ident += f"<br>✅ faces match the card in all {n_real} image(s) (CCIP)"
         msg = (f'<p style="color:#a6e3a1;font-size:13px;">🎴 {html.escape(card["name"])}: {made} new + {reused} '
                f'reused image(s) in {_fmt_elapsed(time.time() - t0)} — contact sheet {spath.name}'
                + (" (stopped early)" if _generation_abort.is_set() else "") + ident + "</p>")
@@ -5830,6 +5932,22 @@ def _build_settings_tab():
                     _save_pref("emphasis", mode)
                     return f'<p style="color:#a6e3a1;font-size:13px;">✅ Prompt weights: {mode}</p>'
                 emph_rb.change(on_emphasis, [emph_rb], [emph_status])
+                from backend import sampling as _smp
+                gr.Markdown("### 🌡 Cool mode")
+                cool_sl = gr.Slider(0, 3, value=_smp.COOL["factor"], step=0.25,
+                                    label="Pause after every sampling step (× the step's time)",
+                                    info="0 = off. For laptops that shut down under long GPU runs: 1.5 = the GPU works ~40 % of "
+                                         "the time (measured: 5 h without a power-off on the RX 6800M laptop, which powered off "
+                                         "after 3–4 min at full load). Pictures stay identical; generation takes (1 + value)× as "
+                                         "long for the sampling part. Saved for the next start.")
+                cool_status = gr.HTML("")
+
+                def on_cool(v):
+                    f = _smp.set_cool(v)
+                    _save_pref("cool", f)
+                    return (f'<p style="color:#a6e3a1;font-size:13px;">✅ Cool mode: pause {f:g}× the step time</p>' if f
+                            else '<p style="color:#a6adc8;font-size:13px;">Cool mode off</p>')
+                cool_sl.release(on_cool, [cool_sl], [cool_status])
                 gr.Markdown("### 🖥 GPU")
 
                 # ── GPU picker ──────────────────────────────────────────────

@@ -22,7 +22,9 @@ At runtime the app may download models on request: the anime face detectors
 [deepghs/anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection) (YOLOv8 ONNX, OpenRAIL — see its
 use restrictions) for Hand detail; the anime eye detector
 [deepghs/anime_eye_detection](https://huggingface.co/deepghs/anime_eye_detection) (YOLOv8 ONNX, OpenRAIL — see its
-use restrictions) for Eye detail (all SHA-256 checked); the WD14 tagger
+use restrictions) for Eye detail; the anime character re-identification model
+[deepghs/ccip_onnx](https://huggingface.co/deepghs/ccip_onnx) (OpenRAIL — see its use restrictions) for the card's
+"🧬 Learn the look" identity check (all SHA-256 checked); the WD14 tagger
 [SmilingWolf/wd-vit-tagger-v3](https://huggingface.co/SmilingWolf/wd-vit-tagger-v3) (Apache-2.0) for Interrogate / Auto-Tag, and its tag list for Danbooru tag autocomplete; Stable Diffusion checkpoints from Hugging Face or Civitai,
 the Real-ESRGAN and LaMa ONNX models, and BLIP for auto-captioning. Each model has its own license. Check it
 before using the outputs commercially.

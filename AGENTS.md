@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 136-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 146-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 131 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 141 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -474,6 +474,32 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   enough for full body, 0.5–0.65 for a tiny figure in a wide shot; the hand pass only sharpens texture. Two character LoRAs in
   one picture merge the characters (BREAK makes it worse); use the LoRA for one character and tags for the other.
 
+### Eye recipe, ✨ Polish, card identity (CCIP), 🌡 cool mode (2026-10-03)
+- **Eye pass:** redraws with its own eye-only prompt (quality + subject + eye / gaze / expression tags + "detailed eyes, beautiful
+  detailed eyes, eyelashes, detailed pupils, iris detail, round pupils"; "slit pupils, cat eyes" in its negative unless the prompt
+  names a pupil shape), default denoise 0.4. Measured on six SDXL-family checkpoints (42 pictures): eye detail ×1.11 over the old
+  pass, neutral to +12 % over the untouched picture, colour bleed ~0, closed eyes stay closed. "Sparkling eyes / eye highlights /
+  limbal ring" drew star sparkles, "detailed pupils" alone drew slit pupils — both left out. **Skipped on Pony-family checkpoints**
+  (it softened one by 28 % at every denoise; the result line says so). Real pupil detail needs more pixels (a 2× upscale: +24…54 %).
+  `detect_eyes` accepts a second eye from score 0.25 (the far eye of a three-quarter view).
+- **NaN guard:** a VAE stored in bf16 (a NoobAI checkpoint) overflowed the fp16 encode of the face / eye / inpaint pass → every latent
+  NaN → black patches; `inpaint_region` retries once in fp32, remembers it, and never pastes NaN.
+- **Face rule re-measured:** faces ≤ 100 px get ≥ 0.55, ≥ 150 px the slider, linear between (90–130 px faces: +0.21 identity at 0.55).
+- **✨ Polish** (`backend/polish.py`, dropdown above Hires fix): Portrait / Cowboy shot = eyes only, Full body = hires 1.5× + eyes,
+  Wide shot = hires 1.5× + face + eyes; Auto reads the framing tags. Measured: at full body, hires + eyes beat the face pass
+  (identity 0.937 → 0.967) and the face pass on top of hires added nothing; at cowboy framing nothing in the chain moved identity.
+- **Card identity** (`backend/ccip.py`, `backend/identity_score.py`): "🧬 Learn the look" stores the centroid of CCIP features
+  (anime character re-identification, 150 MB, OpenRAIL, downloaded on first use) of ≥ 3 reference head crops (faces ≥ 100 px)
+  plus their own spread; the outfit batch's ⭐ rating flags a face more than 2 spreads below. Scene-invariant (night / neon /
+  sunset / poses as close as daylight portraits); a different girl is always flagged, a look-alike with the same tags in up to
+  ~1 of 5, another character with the same tags up to ~1 of 3 — a warning, not a verdict. WD14's tagger feature was tried first
+  and dropped (outfit / scene dominated it).
+- **🌡 Cool mode** (Settings, `settings/_prefs.json` `cool`, off by default): `run_pipe` wraps `callback_on_step_end` and pauses
+  factor × the step's real GPU time after every step (≤ 0.25 s slices, Stop ends a pause). A laptop RX 6800M (no power limit in
+  Adrenalin) powered off under minutes of full load; 1.5 kept long runs alive. Check: same picture (max 1/255), 22.4 → 37.6 s,
+  run mean thermal zone 92.4 → 89.1 °C.
+- X/Y axes "Face denoise" / "Hand denoise" / "Eye denoise"; `TEST_ONLY=<regex>` runs part of the suite.
+
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
 auto-quality tags: each tag once (key = lower-case, `_`→space, weight syntax removed), strongest weight wins,
@@ -721,6 +747,7 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
 | Colours of the background flood the character | Weighted scene/colour tags under Compel weighting — Settings → Prompt weights = A1111 (default since 2026-09-30); lower the scene tags' weights |
 | Garbage / psychedelic colours on one model family | A VAE of the other family selected — the load status warns and uses the checkpoint's own VAE |
 | App dies (0xC0000005 in `safetensors.load_file`) while loading an SDXL checkpoint, or "Not enough free memory to load …" | Windows *commit* (RAM + page file) is full: a load needs ~2× the file size for a moment and GPU allocations count too. Close big programs or enlarge the page file (System → Advanced → Performance → Virtual memory) |
+| The laptop switches itself off during long generations (EventLog 6008 only, no bluescreen) | Sustained GPU load trips the laptop's protection → Settings → 🌡 Cool mode 1.5; a less aggressive power plan; a cooling stand |
 | First generation of a session is slow | Normal: ZLUDA loads kernels per process (~1 min); on a new PC ~15 min once (empty zluda.db) |
 | Process won't exit | ZLUDA shutdown hang — close the window / `taskkill /F /T` the zluda.exe tree |
 | "… is incomplete" / "isn't a valid .safetensors file" | Truncated/corrupt file (`model_manager.safetensors_problem()`) — re-download |

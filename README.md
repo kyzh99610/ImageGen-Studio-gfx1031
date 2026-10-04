@@ -112,6 +112,8 @@ window, shows a loading screen while it starts, and frees the GPU when you close
   resumable. **🗂 History** tab: search every output by prompt words, model, LoRA or seed, ⭐ favourites, one click
   back to its exact settings. **✨ SD detail pass** in the Upscale tab: tiled low-denoise redraw with your model,
   beyond what hires fix can reach.
+- **✨ Polish:** one click sets hires fix / face / eye detail for the framing (portrait, cowboy shot, full body, wide shot).
+- **🌡 Cool mode:** for laptops that switch off under long GPU runs — a short pause after every sampling step, same pictures.
 - **Eye detail:** a third detail pass (after face and hand) finds the eyes with an anime eye detector and
   re-draws both at high resolution; a colour guard keeps the iris colour off bangs and skin.
 - **Prompt weights like A1111:** `(tag:1.3)` is applied the A1111 way, so Civitai prompts don't flood background
@@ -193,7 +195,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 136 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload).
+That runs 146 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload).
 
 ## Credits and licenses
 

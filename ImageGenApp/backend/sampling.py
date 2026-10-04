@@ -335,6 +335,49 @@ def _seed_sde_noise(scheduler, call: dict) -> None:
     scheduler.noise_sampler = None          # built from the seed at the first step
 
 
+# ── Cool mode ─────────────────────────────────────────────────────────────────
+# The RX 6800M laptop powered off 5 times in 4 days under sustained GPU load (its thermal zone pins at ~96 °C for minutes
+# first; the GPU has no power limit in Adrenalin). The second session's labs ran 5 h without a power-off with a pause of
+# 1.5× the step time after every sampling step (3× for 1248×1824 hires passes): ~40 % GPU duty, same pictures.
+# factor = pause / step time (0 = off). `should_stop` (set by the app) ends a pause early so Stop stays responsive.
+COOL = {"factor": 0.0}
+should_stop = None
+
+
+def set_cool(factor) -> float:
+    try:
+        f = float(factor)
+    except (TypeError, ValueError):
+        f = 0.0
+    COOL["factor"] = min(4.0, max(0.0, f if f == f else 0.0))
+    return COOL["factor"]
+
+
+def _cool_callback(orig):
+    """Wrap a diffusers callback_on_step_end: after each step, wait COOL × the step's real GPU time."""
+    import time
+    last = [time.perf_counter()]
+
+    def cb(pipe, i, t, kw):
+        out = orig(pipe, i, t, kw) if orig is not None else kw
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()          # SD 1.5 callbacks don't sync: measure the real step, not the queueing
+        except Exception:
+            pass
+        now = time.perf_counter()
+        pause = COOL["factor"] * (now - last[0])
+        end = now + pause
+        while pause > 0 and time.perf_counter() < end:
+            if should_stop is not None and should_stop():
+                break
+            time.sleep(min(0.25, max(0.0, end - time.perf_counter())))
+        last[0] = time.perf_counter()
+        return out if out is not None else kw
+    return cb
+
+
 def run_pipe(sdp, pipe, kind: str, **call):
     """Call a diffusers pipeline with PAG / FreeU / CFG rescale applied as set on `sdp`.
     kind: txt2img / img2img / inpaint (PAG isn't used for inpaint)."""
@@ -366,6 +409,8 @@ def run_pipe(sdp, pipe, kind: str, **call):
     # finishes; a Stop mid-run must not leave them in place for the next plain run.
     procs = dict(unet.attn_processors) if target is not pipe else None
     _seed_sde_noise(target.scheduler, call)
+    if COOL["factor"] > 0:
+        call["callback_on_step_end"] = _cool_callback(call.get("callback_on_step_end"))
     try:
         with torch.no_grad():
             return target(**call)

@@ -11,7 +11,7 @@ huge or tiny img2img images, file names from the Civitai API and from users, lau
 GPU correctness is checked separately by selftest_zluda.py (run_zluda.bat selftest_zluda.py).
 """
 
-import sys, os, json, traceback, threading
+import sys, os, re, json, traceback, threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from dataclasses import dataclass
@@ -44,9 +44,14 @@ def needs_npu():
         raise Skip("no Ryzen AI SDK conda env on this machine")
 
 
+ONLY = os.environ.get("TEST_ONLY", "")      # regex: run only the tests whose name matches (a quick check of one area), e.g. TEST_ONLY="Eye detail"
+
+
 def test(name):
     def decorator(fn):
         global PASS, FAIL, SKIP
+        if ONLY and not re.search(ONLY, name, re.I):
+            return fn
         try:
             fn()
             PASS += 1
@@ -1775,8 +1780,11 @@ def _():
     try:
         CC.CARDS_DIR = tmp / "cards"
         CC.CARDS_DIR.mkdir()
+        from backend import identity_score as _ID
+        _ident = {"model": _ID.MODEL_TAG, "n": 5, "centroid": _ID.encode_vec(_ID._unit(__import__("numpy").arange(1.0, 769.0))), "mean": 0.93, "sd": 0.02}
         (CC.CARDS_DIR / "G.json").write_text(json.dumps({
             "name": "G", "checkpoint": "base.safetensors", "tags": "1girl", "cfg": 6.0, "steps": 12, "scheduler": "Euler a",
+            "notes": "her canon pin is the black butterfly", "identity": _ident,
             "loras": [{"file": "l.safetensors", "weight": 0.7}],
             "profiles": {"wai.safetensors": {"cfg": 4.5, "steps": 20, "scheduler": "DPM++ 2M Karras", "pag": 2.0, "freeu": True,
                                              "face_detail": 0.35, "hand_detail": 0.0, "loras": []}}}), encoding="utf-8")
@@ -1809,7 +1817,9 @@ def _():
                                                       5.0, 12, "Euler a", 1, 0.0, False, 0.0, False, 0.35, False, 0.35)
         fn("do_card_save")("G", str(ck), "none", "none", 0.7, "none", 0.7, "none", 0.7, "1girl, solo", "bad", 832, 1216, 6.0, 12,
                            "Euler a", 1)
-        assert set(CC.load_card("G")["profiles"]) == {"wai.safetensors", "sdxl.safetensors"}
+        saved = CC.load_card("G")
+        assert set(saved["profiles"]) == {"wai.safetensors", "sdxl.safetensors"}
+        assert saved["identity"] == _ident and saved["notes"] == "her canon pin is the black butterfly", saved     # 💾 Save used to drop notes (and would drop the identity)
     finally:
         CC.CARDS_DIR = old
 
@@ -2207,8 +2217,10 @@ def _():
         def _decode_latents(self, vae, lat): return [Image.new("RGB", (1024, 1024))]
     seen = []
 
+    import torch
+
     class R:
-        images = None
+        images = torch.zeros(1, 4, 8, 8)          # finite latents (inpaint_region checks them for NaN since the NaN fix)
 
     def fake_run(sdp, pipe, kind, **k):
         seen.append((pipe.vae.config["force_upcast"], pipe.vae.tile_sample_min_size))
@@ -2411,6 +2423,137 @@ def _():
     assert ups0[-4] is False
 
 
+@test("Inpaint: NaN latents from an fp16 VAE encode (a NoobAI checkpoint's bf16-origin VAE) are retried once in fp32 and the need is remembered; NaN is never pasted")
+def _():
+    import types
+    import torch
+    from PIL import Image
+    import backend.sampling as sampling
+    import backend.sd_pipeline as sdpipe
+    from backend import detail_tools as dt
+
+    class FakeVae:
+        def __init__(self): self.config = {"force_upcast": True}; self.tile_sample_min_size, self.tile_latent_min_size = 512, 64
+        def register_to_config(self, **kw): self.config.update(kw)
+
+    class FakePipe:
+        def __init__(self, unet): self.vae, self.unet = FakeVae(), unet
+
+    unet = object()
+    sdp = types.SimpleNamespace(is_sdxl=True, pipe=FakePipe(unet), dtype=torch.float16, device="cpu", _vae_needs_fp32=False)
+    sdp._inpaint_pipe = FakePipe(unet)
+    sdp._decode_latents = lambda vae, lat: [Image.new("RGB", (64, 64), (200, 30, 30))]
+    seen = []
+
+    def fake_run(sdp_, pipe, kind, **call):
+        # NaN while the encode runs in fp16 (force_upcast False), fine once the config says fp32
+        up = pipe.vae.config["force_upcast"]
+        seen.append((up, pipe.vae.tile_sample_min_size))
+        lat = torch.zeros(1, 4, 8, 8)
+        if not up:
+            lat[:] = float("nan")
+        return types.SimpleNamespace(images=lat)
+    orig = (sampling.run_pipe, sdpipe._load_scheduler, sdpipe._make_generator, dt._embeds)
+    try:
+        sampling.run_pipe, sdpipe._load_scheduler = fake_run, lambda pipe, name: None
+        sdpipe._make_generator, dt._embeds = (lambda seed, dev: (None, 7)), (lambda *a, **k: {})
+        img = Image.new("RGB", (256, 256), (240, 240, 240))
+        mask = Image.new("L", (256, 256), 0); mask.paste(255, (100, 100, 160, 140))
+        out, seed_used = dt.inpaint_region(sdp, img, mask, "x", seed=3)
+        assert [s[0] for s in seen] == [False, True], seen                      # fp16 encode first, then fp32 (256 px tiles)
+        assert seen[1][1] == 256 and sdp._vae_needs_fp32 is True, (seen, sdp._vae_needs_fp32)
+        assert sdp._inpaint_pipe.vae.config["force_upcast"] is True and sdp._inpaint_pipe.vae.tile_sample_min_size == 512      # config restored
+        assert out.getpixel((130, 120)) != (240, 240, 240) and out.getpixel((5, 5)) == (240, 240, 240) and seed_used == 7
+        # the need is remembered: the next pass goes straight to fp32
+        seen.clear(); dt.inpaint_region(sdp, img, mask, "x", seed=3)
+        assert [s[0] for s in seen] == [True], seen
+        # NaN even in fp32 (or on SD 1.5): refused, the picture is not touched
+        sampling.run_pipe = lambda *a, **k: types.SimpleNamespace(images=torch.full((1, 4, 8, 8), float("nan")))
+        try:
+            dt.inpaint_region(sdp, img, mask, "x", seed=3)
+            raise AssertionError("NaN latents were accepted")
+        except RuntimeError as e:
+            assert "NaN" in str(e), e
+    finally:
+        sampling.run_pipe, sdpipe._load_scheduler, sdpipe._make_generator, dt._embeds = orig
+
+
+@test("Eye detail: the redraw uses an eye-only prompt (quality + subject + eye / expression / gaze tags + detail words), not the whole scene; an explicit eye_prompt is used as given")
+def _():
+    from PIL import Image
+    from backend import detail_tools as dt
+    full = (r"masterpiece, best quality, 1girl, solo, (my_character \(series name\):1.1), red eyes, sharp eyes, tsurime, grey hair, long hair, "
+            r"(black butterfly hair ornament:1.2), lace, night, city lights, cowboy shot, standing, looking at viewer, light smile, white dress")
+    p = dt.eye_prompt_from(full)
+    tags = [x.strip() for x in p.split(",")]
+    for want in ("masterpiece", "best quality", "1girl", "solo", "red eyes", "sharp eyes", "tsurime", "looking at viewer", "light smile", "detailed pupils", "iris detail",
+                 "round pupils"):
+        assert want in tags, (want, p)
+    for gone in ("grey hair", "long hair", "night", "city lights", "white dress", "standing", "lace") + ("(black butterfly hair ornament:1.2)",):
+        assert gone not in tags and gone not in p.replace("(", "").replace(")", "").split(", ") or gone == "", (gone, p)
+    assert "heroine" not in p and "butterfly" not in p, p
+    assert dt.eye_prompt_from("") == dt.EYE_DETAIL_WORDS + ", " + dt.EYE_ROUND
+    # round pupils + "slit pupils, cat eyes" in the negative — unless the prompt names a pupil shape itself (then the pass leaves the shape to it)
+    assert dt.eye_negative_from(full, "lowres, watermark") == "lowres, watermark, slit pupils, cat eyes" and dt.eye_negative_from(full) == "slit pupils, cat eyes"
+    assert dt.eye_negative_from("1girl, red eyes, (cat eyes:1.2), forest", "lowres") == "lowres"
+    for own in ("slit pupils", "heart-shaped pupils", "@_@", "reptile eyes", "dragon eyes", "spiral eyes", "no pupils"):
+        q = f"1girl, solo, {own}, forest"
+        assert "round pupils" not in dt.eye_prompt_from(q) and own in dt.eye_prompt_from(q) and dt.eye_negative_from(q, "lowres") == "lowres", (own, dt.eye_prompt_from(q))
+    assert "round pupils" in dt.eye_prompt_from("1girl, solo, dragon horns, red eyes") and dt.eye_negative_from("1girl, dragon horns, red eyes", "x").endswith("cat eyes")
+    assert "(red eyes:1.2)" in dt.eye_prompt_from("score_9, 1girl, (red eyes:1.2), forest") and "forest" not in dt.eye_prompt_from("score_9, 1girl, (red eyes:1.2), forest")
+    seen = []
+    orig_run, orig_sess, orig_inp, orig_faces = dt._yolo_run, dt._eye_session, dt.inpaint_region, dt.detect_faces
+    try:
+        dt._eye_session = lambda: object()
+        dt._yolo_run = lambda sess, im, conf, side=640: [((110, 120, 150, 140), 0.8), ((200, 118, 245, 140), 0.75)]
+        dt.detect_faces = lambda image, mode="auto", max_faces=4, min_frac=0.03: [(100, 100, 300, 300)]
+        negs = []
+        dt.inpaint_region = lambda sdp, im, mask, prompt, *a, **k: (seen.append(prompt), negs.append(a[0] if a else k.get("negative")), (im, 0))[2]
+        img = Image.new("RGB", (400, 400))
+        dt.eye_detail(None, img, full, "n", seed=1)
+        dt.eye_detail(None, img, full, "n", seed=1, eye_prompt="my own eyes prompt")
+        assert seen[0] == p and seen[1] == "my own eyes prompt", seen
+        assert negs[0] == "n, slit pupils, cat eyes" and negs[1] == "n", negs      # an explicit eye_prompt takes the negative as given
+    finally:
+        dt._yolo_run, dt._eye_session, dt.inpaint_region, dt.detect_faces = orig_run, orig_sess, orig_inp, orig_faces
+
+
+@test("Eye detail: the far eye of a three-quarter view is found at a lower score (rescue) — never a duplicate or a box beside the first eye")
+def _():
+    from PIL import Image
+    from backend import detail_tools as dt
+    face = (100, 100, 300, 300)
+    orig_run, orig_sess = dt._yolo_run, dt._eye_session
+    try:
+        dt._eye_session = lambda: object()
+        seen = []
+
+        def fake(sess, im, conf, side=640):
+            seen.append(conf)
+            boxes = [((150, 120, 200, 142), 0.8),          # the near eye
+                     ((62, 126, 90, 144), 0.31),           # the far eye (crop coordinates; faces start at 50, 50)
+                     ((152, 124, 198, 144), 0.3)]          # a weak duplicate of the near eye
+            return [(b, s) for b, s in boxes if s >= conf]
+        dt._yolo_run = fake
+        img = Image.new("RGB", (400, 400))
+        got = dt.detect_eyes(img, faces=[face])
+        assert len(got[0]) == 2 and seen[-1] == 0.25, (got, seen)
+        assert (112, 176, 140, 194) in got[0] and (200, 170, 250, 192) in got[0], got       # near + far, the duplicate is dropped
+        assert [len(g) for g in dt.detect_eyes(img, faces=[face], rescue=None)] == [1]       # off: only the confident eye
+        # two confident eyes: the weak box never replaces or joins them
+        dt._yolo_run = lambda sess, im, conf, side=640: [((110, 120, 150, 140), 0.8), ((200, 118, 245, 140), 0.75),
+                                                          ((120, 122, 140, 138), 0.3)]
+        assert len(dt.detect_eyes(img, faces=[face])[0]) == 2
+        # a weak box right next to the only confident eye (< 25 % of the face width apart) is not "the other eye"
+        dt._yolo_run = lambda sess, im, conf, side=640: [((110, 120, 150, 140), 0.8), ((165, 121, 190, 141), 0.3)]
+        assert len(dt.detect_eyes(img, faces=[face])[0]) == 1
+        # below the rescue score nothing is taken
+        dt._yolo_run = lambda sess, im, conf, side=640: [((110, 120, 150, 140), 0.8), ((230, 120, 260, 140), 0.2)]
+        assert len(dt.detect_eyes(img, faces=[face])[0]) == 1
+    finally:
+        dt._yolo_run, dt._eye_session = orig_run, orig_sess
+
+
 @test("Eye detail: eyes per face (plausibility filter), colour guard keeps a red iris off grey bangs, one pass per face, A1111 text + restore")
 def _():
     import numpy as np
@@ -2459,7 +2602,7 @@ def _():
             dt.detect_faces = dt.detect_faces_orig
             del dt.detect_faces_orig
     ex = _app._clean_extra(dict(ed_on=1, ed_denoise=5))
-    assert ex["ed_on"] is True and ex["ed_denoise"] == 0.6 and _app._clean_extra({})["ed_denoise"] == 0.3
+    assert ex["ed_on"] is True and ex["ed_denoise"] == 0.6 and _app._clean_extra({})["ed_denoise"] == dt.EYE_DENOISE == 0.4      # the UI default, the sanitiser and eye_detail agree
     rec = _app._gen_record(None, prompt="x", steps=20, eye_detail={"denoise": 0.3})
     assert "Eye detail: denoise 0.3" in _app._params_text(rec)
     info = PngInfo(); info.add_text("parameters", "1girl\nSteps: 20, Sampler: Euler a, CFG scale: 7, Seed: 1, "
@@ -2484,10 +2627,11 @@ def _():
     from backend import detail_tools as dt
     from backend.character_cards import clean_card
     from backend.png_info import read_image_metadata
-    # size-aware face denoise: ≤ 60 px → 0.55, ≥ 110 px → the slider, linear between, never lowers a high slider
+    # size-aware face denoise (round 5): ≤ 100 px → 0.55, ≥ 150 px → the slider, linear between, never lowers a high slider
     sad = dt.size_aware_denoise
-    assert sad(0.35, 50) == 0.55 and sad(0.35, 60) == 0.55 and sad(0.35, 120) == 0.35 and sad(0.35, 110) == 0.35
-    assert 0.35 < sad(0.35, 85) < 0.55 and sad(0.7, 40) == 0.7 and sad(0.6, 40) == 0.6
+    assert sad(0.35, 50) == 0.55 and sad(0.35, 100) == 0.55 and sad(0.35, 150) == 0.35 and sad(0.35, 160) == 0.35
+    assert 0.35 < sad(0.35, 120) < 0.55 and abs(sad(0.35, 125) - 0.45) < 1e-9 and sad(0.7, 40) == 0.7 and sad(0.6, 40) == 0.6
+    assert sad(0.5, 90) == 0.55 and abs(sad(0.5, 125) - 0.525) < 1e-9 and sad(0.5, 150) == 0.5
     seen = []
     orig_df, orig_inp = dt.detect_faces, dt.inpaint_region
     try:
@@ -2527,6 +2671,58 @@ def _():
     c = clean_card({"name": "t", "profiles": {"a.safetensors": {"eye_detail": 0.3, "face_detail": 0.35}}})
     assert c["profiles"]["a.safetensors"]["eye_detail"] == 0.3
     assert clean_card({"name": "t", "profiles": {"a.safetensors": {"eye_detail": 9}}}) is not None
+
+
+
+@test("Cool mode pauses after every sampling step (factor × step time, Stop ends the pause); Pony skips the eye pass; Cowboy Polish = eyes only")
+def _():
+    import time
+    from backend import sampling as S
+    from backend import polish as PO
+    import app as _app
+    old_f, old_stop = S.COOL["factor"], S.should_stop
+    try:
+        assert S.set_cool("x") == 0.0 and S.set_cool(9) == 4.0 and S.set_cool(-1) == 0.0 and S.set_cool(1.5) == 1.5
+        S.set_cool(1.0)
+        seen = []
+
+        def orig(pipe, i, t, kw):
+            time.sleep(0.05)                       # a 50 ms "step" inside the callback window
+            seen.append(i)
+            return {"latents": "L"}
+        cb = S._cool_callback(orig)
+        t0 = time.perf_counter()
+        out = cb(None, 0, 999, {"latents": "x"})
+        dt = time.perf_counter() - t0
+        assert out == {"latents": "L"} and seen == [0], (out, seen)
+        assert 0.09 <= dt < 0.5, dt                # 50 ms step + ~50 ms pause
+        S.should_stop = lambda: True               # Stop pressed: no pause
+        t0 = time.perf_counter()
+        cb(None, 1, 998, {})
+        assert time.perf_counter() - t0 < 0.09
+        S.should_stop = None
+        assert S._cool_callback(None)(None, 0, 1, {"latents": 1}) == {"latents": 1}   # no original callback
+
+        class _Pipe:                                # run_pipe wraps the callback only when cool mode is on
+            unet = object(); scheduler = object()
+
+            def __call__(self, **kw):
+                return kw
+        sdp = type("D", (), {"boosters": {}})()
+        call = S.run_pipe(sdp, _Pipe(), "txt2img", prompt="x")
+        assert "callback_on_step_end" in call
+        S.set_cool(0)
+        assert "callback_on_step_end" not in S.run_pipe(sdp, _Pipe(), "txt2img", prompt="x")
+    finally:
+        S.COOL["factor"], S.should_stop = old_f, old_stop
+    # Pony-family checkpoints skip the eye pass (it softened them by 28 % at every denoise)
+    assert _app._eye_pass_skipped(type("P", (), {"model_family": "pony"})())
+    assert not _app._eye_pass_skipped(type("P", (), {"model_family": "illustrious"})())
+    assert not _app._eye_pass_skipped(object())
+    # Polish → Cowboy shot: eyes only (the face pass measured no gain at 24–28 % faces)
+    r = PO.recipe("Cowboy shot")
+    assert r["fd_on"] is False and r["ed_on"] is True and r["hires_on"] is False, r
+    assert PO.TIME_FACTOR["Cowboy shot"] == PO.TIME_FACTOR["Portrait"]
 
 
 @test("GPU events share one queue slot (Generate during an X/Y grid crashed the process); Stop stays free")
@@ -3161,6 +3357,25 @@ class _BatchEnv:
         return self.xy(*args, progress=lambda *a, **k: None)
 
 
+@test("X/Y grid: Face / Hand / Eye denoise axes switch their pass on with the cell's value (the other passes stay as set)")
+def _():
+    from PIL import Image
+    import app as _app
+    assert all(a in _app._XY_AXES for a in ("Face denoise", "Hand denoise", "Eye denoise"))
+    vals, err = _app._xy_values("Eye denoise", "0.2-0.4:0.1")
+    assert not err and [round(v, 2) for v in vals] == [0.2, 0.3, 0.4], (vals, err)
+    with _BatchEnv() as E:
+        seen = []
+        cl = dict(zip(E.xy.__code__.co_freevars, E.xy.__closure__))
+        cl["do_generate"].cell_contents = lambda *a, **k: (seen.append(dict(k["extra"])) or [Image.new("RGB", (a[5], a[6]))], "info", [])
+        for axis, on, den in (("Eye denoise", "ed_on", "ed_denoise"), ("Face denoise", "fd_on", "fd_denoise"), ("Hand denoise", "hd_on", "hd_denoise")):
+            seen.clear()
+            E.run_xy(axis, "0.2, 0.4")
+            assert len(seen) == 2 and [s[on] for s in seen] == [True, True] and [s[den] for s in seen] == [0.2, 0.4], (axis, seen)
+            others = {"ed_on", "fd_on", "hd_on"} - {on}
+            assert all(not s[o] for s in seen for o in others), (axis, seen)       # only the varied pass is on
+
+
 @test("Stop that lands after an image's sampler (post pass) still ends the outfit batch and the X/Y grid")
 def _():
     with _BatchEnv() as E:
@@ -3291,6 +3506,255 @@ def _():
             assert "off-model" not in msg and "match the card" not in msg and "⭐" not in msg, msg
     finally:
         IC.available, IC.probs, IS.available = saved
+
+
+@test("CCIP: preprocessing, no silent download, a download that isn't the pinned file is deleted, features come from the session")
+def _():
+    import numpy as np
+    from PIL import Image
+    from unittest.mock import patch
+    from backend import ccip
+    x = ccip.preprocess(Image.new("RGB", (200, 300), (255, 0, 0)))
+    assert x.shape == (1, 3, 384, 384) and x.dtype == np.float32
+    assert abs(float(x[0, 0].mean()) - 1.0) < 1e-6 and abs(float(x[0, 1].mean()) + 1.0) < 1e-6          # red → +1, green / blue → −1 ([-1, 1] scaling)
+    assert len(ccip.SHA256) == 64 and ccip.SIZE_MB == 150 and ccip.MODEL_TAG.startswith("ccip-")
+    with patch("huggingface_hub.try_to_load_from_cache", return_value=None):
+        assert ccip.cached_path() is None and not ccip.available() and ccip.features(Image.new("RGB", (8, 8))) is None
+    with patch("huggingface_hub.try_to_load_from_cache", return_value="C:/does/not/exist.onnx"):
+        assert not ccip.available()                                                                       # a cache entry whose file is gone doesn't count
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as d:
+        fake = os.path.join(d, "model_feat.onnx")
+        open(fake, "wb").write(b"not the model")
+        with patch("huggingface_hub.hf_hub_download", return_value=fake):
+            try:
+                ccip.download()
+                raise AssertionError("a file with the wrong SHA-256 was accepted")
+            except RuntimeError as e:
+                assert "SHA-256" in str(e)
+        assert not os.path.exists(fake)                                                                   # refused and deleted
+
+        class Sess:
+            def get_inputs(self): return [type("I", (), {"name": "input"})()]
+            def run(self, _o, feed): return [np.arange(768, dtype=np.float32)[None] * feed["input"].shape[0]]
+        ccip._session = Sess()
+        try:
+            with patch.object(ccip, "cached_path", return_value="x"):
+                f = ccip.features(Image.new("RGB", (30, 30)))
+            assert f.shape == (768,) and f.dtype == np.float32 and f[5] == 5
+        finally:
+            ccip._session = None
+
+
+@test("Identity: reference pictures → a card's centroid (base64 float16); damaged / foreign data is dropped; the card file keeps it")
+def _():
+    import numpy as np
+    from PIL import Image
+    from backend import identity_score as ID
+    import backend.character_cards as CC
+    rng = np.random.default_rng(5)
+    v = ID._unit(rng.normal(size=768))
+    d = ID.decode_vec(ID.encode_vec(v))
+    assert d is not None and abs(float(d @ v) - 1) < 1e-3 and abs(float(np.linalg.norm(d)) - 1) < 1e-5            # float16 round trip, unit length
+    nan = v.copy(); nan[3] = np.nan
+    for bad in ("not base64!!", None, 5, ID.encode_vec(np.zeros(768)), ID.encode_vec(v[:100]), ID.encode_vec(nan)):
+        assert ID.decode_vec(bad) is None, bad
+    # references: the stub detector finds a 100 px face in every picture except the red one (none) and the blue one (40 px); the stub feature reads the grey level
+    feats = {k: ID._unit(v + 0.15 * rng.normal(size=768)) for k in (10, 20, 30, 40, 50)}
+    faces = lambda im: [] if im.getpixel((0, 0)) == (255, 0, 0) else ([(80, 80, 120, 120)] if im.getpixel((0, 0)) == (0, 0, 255) else [(50, 50, 150, 150)])
+    feat = lambda crop: feats[crop.getpixel((0, 0))[0]]
+    def pic(k):
+        return Image.new("RGB", (200, 200), {0: (255, 0, 0), -1: (0, 0, 255)}.get(k, (k, k, k)))
+    pics = lambda ks: [pic(k) for k in ks]
+    ident = ID.build_identity(pics([10, 20, 30, 0, -1, 40]), faces_fn=faces, feature_fn=feat)                          # no face / a 40 px face are skipped
+    assert ident and ident["n"] == 4 and ident["model"] == ID.MODEL_TAG and "light" not in ident, ident
+    cen = ID.decode_vec(ident["centroid"])
+    want = ID._unit(np.mean([feats[k] for k in (10, 20, 30, 40)], 0))
+    assert abs(float(cen @ want) - 1) < 1e-3
+    loo = [float(feats[k] @ ID._unit(np.mean([feats[j] for j in (10, 20, 30, 40) if j != k], 0))) for k in (10, 20, 30, 40)]
+    assert abs(ident["mean"] - np.mean(loo)) < 2e-3 and abs(ident["sd"] - np.std(loo)) < 2e-3, (ident, loo)
+    assert ID.build_identity(pics([10, 20, 0, -1]), faces_fn=faces, feature_fn=feat) is None                           # fewer than MIN_REFS usable pictures
+    assert ID.build_identity(pics([10, 20, 30]), faces_fn=faces, feature_fn=lambda c: None) is None                    # the model isn't available here
+    assert ID.clean_identity(ident) == ident
+    junk = dict(ident, mean="x", sd=-3, n=True, light="bright", model=7)
+    cj = ID.clean_identity(junk)
+    assert cj["mean"] == 0.95 and cj["sd"] == 0.02 and cj["n"] == ID.MIN_REFS and cj["model"] == ID.MODEL_TAG and "light" not in cj, cj
+    assert ID.clean_identity({"centroid": "xx"}) is None and ID.clean_identity([1]) is None and ID.clean_identity(None) is None
+    # the card file keeps it, a damaged one is dropped, profiles carry it
+    card = CC.clean_card({"name": "Id Girl", "tags": "1girl", "identity": ident,
+                          "profiles": {"x.safetensors": {"cfg": 5}}})
+    assert card["identity"] == ident and "identity" not in CC.clean_card({"name": "A", "identity": {"centroid": "zz"}})
+    merged, key = CC.card_for_checkpoint(card, "x.safetensors")
+    assert key and merged["identity"] == ident and merged["cfg"] == 5
+    import tempfile, shutil
+    tmp = Path(tempfile.mkdtemp(prefix="idcard_"))
+    old = CC.CARDS_DIR
+    try:
+        CC.CARDS_DIR = tmp / "characters"
+        CC.save_card(card)
+        assert CC.load_card("Id Girl")["identity"] == ident
+    finally:
+        CC.CARDS_DIR = old
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@test("⭐ identity: a face further from her references than her own pictures costs a star; small faces, a missing / foreign model, no face skip the check")
+def _():
+    import numpy as np
+    from PIL import Image
+    from backend import identity_score as ID
+    from backend import image_score as IS
+    rng = np.random.default_rng(11)
+    c = ID._unit(rng.normal(size=ID.DIM))
+    u = ID._unit(rng.normal(size=ID.DIM) - c * float(rng.normal(size=ID.DIM) @ c))
+    u = ID._unit(u - c * float(u @ c))                                            # a unit vector orthogonal to the centroid
+    with_cos = lambda t: np.float32(c * t + u * np.sqrt(1 - t * t))               # a head feature at an exact cosine to the centroid
+    ident = {"model": ID.MODEL_TAG, "n": 8, "centroid": ID.encode_vec(c), "mean": 0.95, "sd": 0.025}
+    sd = max(ident["sd"], ID.SD_FLOOR)
+    feats = {}
+    mk = lambda col, t: (feats.__setitem__(col, with_cos(t)), Image.new("RGB", (400, 400), col))[1]       # the stub feature reads the picture's grey level
+    box, small = [(100, 100, 230, 230)], [(100, 100, 160, 160)]                                           # a 130 px face and a 60 px face
+    run = lambda im, **k: IS.score_images([im], "1girl", probs_fn=lambda cr: {}, faces_fn=lambda i: k.pop("faces", box), hands_fn=lambda i: [], speck_fn=None,
+                                          identity=k.pop("identity", ident), feature_fn=k.pop("feature_fn", lambda cr: feats[cr.getpixel((0, 0))]))[0]
+    assert run(mk((200, 200, 200), 0.95 - 0.5 * sd)) == {"stars": 5, "flags": []}                          # a bit under the mean: normal
+    off = run(mk((201, 201, 201), 0.95 - (ID.Z_FLAG + 1) * sd))
+    assert off["stars"] == 4 and off["flags"][0].startswith("not her?") and "0.95" in off["flags"][0], off
+    far = mk((202, 202, 202), 0.3)
+    assert run(far, faces=small) == {"stars": 5, "flags": []}                                               # a 60 px face is not judged (unreliable feature)
+    assert run(far)["stars"] == 4
+    chk = ID.check(ident, with_cos(0.5), 130)
+    assert chk["flag"] is True and chk["judged"] is True and chk["z"] < -ID.Z_FLAG and chk["mean"] == 0.95
+    assert ID.check(ident, with_cos(0.5), 60)["judged"] is False and ID.check(ident, with_cos(0.5), 60)["flag"] is False
+    assert ID.check(ident, with_cos(0.95), None)["flag"] is False and ID.check(ident, with_cos(0.5), None)["flag"] is True       # size unknown: judged
+    assert ID.check(dict(ident, model="wd-vit-tagger-v3"), with_cos(0.5), 130) is None                       # learned with another model: not comparable
+    assert run(far, identity=dict(ident, model="wd-vit-tagger-v3")) == {"stars": 5, "flags": []}
+    # nothing to compare: no identity, an unusable one, no face, the feature missing
+    assert run(far, identity=None)["stars"] == 5 and run(far, identity={"centroid": "zz"})["stars"] == 5
+    assert run(far, faces=[])["flags"] == ["no face found"]
+    assert run(far, feature_fn=lambda cr: None) == {"stars": 5, "flags": []}
+    assert ID.check({"centroid": "zz"}, with_cos(0.5), 130) is None and ID.check(ident, None, 130) is None
+    # the floor: references that agree to a hair don't make the tolerance razor thin
+    tight = dict(ident, sd=0.0)
+    assert ID.check(tight, with_cos(0.95 - 1.5 * ID.SD_FLOOR), 130)["flag"] is False and ID.check(tight, with_cos(0.95 - 2.5 * ID.SD_FLOOR), 130)["flag"] is True
+
+
+@test("🧬 Learn her look: the card keeps the centroid learned from the pictures (refusals say why, CCIP is fetched on first use), the card summary shows it, the outfit batch rates with it")
+def _():
+    import re as _re
+    import numpy as np
+    from PIL import Image
+    from unittest.mock import patch
+    import app as _app
+    import backend.character_cards as CC
+    from backend import ccip as CP
+    from backend import identity_score as ID
+    from backend import image_score as IS
+    rng = np.random.default_rng(3)
+    c = ID._unit(rng.normal(size=ID.DIM))
+    u = ID._unit(rng.normal(size=ID.DIM)); u = ID._unit(u - c * float(u @ c))
+    vec = lambda t: np.float32(c * t + u * np.sqrt(1 - t * t))
+    # the stub reads the picture's red value at (0, 0): 10 / 20 / 30 / 40 = references, 99 = a picture with no face
+    stub = lambda im, box=None, faces_fn=None, feature_fn=None, **kw: None if im.getpixel((0, 0))[0] == 99 else (vec(0.95 - im.getpixel((0, 0))[0] / 2000.0), 300)
+    tmp = Path(_tf.mkdtemp())
+    old = CC.CARDS_DIR
+    try:
+        CC.CARDS_DIR = tmp / "cards"; CC.CARDS_DIR.mkdir()
+        (CC.CARDS_DIR / "G.json").write_text(json.dumps({"name": "G", "tags": "1girl", "outfits": {"a": "dress"}}), encoding="utf-8")
+        mkpic = lambda name, red: (Image.new("RGB", (120, 120), (red, 5, 5)).save(tmp / name), str(tmp / name))[1]
+        refs = [mkpic(f"r{k}.png", 10 * k) for k in (1, 2, 3, 4)]
+        faceless = mkpic("nf.png", 99)
+        by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+        fn = lambda n: getattr(by[n].fn, "__wrapped__", by[n].fn)
+        quiet = dict(progress=lambda *a, **k: None)
+        with patch.object(CP, "available", return_value=True), patch.object(ID, "head_feature", side_effect=stub):
+            assert "Pick a card" in fn("do_card_identity")("(none)", refs, **quiet)
+            assert "at least 3" in fn("do_card_identity")("G", refs[:2], **quiet)
+            assert "nothing learned" in fn("do_card_identity")("G", [faceless] * 3, **quiet)
+            assert CC.load_card("G").get("identity") is None
+            msg = fn("do_card_identity")("G", refs + [faceless, str(tmp / "missing.png")], **quiet)
+            assert "Learned" in msg and "4 of 6" in msg, msg                                            # the faceless and the missing file are skipped
+        # CCIP not downloaded yet: the first Learn fetches it (a failure says so and learns nothing), then goes on
+        with patch.object(CP, "available", return_value=False), patch.object(CP, "download", side_effect=RuntimeError("offline")):
+            assert "Could not download CCIP: offline" in fn("do_card_identity")("G", refs, **quiet)
+        got = []
+        with patch.object(CP, "available", return_value=False), patch.object(CP, "download", side_effect=lambda: got.append(1) or "p"), patch.object(ID, "head_feature", side_effect=stub):
+            assert "Learned" in fn("do_card_identity")("G", refs, **quiet) and got == [1]
+        card = CC.load_card("G")
+        assert card["identity"]["n"] == 4 and card["identity"]["model"] == ID.MODEL_TAG and card["outfits"] == {"a": "dress"}
+        assert "🧬 face learned from 4 pictures" in fn("on_card_pick")("G")[2]
+        # the outfit batch: seed 12's face is far from hers -> one star off and named; all fine -> "faces match the card"
+        from backend import detail_tools as DT
+        from backend import identity_check as IC
+        cen = ID.decode_vec(card["identity"]["centroid"])
+        u2 = ID._unit(u - cen * float(u @ cen))
+        vec2 = lambda t: np.float32(cen * t + u2 * np.sqrt(1 - t * t))                         # a feature at an exact cosine to the LEARNED centroid
+        ok_t = card["identity"]["mean"]
+        batch_stub = lambda im, box=None, faces_fn=None, feature_fn=None, **kw: (vec2(0.4 if im.getpixel((0, 0))[0] == 12 else ok_t), 300)
+        saved = (IC.available, IS.available, DT.detect_faces)
+        try:
+            IC.available = lambda: False
+            IS.available = lambda: {"look": False, "faces": True, "hands": False, "identity": True}
+            DT.detect_faces = lambda image, mode="auto", max_faces=4, min_frac=0.03: [(10, 10, 50, 50)]
+            with _BatchEnv() as E, patch.object(ID, "available", return_value=True), patch.object(ID, "head_feature", side_effect=batch_stub):
+                (E._CC.CARDS_DIR / "TestGirl.json").write_text(json.dumps({**json.loads((E._CC.CARDS_DIR / "TestGirl.json").read_text()), "identity": card["identity"]}))
+                msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11)[-1][1])
+                assert "possibly off-model" in msg and "gown · seed 12 (not her?" in msg and "seed 11" not in msg and "⭐ 4.5/5 on average" in msg, msg
+                batch_stub2 = lambda im, box=None, faces_fn=None, feature_fn=None, **kw: (vec2(ok_t), 300)
+                with patch.object(ID, "head_feature", side_effect=batch_stub2):
+                    msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11, resume=False)[-1][1])
+                assert "faces match the card in all 6 image(s) (CCIP)" in msg and "WD14" not in msg and "off-model" not in msg and "⭐ 5.0/5" in msg, msg
+                # an identity learned with another model can't be compared: no flag AND no "match" reassurance
+                (E._CC.CARDS_DIR / "TestGirl.json").write_text(json.dumps({**json.loads((E._CC.CARDS_DIR / "TestGirl.json").read_text()), "identity": dict(card["identity"], model="wd-vit-tagger-v3")}))
+                with patch.object(ID, "head_feature", side_effect=batch_stub):
+                    msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11, resume=False)[-1][1])
+                assert "off-model" not in msg and "match the card" not in msg and "⭐ 5.0/5" in msg, msg
+        finally:
+            IC.available, IS.available, DT.detect_faces = saved
+    finally:
+        CC.CARDS_DIR = old
+
+
+@test("✨ Polish: every recipe survives _clean_extra, Auto reads the framing tags, the dropdown fills the 11 controls and nothing else")
+def _():
+    import app as _app
+    from backend import polish as P
+    for name in P.SHOTS:
+        r = P.recipe(name)
+        assert r and set(r) <= set(P._KEYS), (name, r)
+        clean = _app._clean_extra(r)
+        assert all(clean[k] == v for k, v in r.items()), (name, r, clean)            # what the controls show is what runs
+        assert P.summary(name) and P.time_factor(name) >= 1, name
+    assert P.recipe("(off)") == {} and P.summary("nope") == "" and P.time_factor("nope") == 1.0
+    r = P.recipe("Wide shot"); r["hires_on"] = False
+    assert P.recipe("Wide shot")["hires_on"] is True                                   # recipe() hands out copies
+    framing = {"1girl, portrait, close-up, face focus": "Portrait", "1girl, upper body, looking at viewer, standing": "Portrait",
+               "1girl, cowboy shot, standing, night, city lights": "Cowboy shot", "1girl, (full body:1.2), standing": "Full body",
+               "1girl, very wide shot, from far away, full body, standing": "Wide shot", "1girl, white dress, simple background": "Cowboy shot",
+               "": "Cowboy shot", "1girl, close up, full-body": "Full body", "1girl, <lora:x:1>, thigh up": "Cowboy shot"}
+    for prompt, want in framing.items():
+        assert P.shot_type(prompt) == want, (prompt, P.shot_type(prompt), want)
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    on = by["on_polish"].fn
+    n_out = len(by["on_polish"].outputs)
+    assert n_out == 12, n_out                                                           # 11 controls + the note
+    noop = on("(off)", "full body")
+    assert all(u == {"__type__": "update"} for u in noop[:-1]) and noop[-1] == "", noop
+    ups = on("Full body", "")
+    want = P.recipe("Full body")
+    keys = ["hires_on", "hires_scale", "hires_denoise", "hires_steps", "hires_upscaler", "fd_on", "fd_denoise", "hd_on", "hd_denoise", "ed_on", "ed_denoise"]
+    assert [u.get("value") for u in ups[:-1]] == [want.get(k) for k in keys], ups
+    assert "Full body" in ups[-1] and f"{P.time_factor('Full body'):g}×" in ups[-1], ups[-1]
+    auto = on("Auto", "1girl, upper body, looking at viewer")
+    assert "Portrait" in auto[-1] and auto[0]["value"] is P.recipe("Portrait")["hires_on"], auto
+    # a recipe that leaves a control out leaves the user's value alone
+    saved = dict(P.RECIPES)
+    try:
+        P.RECIPES["Portrait"] = dict(fd_on=True)
+        part = on("Portrait", "")
+        assert part[5]["value"] is True and all(u == {"__type__": "update"} for i, u in enumerate(part[:-1]) if i != 5), part
+    finally:
+        P.RECIPES.clear(); P.RECIPES.update(saved)
+    assert set(by["on_polish"].inputs and [type(c).__name__ for c in by["on_polish"].inputs]) == {"Dropdown", "Textbox"}
 
 
 @test("Generate: 'Use img2img' with no image loaded says so instead of quietly making a text-to-image")

@@ -66,6 +66,11 @@ def colour_specks(img: Image.Image) -> float:
     return float(((S > 0.45) & (near < 0.18) & (V > 0.25)).mean())
 
 
+def _ids():
+    from backend import identity_score
+    return identity_score
+
+
 def _cached(repo: str, file: str) -> bool:
     try:
         from huggingface_hub import try_to_load_from_cache
@@ -75,16 +80,21 @@ def _cached(repo: str, file: str) -> bool:
 
 
 def available() -> dict:
-    """Which checks can run here (models already cached): {'look': WD14, 'faces': …, 'hands': …}."""
+    """Which checks can run here (models already cached): {'look': WD14, 'faces': …, 'hands': …, 'identity': CCIP}."""
     from backend import detail_tools as dt
-    return {"look": ic.available(), "faces": _cached(dt._YOLO_REPO, dt._YOLO_FILE), "hands": _cached(dt._HAND_REPO, dt._HAND_FILE)}
+    from backend import identity_score as ids
+    return {"look": ic.available(), "faces": _cached(dt._YOLO_REPO, dt._YOLO_FILE), "hands": _cached(dt._HAND_REPO, dt._HAND_FILE),
+            "identity": ids.available()}
 
 
-def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=None, speck_fn=colour_specks) -> list[dict]:
+def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=None, speck_fn=colour_specks,
+                 identity=None, feature_fn=None) -> list[dict]:
     """Per image {'stars': 1..5, 'flags': ['no face found', 'grey hair 0.12', 'no butterfly hair ornament 0.31', …]}.
     The detectors default to the app's own, used only for the checks `available()` reports; pass the *_fn arguments to
-    replace them (tests). A check that can't run is simply skipped."""
+    replace them (tests). A check that can't run is simply skipped. `identity` = a card's identity (backend/identity_score):
+    a face further from her references than her own pictures are (and at least 100 px wide) costs a star."""
     can = available() if not (probs_fn and faces_fn and hands_fn) else {"look": True, "faces": True, "hands": True}
+    ident = identity if identity and (feature_fn is not None or can.get("identity", True) and _ids().available()) else None
     if probs_fn is None and can["look"]:
         probs_fn = ic.probs
     if faces_fn is None and can["faces"]:
@@ -125,6 +135,12 @@ def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=No
                 if v < ACCESSORY_THRESHOLD:
                     stars -= 1
                     flags.append(f"no {key} {v:.2f}")
+        if ident and faces:
+            r = _ids().head_feature(im, box=faces[0], feature_fn=feature_fn, min_face_px=_ids().MIN_FACE_PX)      # a small face is not judged
+            res = _ids().check(ident, r[0], r[1]) if r is not None else None
+            if res and res["flag"]:
+                stars -= 1
+                flags.append(f"not her? face {res['cos']:.2f} (her pictures {res['mean']:.2f})")
         if speck_fn and speck_fn(im) > SPECK_LIMIT:
             stars -= 1
             flags.append("colour noise")

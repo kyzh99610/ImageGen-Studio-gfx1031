@@ -15,6 +15,7 @@ user's prompt.
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +45,7 @@ _EYE_REPO, _EYE_FILE = "deepghs/anime_eye_detection", "eye_detect_v1.0_s/model.o
 _EYE_SHA256 = "7c5f0259103cc407e2a0f0b047a51271246b9525d27920315295a54367c5c583"
 _EYE_LOCAL = MODELS_DIR / "detectors" / "anime_eye_detect_v1.0_s.onnx"
 _EYE_CONF = 0.4
+_EYE_RESCUE_CONF = 0.25      # the second eye of a face may be found down to this score (see detect_eyes)
 _eye_yolo = {}
 _cascades: dict = {}
 
@@ -80,8 +82,10 @@ def _crop_box(mask_np: np.ndarray, W: int, H: int, pad: int, min_side: int) -> t
 def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, negative: str = "", *,
                    steps: int = 25, cfg: float = 7.0, denoise: float = 0.75, seed: int = -1,
                    scheduler: str = "DPM++ 2M Karras", clip_skip: int = 1, padding: int = 48,
-                   min_context: int | None = None, feather: int = 4, step_callback=None) -> tuple[Image.Image, int]:
-    """Repaint the white part of `mask` with the loaded model. Returns (image, seed used)."""
+                   min_context: int | None = None, feather: int = 4, step_callback=None,
+                   native: int | None = None) -> tuple[Image.Image, int]:
+    """Repaint the white part of `mask` with the loaded model. Returns (image, seed used).
+    `native` overrides the long side the crop is scaled to (default 512 SD 1.5 / 1024 SDXL)."""
     import torch
     from backend.sd_pipeline import _load_scheduler, _make_generator
     from backend.sampling import uniform_variant
@@ -99,7 +103,7 @@ def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, nega
     if not m_np.any():
         return image, seed
     xl = bool(getattr(sdp, "is_sdxl", False))
-    native = 1024 if xl else 512
+    native = int(native) if native else (1024 if xl else 512)
     if xl:
         from diffusers import StableDiffusionXLInpaintPipeline as _Inpaint
     else:
@@ -122,7 +126,6 @@ def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, nega
     # 1.6–1.8 GB of VRAM held.
     try:
         _load_scheduler(pipe, scheduler)
-        generator, used_seed = _make_generator(seed, sdp.device)
         embeds = _embeds(sdp, pipe, prompt, negative, clip_skip)
         cb = {}
         if step_callback is not None:
@@ -137,26 +140,39 @@ def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, nega
         # force_upcast, casts the whole VAE to fp32 first: with native (non-cuDNN) convs a 512 px fp32
         # tile needs a 1.12 GiB scratch buffer, which failed on every face-detail pass with 3 GB free.
         # Encode in fp16 unless this checkpoint's VAE really needs fp32 (then 256 px tiles).
-        vae = pipe.vae
-        saved_vae = (vae.config.get("force_upcast"), getattr(vae, "tile_sample_min_size", None),
-                     getattr(vae, "tile_latent_min_size", None))
-        if xl and saved_vae[0] is not None:
-            need32 = bool(getattr(sdp, "_vae_needs_fp32", False))
-            vae.register_to_config(force_upcast=need32)
-            if need32 and saved_vae[1]:
-                vae.tile_sample_min_size, vae.tile_latent_min_size = 256, 32
-        try:
-            with torch.inference_mode():
-                lat = run_pipe(sdp, pipe, "inpaint", **embeds, image=crop.resize((rw, rh), Image.LANCZOS),
-                               mask_image=crop_mask.resize((rw, rh), Image.NEAREST), width=rw, height=rh,
-                               strength=float(denoise), num_inference_steps=int(steps), guidance_scale=float(cfg),
-                               generator=generator, output_type="latent", **cb).images
-        finally:
+        need32 = bool(getattr(sdp, "_vae_needs_fp32", False)) if xl else False
+        for attempt in (0, 1):
+            generator, used_seed = _make_generator(seed, sdp.device)       # same noise again on the retry
+            vae = pipe.vae
+            saved_vae = (vae.config.get("force_upcast"), getattr(vae, "tile_sample_min_size", None),
+                         getattr(vae, "tile_latent_min_size", None))
             if xl and saved_vae[0] is not None:
-                vae.register_to_config(force_upcast=saved_vae[0])
-                if saved_vae[1]:
-                    vae.tile_sample_min_size, vae.tile_latent_min_size = saved_vae[1], saved_vae[2]
-            vae = None
+                vae.register_to_config(force_upcast=need32)
+                if need32 and saved_vae[1]:
+                    vae.tile_sample_min_size, vae.tile_latent_min_size = 256, 32
+            try:
+                with torch.inference_mode():
+                    lat = run_pipe(sdp, pipe, "inpaint", **embeds, image=crop.resize((rw, rh), Image.LANCZOS),
+                                   mask_image=crop_mask.resize((rw, rh), Image.NEAREST), width=rw, height=rh,
+                                   strength=float(denoise), num_inference_steps=int(steps), guidance_scale=float(cfg),
+                                   generator=generator, output_type="latent", **cb).images
+            finally:
+                if xl and saved_vae[0] is not None:
+                    vae.register_to_config(force_upcast=saved_vae[0])
+                    if saved_vae[1]:
+                        vae.tile_sample_min_size, vae.tile_latent_min_size = saved_vae[1], saved_vae[2]
+                vae = None
+            if bool(torch.isfinite(lat).all()):
+                break
+            # A NoobAI checkpoint (VAE stored in bf16) overflows in an fp16 encode: every latent came back NaN and the redraw was a black
+            # patch. The fp32 need is otherwise only learned by a failed fp16 *decode*, which a pass that runs first in a
+            # fresh process (Inpaint tab, SD detail, a card batch's eye pass) never makes — learn it here and go again.
+            if attempt == 0 and xl and not need32:
+                need32 = True
+                sdp._vae_needs_fp32 = True
+                print("[Inpaint] NaN latents after an fp16 VAE encode — this model's VAE needs fp32; retrying", flush=True)
+                continue
+            raise RuntimeError("the sampler produced NaN latents, so nothing was changed")
         result = sdp._decode_latents(pipe.vae, lat)[0].resize((cw, ch), Image.LANCZOS)
     finally:
         pipe = embeds = lat = cb = None
@@ -355,11 +371,13 @@ def detect_faces(image: Image.Image, mode: str = "auto", max_faces: int = 4,
 
 
 def size_aware_denoise(denoise: float, face_px: float) -> float:
-    """Face-pass denoise for a face `face_px` wide. Measured (round 4, SDXL 832×1216, 3 paired seeds): a ~50 px face
-    (wide shot, 6 % of the width) gained identity +2.0 at 0.35 but +2.6 at 0.65, a ~115 px face (full body) was as
-    good at 0.35 as at 0.65, and 0.8 turned a tiny face into somebody else. So small faces get at least 0.55 (≤ 60 px),
-    faces ≥ 110 px the slider's value, linear in between; never above max(slider, 0.65)."""
-    lo, hi, small = 60.0, 110.0, 0.55
+    """Face-pass denoise for a face `face_px` wide. Measured on hassakuXL 832×1216 / 1216×832, identity (0 = generic look-alike, 1 = her on a
+    portrait) paired against 0.35 on the same pictures: round 4 — a ~50 px face (wide shot) +2.0 at 0.35 but +2.6 at 0.65, and 0.8 turned a
+    tiny face into somebody else; round 5 — 62–90 px (n 4) 0.55 +0.48 ± 0.14 (the old blend to 0.35 at 110 px: +0.32), 90–130 px (n 8) 0.55
+    +0.21 ± 0.09 / 0.65 +0.31 ± 0.14 (the old rule left them at 0.35: +0.02), ≥ 130 px (n 3) no difference; at ≤ 104 px the hair pin came back more
+    often at 0.55 (pin probability 0.39 → 0.63 at 62–90 px, 0.62 → 0.78 at 90–130 px). So faces ≤ 100 px get at least 0.55, faces ≥ 150 px the
+    slider's value, linear in between; never above max(slider, 0.65)."""
+    lo, hi, small = 100.0, 150.0, 0.55
     if denoise >= small or face_px >= hi:
         return denoise
     want = small if face_px <= lo else small + (denoise - small) * (face_px - lo) / (hi - lo)
@@ -459,12 +477,15 @@ def eye_detector_available() -> bool:
     return _eye_session() is not None
 
 
-def detect_eyes(image: Image.Image, faces=None, max_faces: int = 4,
-                conf: float = _EYE_CONF) -> list[list[tuple[int, int, int, int]]]:
+def detect_eyes(image: Image.Image, faces=None, max_faces: int = 4, conf: float = _EYE_CONF,
+                rescue: float | None = _EYE_RESCUE_CONF) -> list[list[tuple[int, int, int, int]]]:
     """Eye boxes per face: [[eye, eye], …] in the order of `faces` (detected when not given); a face whose
     eyes aren't found gets []. The detector runs on each face crop (+25 % margin) — on a whole full-body picture
     it missed eyes it found on the crop — and keeps at most two plausible boxes per face: width 6–50 % of the
-    face, centre inside the face box and above 80 % of its height (no mouths, no eyes of a second face)."""
+    face, centre inside the face box and above 80 % of its height (no mouths, no eyes of a second face).
+    `rescue`: a face with only one eye above `conf` may take a weaker box (score ≥ rescue) at least a quarter of
+    the face width away from it — the far eye of a three-quarter view or the one under her bangs (on 1,056 faces
+    the far eye was found at 0.27–0.38 in 12 of 12 cases; none of those boxes was a false one)."""
     sess = _eye_session()
     if sess is None:
         return []
@@ -472,12 +493,13 @@ def detect_eyes(image: Image.Image, faces=None, max_faces: int = 4,
         faces = detect_faces(image, "anime", max_faces)
     W, H = image.size
     res = []
+    low = min(conf, rescue) if rescue else conf
     for x1, y1, x2, y2 in faces:
         fw, fh = x2 - x1, y2 - y1
         cx1, cy1 = max(0, x1 - fw // 4), max(0, y1 - fh // 4)
         cx2, cy2 = min(W, x2 + fw // 4), min(H, y2 + fh // 4)
         found = []
-        for (bx1, by1, bx2, by2), sc in _yolo_run(sess, image.crop((cx1, cy1, cx2, cy2)), conf):
+        for (bx1, by1, bx2, by2), sc in _yolo_run(sess, image.crop((cx1, cy1, cx2, cy2)), low):
             b = (bx1 + cx1, by1 + cy1, bx2 + cx1, by2 + cy1)
             mx, my = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
             if not (0.06 * fw <= b[2] - b[0] <= 0.5 * fw and x1 <= mx <= x2 and y1 <= my <= y1 + 0.8 * fh):
@@ -485,10 +507,16 @@ def detect_eyes(image: Image.Image, faces=None, max_faces: int = 4,
             found.append((b, sc))
         found.sort(key=lambda bs: -bs[1])
         keep = []
-        for b, _sc in found:
-            if any(_iou(b, k) >= 0.2 for k in keep):
-                continue
-            keep.append(b)
+        for b, sc in found:
+            if sc >= conf and not any(_iou(b, k) >= 0.2 for k in keep):
+                keep.append(b)
+        if len(keep) == 1 and rescue and rescue < conf:
+            kx = (keep[0][0] + keep[0][2]) / 2
+            for b, sc in found:
+                if sc >= conf or sc < rescue or _iou(b, keep[0]) >= 0.2 or abs((b[0] + b[2]) / 2 - kx) < 0.25 * fw:
+                    continue
+                keep.append(b)
+                break
         res.append(sorted(keep[:2]))
     return res
 
@@ -523,7 +551,54 @@ def colour_guard(before: Image.Image, after: Image.Image, iris_boxes, region=Non
     return res
 
 
-def eye_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, denoise: float = 0.3,
+# the eye pass's own prompt (round 5, five Illustrious / NoobAI / Pony checkpoints, paired against the full prompt + three eye words):
+# quality + subject + the tags that describe the eyes, the expression and the gaze, then words that ask for the structures that should
+# show. Without "sparkling eyes, eye highlights, limbal ring": those drew 4-point star sparkles into the pupils in 3 of 8 pictures (3x crops).
+_EYE_KEEP = re.compile(r"eye|pupil|iris|lash|tsurime|jitome|tareme|sanpaku|heterochromia|glasses|eyewear|goggles|monocle|tears|crying|wink|"
+                       r"smile|expression|blush|looking|bangs|hair over|hair between|eyebrow|makeup|eyeshadow|eyeliner|"
+                       r"@_@|\+_\+|\^_\^|>_<|=_=|;_;|o_o|0_0|x_x", re.I)          # (the kaomoji are eyes too)
+EYE_DETAIL_WORDS = "detailed eyes, beautiful detailed eyes, eyelashes, detailed pupils, iris detail"
+# "detailed pupils" alone drew bold outlined slit pupils (one checkpoint 4 of 4, Pony, some hassakuXL). With "round pupils" in the prompt and
+# "slit pupils, cat eyes" in the negative the pupils stay round and the iris keeps its shading (8 pictures, 3x crops; hassakuXL's eye sharpness over
+# the untouched base 1.12 -> 1.01) — unless the prompt asks for a pupil shape itself (slit / heart-shaped / @_@ …): then the pass leaves it alone.
+EYE_ROUND = "round pupils"
+EYE_ROUND_NEGATIVE = "slit pupils, cat eyes"
+_PUPIL_SHAPE = re.compile(r"slit|cat eyes|reptil|snake|dragon|goat|animal eyes|-shaped|shaped pupils|horizontal pupils|vertical pupils|rectangular|no pupils|"
+                          r"blank eyes|empty eyes|mesmeriz|hypnosis|spiral|ringed eyes|@_@|\+_\+|solid circle eyes", re.I)
+
+
+def _eye_tags(prompt: str) -> list[str]:
+    """The tags of `prompt` the eye pass keeps: quality, subject, and everything that describes the eyes, the expression and the gaze."""
+    from backend.prompt_tools import _is_quality, split_tags
+    keep = []
+    for tag in split_tags(prompt or ""):
+        core = re.sub(r"[()\\]", "", tag).lower()
+        if _is_quality(tag) or re.fullmatch(r"\d?(girl|girls|boy|boys)|solo", core.split(":")[0].strip()) or _EYE_KEEP.search(core):
+            keep.append(tag)
+    return keep
+
+
+def eye_prompt_from(prompt: str) -> str:
+    """The prompt the eye pass redraws with: the quality and subject tags of `prompt`, its eye / expression / gaze tags and EYE_DETAIL_WORDS
+    + "round pupils" (the scene, outfit, hair and accessory tags stay out — the crop is only the eyes)."""
+    from backend.prompt_tools import join_tags
+    keep = _eye_tags(prompt)
+    own_shape = _PUPIL_SHAPE.search(", ".join(keep))
+    return join_tags(keep + [EYE_DETAIL_WORDS if own_shape else f"{EYE_DETAIL_WORDS}, {EYE_ROUND}"])
+
+
+def eye_negative_from(prompt: str, negative: str = "") -> str:
+    """`negative` + "slit pupils, cat eyes" (see EYE_ROUND), except when the prompt names a pupil shape itself."""
+    from backend.prompt_tools import merge_prompts
+    if _PUPIL_SHAPE.search(", ".join(_eye_tags(prompt))):
+        return negative
+    return merge_prompts(negative or "", EYE_ROUND_NEGATIVE)
+
+
+EYE_DENOISE = 0.4        # default strength of the eye pass: with the eye-only prompt Laplacian energy of the eyes +17 % (0.3: +6 %) over the old whole-prompt pass at 0.3, no colour bleed
+
+
+def eye_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, denoise: float = EYE_DENOISE,
                steps: int = 20, cfg: float = 7.0, seed: int = -1, scheduler: str = "DPM++ 2M Karras",
                clip_skip: int = 1, eye_prompt: str = "", max_faces: int = 4, guard: bool = True,
                step_callback=None) -> tuple[Image.Image, int]:
@@ -537,8 +612,8 @@ def eye_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, deno
     scheduler = uniform_variant(scheduler)
     W, H = image.size
     out = image
-    extra = eye_prompt or "detailed eyes, beautiful detailed eyes, eyelashes"
-    p = f"{prompt}, {extra}" if prompt else extra
+    p = eye_prompt or eye_prompt_from(prompt)       # `eye_prompt` given = the whole prompt of the redraw (and the negative is used as given)
+    negative = negative if eye_prompt else eye_negative_from(prompt, negative)
     for n, eyes in enumerate(groups):
         mask = Image.new("L", (W, H), 0)
         d = ImageDraw.Draw(mask)
