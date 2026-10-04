@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 from dataclasses import dataclass
 import numpy as np
+os.environ["IMAGEGEN_TESTS"] = "1"         # the app must not apply the user's saved cool factor / pause limit (a pause limit makes every fake generate read the live sensor and wait while hot)
 
 # Fix Windows console encoding for Unicode emoji
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
@@ -2627,18 +2628,18 @@ def _():
     from backend import detail_tools as dt
     from backend.character_cards import clean_card
     from backend.png_info import read_image_metadata
-    # size-aware face denoise (round 5): ≤ 100 px → 0.55, ≥ 150 px → the slider, linear between, never lowers a high slider
+    # size-aware face denoise: ≤ 60 px → 0.65 (round 6), → 0.55 at 100 px (round 5), ≥ 150 px → the slider, never lowers a high slider
     sad = dt.size_aware_denoise
-    assert sad(0.35, 50) == 0.55 and sad(0.35, 100) == 0.55 and sad(0.35, 150) == 0.35 and sad(0.35, 160) == 0.35
-    assert 0.35 < sad(0.35, 120) < 0.55 and abs(sad(0.35, 125) - 0.45) < 1e-9 and sad(0.7, 40) == 0.7 and sad(0.6, 40) == 0.6
-    assert sad(0.5, 90) == 0.55 and abs(sad(0.5, 125) - 0.525) < 1e-9 and sad(0.5, 150) == 0.5
+    assert sad(0.35, 50) == 0.65 and sad(0.35, 60) == 0.65 and sad(0.35, 100) == 0.55 and sad(0.35, 150) == 0.35 and sad(0.35, 160) == 0.35
+    assert abs(sad(0.35, 80) - 0.6) < 1e-9 and abs(sad(0.35, 125) - 0.45) < 1e-9 and sad(0.7, 40) == 0.7 and sad(0.6, 40) == 0.65
+    assert abs(sad(0.5, 90) - 0.575) < 1e-9 and abs(sad(0.5, 125) - 0.525) < 1e-9 and sad(0.5, 150) == 0.5
     seen = []
     orig_df, orig_inp = dt.detect_faces, dt.inpaint_region
     try:
         dt.detect_faces = lambda *a, **k: [(10, 10, 60, 60), (100, 100, 260, 260)]       # 50 px and 160 px
         dt.inpaint_region = lambda sdp, im, mask, *a, **k: (seen.append(k["denoise"]), (im, 0))[1]
         dt.face_detail(object(), Image.new("RGB", (400, 400)), "x", denoise=0.35)
-        assert seen == [0.55, 0.35], seen
+        assert seen == [0.65, 0.35], seen
         seen.clear()
         dt.face_detail(object(), Image.new("RGB", (400, 400)), "x", denoise=0.35, size_aware=False)
         assert seen == [0.35, 0.35], seen
@@ -2680,7 +2681,9 @@ def _():
     from backend import sampling as S
     from backend import polish as PO
     import app as _app
-    old_f, old_stop = S.COOL["factor"], S.should_stop
+    from backend import thermal as _T
+    old_f, old_stop, old_lim = S.COOL["factor"], S.should_stop, _T.GUARD["limit"]
+    _T.set_limit(0)                                 # the saved prefs may have it on
     try:
         assert S.set_cool("x") == 0.0 and S.set_cool(9) == 4.0 and S.set_cool(-1) == 0.0 and S.set_cool(1.5) == 1.5
         S.set_cool(1.0)
@@ -2706,8 +2709,8 @@ def _():
         class _Pipe:                                # run_pipe wraps the callback only when cool mode is on
             unet = object(); scheduler = object()
 
-            def __call__(self, **kw):
-                return kw
+            def __call__(self, callback_on_step_end=None, **kw):
+                return dict(kw, callback_on_step_end=callback_on_step_end) if callback_on_step_end else kw
         sdp = type("D", (), {"boosters": {}})()
         call = S.run_pipe(sdp, _Pipe(), "txt2img", prompt="x")
         assert "callback_on_step_end" in call
@@ -2715,6 +2718,7 @@ def _():
         assert "callback_on_step_end" not in S.run_pipe(sdp, _Pipe(), "txt2img", prompt="x")
     finally:
         S.COOL["factor"], S.should_stop = old_f, old_stop
+        _T.GUARD["limit"] = old_lim
     # Pony-family checkpoints skip the eye pass (it softened them by 28 % at every denoise)
     assert _app._eye_pass_skipped(type("P", (), {"model_family": "pony"})())
     assert not _app._eye_pass_skipped(type("P", (), {"model_family": "illustrious"})())
@@ -2723,6 +2727,89 @@ def _():
     r = PO.recipe("Cowboy shot")
     assert r["fd_on"] is False and r["ed_on"] is True and r["hires_on"] is False, r
     assert PO.TIME_FACTOR["Cowboy shot"] == PO.TIME_FACTOR["Portrait"]
+
+
+
+@test("Start-up prefs: the saved cool factor and pause limit are applied except under the test suite (IMAGEGEN_TESTS=1), which must not depend on them")
+def _():
+    from backend import thermal as T
+    class FakeSampling:
+        def __init__(self): self.cool = None
+        def set_cool(self, v): self.cool = v
+    old = T.GUARD["limit"]
+    try:
+        fs = FakeSampling()
+        assert T.apply_saved({"cool": 1.5, "thermal_limit": 88.0}, fs, environ={}) is True and fs.cool == 1.5 and T.GUARD["limit"] == 88.0
+        T.set_limit(0)
+        fs = FakeSampling()
+        assert T.apply_saved({"cool": 1.5, "thermal_limit": 88.0}, fs, environ={"IMAGEGEN_TESTS": "1"}) is False and fs.cool is None and T.GUARD["limit"] == 0.0
+        assert os.environ.get("IMAGEGEN_TESTS") == "1"           # this very suite runs with the flag
+        T.apply_saved({}, fs, environ={})                         # no saved choices: both off
+        assert fs.cool == 0.0 and T.GUARD["limit"] == 0.0
+    finally:
+        T.GUARD["limit"] = old
+
+
+@test("🌡 Pause while hot: waits until the thermal zone is 8 °C under the limit (Stop / 15 min end it), off by default, reads the real sensor")
+def _():
+    from backend import thermal as T
+    import app as _app
+    old = T.GUARD["limit"]
+    try:
+        assert T.set_limit(0) == 0.0 and T.set_limit(50) == 0.0 and T.set_limit("x") == 0.0 and T.set_limit(120) == 99.0
+        T.set_limit(0)
+        assert T.wait_cool(read=lambda: 99.0, sleep=lambda s: None) == 0.0          # off → never waits
+        T.set_limit(90)
+        temps = iter([93.0, 92.0, 88.0, 84.0, 81.0])
+        now = [0.0]
+        said = []
+
+        def sleep(sec):
+            now[0] += sec
+        waited = T.wait_cool(read=lambda: next(temps), sleep=sleep, clock=lambda: now[0], say=said.append)
+        assert waited == 8.0 and len(said) == 4 and "waiting for 82" in said[0], (waited, said)   # 93, 92, 88, 84 wait; 81 ≤ 82 resumes
+        assert T.wait_cool(read=lambda: 85.0, sleep=sleep, clock=lambda: now[0]) == 0.0           # below the limit: no wait
+        assert T.wait_cool(read=lambda: None, sleep=sleep, clock=lambda: now[0]) == 0.0           # no sensor: no wait
+        stop = iter([False, True])
+        now[0] = 0.0
+        assert T.wait_cool(should_stop=lambda: next(stop), read=lambda: 95.0, sleep=sleep, clock=lambda: now[0]) == 2.0
+        now[0] = 0.0
+        assert T.wait_cool(read=lambda: 95.0, sleep=sleep, clock=lambda: now[0]) >= 900.0          # gives up after 15 min
+        # inside a pass: only an emergency brake (act at limit + 6 = 96, resume at the limit) — no stop-go at 90
+        assert T.wait_cool(read=lambda: 95.0, sleep=sleep, clock=lambda: now[0], in_pass=True) == 0.0
+        temps2 = iter([96.0, 92.0, 89.5, 90.0])
+        now[0] = 0.0
+        assert T.wait_cool(read=lambda: next(temps2), sleep=sleep, clock=lambda: now[0], in_pass=True) == 4.0   # 96, 92 wait; 89.5 ≤ 90
+        T.set_limit(0)
+        assert _app._thermal_wait() == 0.0
+        # inside a pass: with the limit set the callback also checks the zone (every ~10 s, emergency brake)
+        import inspect, torch
+        from backend import sampling as S
+        assert "_size_factor(kw)" not in inspect.getsource(S._cool_callback)    # uniform pause (scaling was slower, not cooler)
+        calls = []
+        old_wait, old_every, old_cool = T.wait_cool, S._THERM_EVERY, S.COOL["factor"]
+        try:
+            T.wait_cool = lambda *a, **k: calls.append(k.get("in_pass")) or 0.0
+            S._THERM_EVERY = 0.0
+            S.COOL["factor"] = 0.0
+            T.set_limit(90)
+
+            class _P:
+                unet = object(); scheduler = object()
+
+                def __call__(self, callback_on_step_end=None, **kw):
+                    return dict(kw, callback_on_step_end=callback_on_step_end) if callback_on_step_end else kw
+            call = S.run_pipe(type("D", (), {"boosters": {}})(), _P(), "txt2img", prompt="x")
+            assert "callback_on_step_end" in call                       # installed for the thermal check alone
+            call["callback_on_step_end"](None, 0, 1, {"latents": torch.zeros(1, 4, 8, 8)})
+            assert calls == [True]
+        finally:
+            T.wait_cool, S._THERM_EVERY, S.COOL["factor"] = old_wait, old_every, old_cool
+            T.set_limit(0)
+        t = T.read_temp()
+        assert t is None or 0 < t < 130, t
+    finally:
+        T.GUARD["limit"] = old
 
 
 @test("GPU events share one queue slot (Generate during an X/Y grid crashed the process); Stop stays free")
@@ -3699,6 +3786,15 @@ def _():
                 (E._CC.CARDS_DIR / "TestGirl.json").write_text(json.dumps({**json.loads((E._CC.CARDS_DIR / "TestGirl.json").read_text()), "identity": card["identity"]}))
                 msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11)[-1][1])
                 assert "possibly off-model" in msg and "gown · seed 12 (not her?" in msg and "seed 11" not in msg and "⭐ 4.5/5 on average" in msg, msg
+                assert "hat / hairstyle" not in msg, msg                 # a plain gown: no hint
+                # an outfit that changes the head (tiara, hat, ponytail …): CCIP reads hair and headwear too, so the flag says "check by eye"
+                cj = json.loads((E._CC.CARDS_DIR / "TestGirl.json").read_text())
+                cj["outfits"]["gown"] = "evening gown, tiara"
+                (E._CC.CARDS_DIR / "TestGirl.json").write_text(json.dumps(cj))
+                msg2 = _re.sub("<[^>]+>", " ", E.run_batch(seed=11, resume=False)[-1][1])
+                assert "gown · seed 12 (not her?" in msg2 and "a hat / hairstyle in this outfit lowers it: check by eye" in msg2, msg2
+                cj["outfits"]["gown"] = "evening gown"
+                (E._CC.CARDS_DIR / "TestGirl.json").write_text(json.dumps(cj))
                 batch_stub2 = lambda im, box=None, faces_fn=None, feature_fn=None, **kw: (vec2(ok_t), 300)
                 with patch.object(ID, "head_feature", side_effect=batch_stub2):
                     msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11, resume=False)[-1][1])
