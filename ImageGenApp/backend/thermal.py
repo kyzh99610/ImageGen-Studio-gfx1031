@@ -88,6 +88,7 @@ def read_temp() -> float | None:
 # at 31 % duty, so it hit 88 within ~40 s and then waited 1-3 min for 80), 8.7 instead of 3.9 min per Full-body picture, and
 # the peaks stayed at 95.9 — what keeps the laptop safe is the smooth per-step pause plus a cool start of every piece.
 IN_PASS_MARGIN = 6.0
+_PLATEAU = 20.0         # between pieces: no new low for this long below the limit = the laptop's idle level, go on
 
 
 def wait_cool(should_stop=None, say=None, read=read_temp, sleep=time.sleep, clock=time.monotonic,
@@ -103,8 +104,16 @@ def wait_cool(should_stop=None, say=None, read=read_temp, sleep=time.sleep, cloc
     if t is None or t < trigger:
         return 0.0
     t0 = clock()
+    best, best_at = t, t0
     while t is not None and t > resume and clock() - t0 < _MAX_WAIT:
         if should_stop is not None and should_stop():
+            break
+        # Between pieces: also go on once the zone is under the limit and has stopped falling (no new low by ≥ 1 °C in
+        # 20 s) — the laptop has reached its idle level. Round 8: with an idle floor of 84–88 °C the wait for 80 took 35 %
+        # of a hand re-draw call (25 waits of 3–44 s); the brake inside a pass keeps its own rule.
+        if t < best - 1.0:
+            best, best_at = t, clock()
+        elif not in_pass and t < limit and clock() - best_at >= _PLATEAU:
             break
         if say is not None:
             say(f"🌡 Cooling down: {t:.0f} °C — waiting for {resume:.0f} °C before the next step")

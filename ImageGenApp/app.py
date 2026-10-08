@@ -1405,11 +1405,19 @@ def _build_generate_tab():
                                     '(hands, faces) get full detail. Describe what should be there.</p>')
                             inp_btn = gr.Button("🖌 Inpaint", variant="primary", size="sm")
                             with gr.Row():
-                                inp_swap_txt = gr.Textbox(value="", label="🦋 Swap a hair accessory — what should be there instead?", scale=3,
+                                inp_swap_txt = gr.Textbox(value="", label="🦋 Swap an accessory — what should be there instead?", scale=3,
                                                           placeholder="black butterfly hair ornament",
-                                                          info="Paint over the whole old accessory (what is outside the paint stays), type the new one. One pass at denoise 1.0 "
-                                                               "with a hair-only prompt + this text — at 0.9–0.95 the old shape still shows through as lace. Not there? Try another seed.")
+                                                          info="Paint over the whole old accessory (what is outside the paint stays), type the new one: a hair ornament, earrings, a choker, a hat "
+                                                               "(paint the whole hat, its crown above the head too). One pass at denoise 1.0 with a hair-only prompt + this text — "
+                                                               "at 0.9–0.95 the old shape still shows through as lace. Not there? Try another seed.")
                                 inp_swap_btn = gr.Button("🦋 Swap", size="sm", scale=1)
+                            with gr.Row():
+                                inp_hand_tries = gr.Slider(1, 8, value=4, step=1, label="🖐 Re-draw a hand — tries", scale=3,
+                                                           info="Paint over the broken hand (or paint nothing: the biggest detected hand is used). "
+                                                                "Each try re-draws it at 0.8 with a hand-only prompt and its own seed; pick the one you "
+                                                                "like. Measured on 11 broken hands: about every other try is a correct hand (4 tries: at least one in 10 of 11), "
+                                                                "a third are plausible but changed (another glove, prop or pose). Paint the hand only: next to a face the box can draw a face.")
+                                inp_hand_btn = gr.Button("🖐 Re-draw hand", size="sm", scale=1)
 
 
                             gr.Markdown("---")
@@ -1768,7 +1776,7 @@ def _build_generate_tab():
     def _detail_pass(kind, imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress):
         """Face, hand or eye detail on every image (same seed per image, low denoise)."""
         import math
-        from backend.detail_tools import face_detail, hand_detail, eye_detail
+        from backend.detail_tools import face_detail, hand_detail, eye_detail, detail_schedule_steps
         face = kind == "face"
         den = {"face": ex["fd_denoise"], "hand": ex["hd_denoise"], "eye": ex["ed_denoise"]}[kind]
         label, icon, what = {"face": ("Face", "✨", "face"), "hand": ("Hand", "✋", "hand"),
@@ -1776,7 +1784,7 @@ def _build_generate_tab():
         t0, out, found, errors = time.time(), [], [], []
         # ~half the main steps actually run (ADetailer runs steps × denoise). SDXL A/B at 1024²:
         # 0.8× (~22 steps) ~45 s per face, 0.5× (~14) ~28 s, faces no worse
-        fsteps = min(150, math.ceil(max(10, int(steps) * 0.5) / den))
+        fsteps = detail_schedule_steps(kind, steps, den)              # the eye pass runs 8 steps instead of 10 (round 8: equal quality, 21 % cheaper)
         for i, im in enumerate(imgs):
             if _generation_abort.is_set():
                 raise _GenerationAborted()
@@ -3095,6 +3103,84 @@ def _build_generate_tab():
                + (f'<br><span style="color:#f9e2af;">Adjusted: {"; ".join(fixes)}</span>' if fixes else "")
                + "</p>")
         return [out], msg, status, [out], [used]
+
+    @gpu_job
+    def do_hand_redraw_ui(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, prompt, neg_prompt, scheduler,
+                          steps, cfg, seed, clip_skip, editor, tries, progress=gr.Progress()):
+        """🖐 Re-draw a hand: several re-draws (seed, seed + 1, …) of the painted or the biggest detected hand at 0.8 with a
+        hand-only prompt (detail_tools.redraw_hand); the gallery shows the original first, then every try, each saved."""
+        from backend.detail_tools import detect_hands, hand_mask, hand_prompt_from, redraw_hand
+        _generation_abort.clear()
+        image, mask = _editor_parts(editor)
+        if image is None:
+            return [], '<p style="color:#f38ba8;">❌ Upload an image in the Inpaint box first.</p>',                 gr.update(), gr.update(), gr.update()
+        image, fixed = _fit_init_image(image, max_side=2048)
+        if mask is not None and fixed:
+            mask = mask.resize(image.size, Image.NEAREST)
+        found = ""
+        if mask is None:
+            hands = detect_hands(image, 6)
+            if not hands:
+                return [], ('<p style="color:#f38ba8;">❌ No hand found — paint over the hand you want re-drawn.</p>'),                     gr.update(), gr.update(), gr.update()
+            mask = hand_mask(image.size, hands[0])
+            found = f" (the biggest of {len(hands)} detected hand(s))" if len(hands) > 1 else " (the detected hand)"
+        steps, cfg, _w, _h, _b, seed, _d, fixes = _clean_gen_args(steps, cfg, 512, 512, 1, seed, 0.8, img2img=True)
+        n = int(min(8, max(1, _num(tries, 4))))
+        ok, status = _ensure_model(model_path, vae_path, progress)
+        if not ok:
+            return [], (status if isinstance(status, str) else ""), status, gr.update(), gr.update()
+        err = _sync_loras([(lora1, _num(w1, 0.8)), (lora2, _num(w2, 0.7)), (lora3, _num(w3, 0.7))], progress)
+        if err:
+            return [], f'<p style="color:#f38ba8;">❌ LoRA problem: {err}</p>', status, gr.update(), gr.update()
+        cs = 2 if int(_num(clip_skip, 1)) >= 2 else 1
+        cur = [0]
+
+        def on_try(k):
+            cur[0] = k
+            _thermal_wait(progress)
+            if _generation_abort.is_set():
+                raise _GenerationAborted()
+
+        def cb(step, total):
+            if _generation_abort.is_set():
+                raise _GenerationAborted()
+            progress(step / total, desc=f"Hand try {cur[0] + 1}/{n}: step {step}/{total}")
+        t0 = time.time()
+        done, results = [], []            # redraw_hand appends every try to `done` as it finishes: a Stop or an error at try k keeps the k − 1 finished tries
+        try:
+            results = redraw_hand(sd, image, mask, prompt or "", neg_prompt or "", tries=n, steps=steps, cfg=cfg, seed=seed,
+                                  scheduler=scheduler, clip_skip=cs, step_callback=cb, on_try=on_try, out=done)
+            stopped = ""
+        except _GenerationAborted:
+            results, stopped = done, f" · ⏹ stopped after {len(done)} of {n} tries"
+        except Exception as e:
+            if not done:
+                return [], f'<p style="color:#f38ba8;">❌ Hand re-draw failed: {html.escape(str(e)[:300])}</p>',                 status, gr.update(), gr.update()
+            results, stopped = done, f" · ⚠ stopped at try {len(done) + 1} of {n}: {html.escape(str(e)[:120])}"
+        if not results:
+            return [], '<p style="color:#fab387;">⏹ Hand re-draw stopped.</p>', status, gr.update(), gr.update()
+        imgs = [r[0] for r in results]
+        used = [r[1] for r in results]
+        saved = _save_outputs(imgs, dict(mode="inpaint", prompt=hand_prompt_from(prompt or ""), negative_prompt=neg_prompt or "",
+                                         steps=steps, cfg_scale=cfg, seeds=used, scheduler=scheduler,
+                                         width=imgs[0].width, height=imgs[0].height, strength=0.8, inpaint_hand_redraw=True,
+                                         clip_skip=cs if cs > 1 else None), pipe=sd)
+        shown = [image] + imgs
+        msg = (f'<p style="color:#a6adc8;font-size:13px;">🖐 {len(imgs)} re-draw(s) of the hand{found} in {time.time() - t0:.1f}s '
+               f'(seeds {used[0]}–{used[-1]}){stopped} — the first picture is the original; keep the try you like '
+               f'(all saved: {html.escape(", ".join(p.name for p in saved[:2]))}{" …" if len(saved) > 2 else ""})'
+               + (f'<br><span style="color:#f9e2af;">Adjusted: {"; ".join(fixes)}</span>' if fixes else "")
+               + "</p>")
+        return shown, msg, status, shown, [used[0]] + used
+
+    inp_hand_btn.click(
+        lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
+    ).then(
+        do_hand_redraw_ui,
+        [model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3, prompt_txt,
+         neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl, seed_num, clip_skip_rb, inp_editor, inp_hand_tries],
+        [output_gallery, gen_info, model_status, last_generated_images, last_seed_state],
+    )
 
     inp_swap_event = inp_swap_btn.click(
         lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],

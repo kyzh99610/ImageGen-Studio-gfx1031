@@ -300,13 +300,18 @@ def parameters_html() -> str:
              "smudged fingers. Measured on 11 genuinely broken hands (10 on SD 1.5, 1 on SDXL): 0.35–0.55 turned blobs and mitten fists into hand-shaped fists in about "
              "half of them and **never fixed a finger count or an untangled pair** (a peace sign with three fingers stayed at three in all six passes), and at 0.45–0.55 it once drew a "
              "small figure into the hand's box; a hand-only prompt, more context and hires fix first changed little (hires first fixed 1 of 10). Re-drawing the hand at 0.8 "
-             "gave a correct hand in 2 of 10 (plus 4 plausible ones with another glove, prop or pose); at 1.0 it invents objects. For a broken hand: another seed first, or 🖌 Inpaint "
-             "over the hand at ~0.8 with 'detailed hands, five fingers' and a few seeds. The pass may touch up hand-shaped things (a ship's turret) — at low denoise they stay what they were. Face and "
+             "gave a correct hand in 2 of 10 single tries (plus 4 plausible ones with another glove, prop or pose); at 1.0 it invents objects. For a broken hand: another seed first, or "
+             "🖐 Re-draw hand in the Inpaint box — it makes several 0.8 re-draws of the painted (or the biggest detected) hand with a hand-only prompt, each with its own seed, "
+             "and shows them after the original so you can keep the one you like. Measured through the app on the same 11 hands (88 tries, by eye): about every other try is a correct hand "
+             "(4 tries: at least one in 10 of 11 hands; 8 tries: all 11), a third are plausible but with another glove, prop or pose (heart hands often come back as a hand HOLDING a heart), "
+             "one in ten is worse (a translucent hand; next to a face the box can draw a whole face — paint the hand only). The pass may touch up hand-shaped things (a ship's turret) — at low denoise they stay what they were. Face and "
              "hand passes use the evenly spaced version of your sampler (Karras / AYS at the same denoise "
              "changed almost nothing).",
              _cn("对手部做同样的重绘（动漫手部检测，手套也算），在脸部之前进行：0.35 清理手指。实测 11 只真正画坏的手：0.35–0.55 约一半能把团块/连指拳变成有手形的拳头，"
                  "但从未修正手指数量或缠在一起的双手；0.8 重画 10 只中有 2 只得到正确的手（另有 4 只合理但手套/道具/姿势变了），1.0 会凭空画出物品。"
-                 "手画坏了：先换种子，或用 🖌 Inpaint 在约 0.8 下涂抹手部并多试几个种子。脸/手重绘使用均匀步长版本的采样器。")],
+                 "手画坏了：先换种子，或用 Inpaint 框里的 🖐 重画手部（涂抹那只手，或不涂抹让它取最大的检测到的手）：用只含手部的提示词在 0.8 下重画多次，每次不同种子，原图在前、各次结果在后，挑一张喜欢的。"
+                 "同样 11 只手经应用实测（88 次，人工判断）：约每两次就有一次是正确的手（4 次：11 只中 10 只至少有一次；8 次：11 只全部），约三分之一合理但手套/道具/姿势变了（“比心手”常变成手里拿着一颗心），"
+                 "约十分之一更糟（半透明的手；手靠近脸时框内可能画出一张脸，所以只涂抹手）。脸/手重绘使用均匀步长版本的采样器。")],
             ["👁 Eye detail",
              "Finds the eyes (anime eye detector, on each face) and re-draws both eyes of a face in one pass at high "
              "resolution, after the face pass, with a prompt of only the eye tags (colour, gaze, expression, glasses…) plus “detailed eyes, "
@@ -337,13 +342,16 @@ def parameters_html() -> str:
              "The dropdown above Hires fix — Portrait / Cowboy shot / Full body / Wide shot, or Auto (reads the framing tags in the prompt) — "
              "fills hires fix, face detail and eye detail with the recipe for that framing: eyes only for a portrait or cowboy shot (the face is "
              "≥ ~24 % of the width, where face detail changes nothing), hires 1.5× + eyes for a full body, hires 1.5× + face + eyes for a wide shot. "
-             "The note shows how many times the plain picture's time it costs (≈ 1.4× / 1.4× / 4.1× / 4.8×; measured chains came out cheaper). "
+             "The note shows how many times the plain picture's time it costs (≈ 1.3× / 1.3× / 3.0× / 3.6×). Hires fix runs 8 steps and the eye pass 8: against 14 and 10 they cost nothing measurable "
+             "(4 pictures, CCIP −0.001, face sharpness ×0.98, eye detail ×0.98, nothing by eye) and make a Full body chain about a quarter cheaper; hires denoise 0.40 instead of 0.45 was slightly worse, "
+             "a 10-step base instead of 12 or no PAG are not free (identity −0.02 / hair pin −0.09 resp. −0.19). "
              "Eye detail is skipped on Pony models (it blurs them). Measured (2 seeds each): at a cowboy shot "
              "(face 24–28 %) nothing in the chain changes identity — it is insurance; for a full body the plain face is often damaged and hires 1.5× + eyes "
              "fixes it best (identity score 0.937 → 0.967, the hair pin .42 → .90, face ×1.3 sharper) — the face pass on top of hires adds nothing. "
              "Hands are left out: the hand pass cleans texture but never fixed a finger count. Change any control afterwards.",
              _cn("高清修复上方的下拉框：人像 / 牛仔镜头 / 全身 / 远景（或“自动”，读取提示词里的构图标签）按构图一键填好高清修复、脸部与眼部重绘："
-                 "人像和牛仔镜头只重绘眼睛（脸宽 ≥ 约 24%，脸部重绘无效），全身 高清修复 1.5×+眼，远景 高清修复 1.5×+脸+眼；提示条显示约为普通出图的几倍时间（实测更省时）。"
+                 "人像和牛仔镜头只重绘眼睛（脸宽 ≥ 约 24%，脸部重绘无效），全身 高清修复 1.5×+眼，远景 高清修复 1.5×+脸+眼；提示条显示约为普通出图的几倍时间（约 1.3× / 1.3× / 3.0× / 3.6×）。高清修复现在用 8 步、眼部重绘 8 步：与原来的 14 步 / 10 步相比没有可测量的损失"
+                 "（4 张图：身份相似度 −0.001、脸部清晰度 ×0.98、眼部细节 ×0.98，肉眼无差别），全身一条链约省四分之一时间；高清修复降噪 0.40 略差于 0.45，底图 10 步或关闭 PAG 并不是免费的（身份 −0.02 / 发饰 −0.09～−0.19）。"
                  "实测（各 2 个种子）：牛仔镜头（脸宽 24–28%）整条链几乎不改变相似度，只是保险；全身图的原始脸常有损坏，高清修复 1.5×+眼睛修得最好"
                  "（相似度 0.937→0.967，发饰 .42→.90，脸部清晰度 ×1.3），在其上再做脸部重绘没有额外收益。"
                  "不含手部重绘（只改善纹理，不能修正手指数）。之后仍可调整任何控件。")],
@@ -386,7 +394,7 @@ def parameters_html() -> str:
             ["🖌 Inpaint",
              "Paint over any area and describe what should be there; only that area is redrawn, at native "
              "resolution, with your model, LoRAs and seed. Good for small things — measured: to swap a hair "
-             "ornament use 🦋 Swap (paint over the whole old one — what is outside the paint stays —, type the new one: a single pass at denoise 1.0 with a hair-only prompt — at 0.9–0.95 the old shape still shows through as lace, 0.75–0.85 gives a hybrid), an expression ~0.5 "
+             "ornament use 🦋 Swap (paint over the whole old one — what is outside the paint stays —, type the new one: a single pass at denoise 1.0 with a hair-only prompt — at 0.9–0.95 the old shape still shows through as lace, 0.75–0.85 gives a hybrid; it also adds earrings and a choker — paint the lobe / the neck band — and a hat if you paint the WHOLE hat, its crown above the head too: a mask over the hair only gives no hat), an expression ~0.5 "
              "deepens a smile and ~0.65–0.8 opens a closed mouth (waiIllustrious opens it at ~0.5). It uses the evenly spaced version of your sampler so "
              "denoise means what it says, and the Steps value is what runs at any denoise (as in A1111). A garment recolour can't be done this way (up to 0.95 the colour stays, "
              "1.0 over a body-sized area draws a new figure) — use same seed + edited prompt.",
