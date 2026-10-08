@@ -201,6 +201,8 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
     m = re.search(r"\bEye detail: denoise ([0-9.]+)", param_text)
     if m:
         result["eye_detail"] = {"denoise": float(m.group(1))}
+        if re.search(r"\bEye style: natural\b", param_text):
+            result["eye_detail"]["style"] = "natural"
 
     # ImageGen Studio's own record: exact model / VAE / LoRA files and weights
     rec = _parse_json(info.get("imagegen")) if "imagegen" in info else None

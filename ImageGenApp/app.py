@@ -157,6 +157,11 @@ try:                                   # Settings → Prompt weights (saved choi
     _set_emphasis(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("emphasis", "a1111"))
 except Exception:
     pass
+try:                                   # Settings → Eye style (saved choice)
+    from backend.detail_tools import set_eye_style as _set_eye_style
+    _set_eye_style(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("eye_style", "round"))
+except Exception:
+    pass
 try:                                   # Settings → Cool mode / pause while hot (saved choices)
     from backend import sampling as _smp0, thermal as _thm0
     _thm0.apply_saved(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")), _smp0)
@@ -1397,9 +1402,10 @@ def _build_generate_tab():
                             with gr.Row():
                                 inp_hand_tries = gr.Slider(1, 8, value=4, step=1, label="🖐 Re-draw a hand — tries", scale=3,
                                                            info="Paint over the broken hand (or paint nothing: the biggest detected hand is used). "
-                                                                "Each try re-draws it at 0.8 with a hand-only prompt and its own seed; pick the one you "
+                                                                "Each try re-draws it at 0.7 with a hand-only prompt and its own seed; pick the one you "
                                                                 "like. Measured on 11 broken hands: about every other try is a correct hand (4 tries: at least one in 10 of 11), "
-                                                                "a third are plausible but changed (another glove, prop or pose). Paint the hand only: next to a face the box can draw a face.")
+                                                                "a third are plausible but changed (another glove, prop or pose; heart hands come back holding a heart). "
+                                                                "Paint the hand only: next to a face the box can still draw a face.")
                                 inp_hand_btn = gr.Button("🖐 Re-draw hand", size="sm", scale=1)
 
 
@@ -2073,7 +2079,7 @@ def _build_generate_tab():
                 **({"face_detail": {"denoise": ex["fd_denoise"], "detector": ex["fd_mode"],
                                     "prompt": ex["fd_prompt"]}} if fd_note else {}),
                 **({"hand_detail": {"denoise": ex["hd_denoise"]}} if hd_note else {}),
-                **({"eye_detail": {"denoise": ex["ed_denoise"]}} if ed_note else {}),
+                **({"eye_detail": {"denoise": ex["ed_denoise"], **({"style": "natural"} if _eye_style_now() == "natural" else {})}} if ed_note else {}),
                 **({"strength": strength, "source_image": Path(src).name if src else None} if i2i else {}),
                 **({"prompt_template": template["prompt"],
                     "negative_template": template["negative"] or None} if template else {}),
@@ -3090,9 +3096,9 @@ def _build_generate_tab():
     @gpu_job
     def do_hand_redraw_ui(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, prompt, neg_prompt, scheduler,
                           steps, cfg, seed, clip_skip, editor, tries, progress=gr.Progress()):
-        """🖐 Re-draw a hand: several re-draws (seed, seed + 1, …) of the painted or the biggest detected hand at 0.8 with a
+        """🖐 Re-draw a hand: several re-draws (seed, seed + 1, …) of the painted or the biggest detected hand at 0.7 with a
         hand-only prompt (detail_tools.redraw_hand); the gallery shows the original first, then every try, each saved."""
-        from backend.detail_tools import detect_hands, hand_mask, hand_prompt_from, redraw_hand
+        from backend.detail_tools import HAND_REDRAW_DENOISE, detect_hands, hand_mask, hand_prompt_from, redraw_hand
         _generation_abort.clear()
         image, mask = _editor_parts(editor)
         if image is None:
@@ -3107,7 +3113,7 @@ def _build_generate_tab():
                 return [], ('<p style="color:#f38ba8;">❌ No hand found — paint over the hand you want re-drawn.</p>'),                     gr.update(), gr.update(), gr.update()
             mask = hand_mask(image.size, hands[0])
             found = f" (the biggest of {len(hands)} detected hand(s))" if len(hands) > 1 else " (the detected hand)"
-        steps, cfg, _w, _h, _b, seed, _d, fixes = _clean_gen_args(steps, cfg, 512, 512, 1, seed, 0.8, img2img=True)
+        steps, cfg, _w, _h, _b, seed, _d, fixes = _clean_gen_args(steps, cfg, 512, 512, 1, seed, HAND_REDRAW_DENOISE, img2img=True)
         n = int(min(8, max(1, _num(tries, 4))))
         ok, status = _ensure_model(model_path, vae_path, progress)
         if not ok:
@@ -3146,7 +3152,7 @@ def _build_generate_tab():
         used = [r[1] for r in results]
         saved = _save_outputs(imgs, dict(mode="inpaint", prompt=hand_prompt_from(prompt or ""), negative_prompt=neg_prompt or "",
                                          steps=steps, cfg_scale=cfg, seeds=used, scheduler=scheduler,
-                                         width=imgs[0].width, height=imgs[0].height, strength=0.8, inpaint_hand_redraw=True,
+                                         width=imgs[0].width, height=imgs[0].height, strength=HAND_REDRAW_DENOISE, inpaint_hand_redraw=True,
                                          clip_skip=cs if cs > 1 else None), pipe=sd)
         shown = [image] + imgs
         msg = (f'<p style="color:#a6adc8;font-size:13px;">🖐 {len(imgs)} re-draw(s) of the hand{found} in {time.time() - t0:.1f}s '
@@ -3569,6 +3575,9 @@ def _build_generate_tab():
                  gr.update() if fd is None else fd > 0, gr.update() if not fd else fd,
                  gr.update() if hd is None else hd > 0, gr.update() if not hd else hd,
                  gr.update() if ed is None else ed > 0, gr.update() if not ed else ed]
+        if card.get("eye_style"):                                  # the card's own eye look (round / natural); absent = leave the current one
+            from backend.detail_tools import set_eye_style
+            notes.append(f"👁 eye style {set_eye_style(card['eye_style'])}")
         msg = (f'<p style="color:#a6e3a1;font-size:13px;margin:2px 0;">✅ Loaded {html.escape(card["name"])}'
                + (f' — {html.escape(outfit)}' if outfit and outfit != _NO_OUTFIT else "")
                + (f' · 📌 profile for {html.escape(profile)}' if profile else "") + "</p>"
@@ -3604,6 +3613,10 @@ def _build_generate_tab():
                 f'<p style="color:#a6e3a1;font-size:13px;">💾 Saved card <b>{html.escape(n)}</b> (the whole '
                 f'prompt is its tags; outfits kept). Edit settings/characters/{html.escape(n)}.json to fine-tune.</p>')
 
+    def _eye_style_now() -> str:
+        from backend.detail_tools import EYE_STYLE
+        return EYE_STYLE["mode"]
+
     def do_card_profile(name, model, vae, l1, w1, l2, w2, l3, w3, neg, w, h, cfg, steps, sched, cs,
                         pag, freeu, rescale, fd_on, fd_den, hd_on, hd_den, ed_on=False, ed_den=0.4):
         """Remember the current LoRA weights, settings and boosters as the card's profile for the selected
@@ -3621,7 +3634,7 @@ def _build_generate_tab():
             "negative": neg or "", "width": w, "height": h, "cfg": cfg, "steps": steps, "scheduler": sched,
             "clip_skip": cs, "pag": pag or 0.0, "freeu": bool(freeu), "cfg_rescale": rescale or 0.0,
             "face_detail": (fd_den or 0.0) if fd_on else 0.0, "hand_detail": (hd_den or 0.0) if hd_on else 0.0,
-            "eye_detail": (ed_den or 0.0) if ed_on else 0.0}}
+            "eye_detail": (ed_den or 0.0) if ed_on else 0.0, "eye_style": _eye_style_now()}}
         try:
             save_card(card)
         except (OSError, ValueError) as e:
@@ -6108,6 +6121,23 @@ def _build_settings_tab():
                     _save_pref("emphasis", mode)
                     return f'<p style="color:#a6e3a1;font-size:13px;">✅ Prompt weights: {mode}</p>'
                 emph_rb.change(on_emphasis, [emph_rb], [emph_status])
+                from backend.detail_tools import EYE_STYLE as _EYE_STYLE, set_eye_style as _set_eye_style_ui
+                gr.Markdown("### 👁 Eye style")
+                eye_rb = gr.Radio(
+                    ["Round pupils (default)", "Natural"],
+                    value="Natural" if _EYE_STYLE["mode"] == "natural" else "Round pupils (default)",
+                    label="How the eye pass (✨ Polish, 👁 Also re-draw eyes) draws pupils",
+                    info="Round pupils = the shipped words (\"detailed pupils, round pupils\", and \"slit pupils, cat eyes\" in the negative): round pupils with a clear highlight "
+                         "and iris shading, a small dark pupil dot. Natural = no pupil words at all (the negative stays): the pass cleans the eyes and leaves the pupil to the base "
+                         "picture — softer and less contrasty (the same eye words minus \"round pupils\" alone drew slit pupils in 5 of 6 test pictures, so that is not offered). "
+                         "A character card can carry its own choice (🎴 Load applies it, 📌 saves the current one). Saved for the next start.")
+                eye_status = gr.HTML("")
+
+                def on_eye_style(choice):
+                    mode = _set_eye_style_ui("natural" if str(choice).startswith("Natural") else "round")
+                    _save_pref("eye_style", mode)
+                    return f'<p style="color:#a6e3a1;font-size:13px;">✅ Eye style: {mode}</p>'
+                eye_rb.change(on_eye_style, [eye_rb], [eye_status])
                 from backend import sampling as _smp
                 gr.Markdown("### 🌡 Cool mode")
                 cool_sl = gr.Slider(0, 3, value=_smp.COOL["factor"], step=0.25,
@@ -6536,7 +6566,6 @@ def _smartsplit_vae_choices(cap: SmartSplitCapability) -> list[str]:
     return choices
 
 
-_LORA_TAG = _records.LORA_TAG
 
 
 _loras_from_meta = _records.loras_from_meta
@@ -6547,7 +6576,14 @@ _match_local = _records.match_local
 
 def _restore_plan(meta: dict) -> dict:
     """What to put in the Generate controls to make an image again, from read_png_info() (backend/records.restore_plan with this app's model lists and sampler table)."""
-    return _records.restore_plan(meta, list_checkpoints=list_checkpoints, list_vaes=list_vaes, list_loras=list_loras, scheduler_map=SCHEDULER_MAP)
+    plan = _records.restore_plan(meta, list_checkpoints=list_checkpoints, list_vaes=list_vaes, list_loras=list_loras, scheduler_map=SCHEDULER_MAP)
+    ed = plan.get("eye_detail") or {}
+    if ed:                                                                  # the eye style is a global (Settings / card), not a control: say when it differs from the picture's
+        from backend.detail_tools import EYE_STYLE
+        pic = "natural" if ed.get("style") == "natural" else "round"
+        if pic != EYE_STYLE["mode"]:
+            plan["notes"].append(f"this picture's eye pass used the {pic} eye style (Settings → Eye style is {EYE_STYLE['mode']})")
+    return plan
 
 
 def _plan_extra_updates(plan: dict) -> list:
@@ -6578,7 +6614,7 @@ def _plan_summary(plan: dict) -> str:
     if plan.get("hand_detail"):
         bits.append(f"hand detail (denoise {plan['hand_detail'].get('denoise')})")
     if plan.get("eye_detail"):
-        bits.append(f"eye detail (denoise {plan['eye_detail'].get('denoise')})")
+        bits.append(f"eye detail (denoise {plan['eye_detail'].get('denoise')}{', natural style' if plan['eye_detail'].get('style') == 'natural' else ''})")
     if plan.get("scheduler"):
         bits.append(plan["scheduler"])
     out = ", ".join(bits)
@@ -6715,6 +6751,8 @@ def _params_text(rec: dict) -> str:
         parts.append(f"Hand detail: denoise {_num(rec['hand_detail']['denoise'], 0.35):g}")
     if (rec.get("eye_detail") or {}).get("denoise") is not None:
         parts.append(f"Eye detail: denoise {_num(rec['eye_detail']['denoise'], 0.3):g}")
+        if rec["eye_detail"].get("style") == "natural":
+            parts.append("Eye style: natural")
     if rec.get("emphasis") == "compel":
         parts.append("Emphasis: Compel")
     if rec.get("pag_scale"):

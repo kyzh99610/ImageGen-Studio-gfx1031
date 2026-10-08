@@ -122,14 +122,6 @@ def parse_tag(tag: str) -> tuple[str, float, str]:
     return key, w, t
 
 
-def format_tag(core: str, weight: float) -> str:
-    if core.startswith("<"):
-        return core
-    if abs(weight - 1.0) < 0.005:
-        return core
-    return f"({core}:{round(weight, 2):g})"
-
-
 _DYNAMIC = re.compile(r"\{[^{}]*\||(?<![\w])__[A-Za-z0-9][\w\-/ ]*?__(?![\w])")
 
 

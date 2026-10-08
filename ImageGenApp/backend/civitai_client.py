@@ -156,11 +156,6 @@ class CivitaiClient:
         resp.raise_for_status()
         return resp.json()
 
-    def get_model(self, model_id: int) -> dict[str, Any]:
-        resp = self._client.get(f"/models/{model_id}")
-        resp.raise_for_status()
-        return resp.json()
-
     def get_model_version(self, version_id: int) -> dict[str, Any]:
         resp = self._client.get(f"/model-versions/{version_id}")
         resp.raise_for_status()

@@ -2640,6 +2640,74 @@ def _():
     assert "eye detail" in _app._plan_summary(_app._restore_plan(meta))
 
 
+@test("👁 Eye style (round 10): 'natural' asks for no pupil words in the eye pass (the slit negative stays), a card / profile carries it (🎴 Load applies, 📌 saves), the record + A1111 text + restore say it; the default stays round")
+def _():
+    import app as _app
+    import backend.character_cards as CC
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    from backend import detail_tools as dt
+    from backend.png_info import read_image_metadata
+    full = "masterpiece, best quality, 1girl, solo, red eyes, sharp eyes, tsurime, grey hair, looking at viewer, light smile, white dress"
+    try:
+        assert dt.EYE_STYLE["mode"] == "round"                                                   # the shipped default
+        assert dt.set_eye_style("Natural ") == "natural" and dt.set_eye_style("what") == "round" and dt.set_eye_style(None) == "round"
+        round_p, round_n = dt.eye_prompt_from(full), dt.eye_negative_from(full, "lowres")
+        assert "round pupils" in round_p and round_n == "lowres, slit pupils, cat eyes"            # exactly what it was
+        dt.set_eye_style("natural")
+        nat_p, nat_n = dt.eye_prompt_from(full), dt.eye_negative_from(full, "lowres")
+        assert dt.EYE_NATURAL_WORDS == "detailed eyes, beautiful detailed eyes, eyelashes, iris detail"                  # the eye words minus every pupil word
+        assert "round pupils" not in nat_p and "detailed pupils" not in nat_p and dt.EYE_NATURAL_WORDS in nat_p and "red eyes" in nat_p, (nat_p, round_p)
+        assert nat_n == "lowres, slit pupils, cat eyes" and dt.eye_negative_from(full) == "slit pupils, cat eyes"        # the slit / cat-eye negative stays: the literal 'natural' (no negative) drew slit pupils in 5 of 6 pictures
+        # cards and profiles keep a valid style only; a profile's style replaces the card's
+        card = CC.clean_card({"name": "x", "eye_style": " Natural ", "profiles": {"a.safetensors": {"eye_style": "round"}, "b.safetensors": {"eye_style": "slit", "cfg": 6.0}}})
+        assert card["eye_style"] == "natural" and card["profiles"]["a.safetensors"]["eye_style"] == "round" and "eye_style" not in card["profiles"]["b.safetensors"], card
+        assert "eye_style" not in CC.clean_card({"name": "y", "eye_style": 3})
+        eff, key = CC.card_for_checkpoint(card, "a.safetensors")
+        assert eff["eye_style"] == "round" and key == "a.safetensors"
+        # the record, the A1111 text, the reader, the restore note
+        rec = _app._gen_record(None, prompt="x", steps=20, eye_detail={"denoise": 0.4, "style": "natural"})
+        assert "Eye detail: denoise 0.4, Eye style: natural" in _app._params_text(rec), _app._params_text(rec)
+        assert "Eye style" not in _app._params_text(_app._gen_record(None, prompt="x", steps=20, eye_detail={"denoise": 0.4}))       # the default leaves no trace
+        info = PngInfo(); info.add_text("parameters", "1girl\nSteps: 20, Sampler: Euler a, CFG scale: 7, Seed: 1, Eye detail: denoise 0.4, Eye style: natural")
+        with _tf.TemporaryDirectory() as d:
+            f = Path(d) / "e.png"
+            Image.new("RGB", (8, 8)).save(f, pnginfo=info)
+            meta = read_image_metadata(f)
+        assert meta["eye_detail"] == {"denoise": 0.4, "style": "natural"}, meta.get("eye_detail")
+        dt.set_eye_style("round")
+        assert any("natural eye style" in n for n in _app._restore_plan(meta)["notes"]), _app._restore_plan(meta)["notes"]            # the picture used natural, Settings says round
+        dt.set_eye_style("natural")
+        assert not any("eye style" in n for n in _app._restore_plan(meta)["notes"]) and "natural style" in _app._plan_summary(_app._restore_plan(meta))
+        # 🎴 Load applies the card's style (a card without one leaves the current style); 📌 saves the current style in the profile
+        tmp = Path(_tf.mkdtemp())
+        old = CC.CARDS_DIR
+        try:
+            CC.CARDS_DIR = tmp / "cards"
+            CC.CARDS_DIR.mkdir()
+            (CC.CARDS_DIR / "E.json").write_text(json.dumps({"name": "E", "tags": "1girl", "eye_style": "natural"}), encoding="utf-8")
+            (CC.CARDS_DIR / "F.json").write_text(json.dumps({"name": "F", "tags": "1girl"}), encoding="utf-8")
+            by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+            fn = lambda n: getattr(by[n].fn, "__wrapped__", by[n].fn)
+            with patch("backend.model_manager.list_checkpoints", return_value=[]), patch("backend.model_manager.list_loras", return_value=[]), \
+                 patch("backend.model_manager.list_vaes", return_value=[]):
+                dt.set_eye_style("round")
+                out = fn("do_card_load")("E", "(no outfit tags)", "", "", None)
+                assert dt.EYE_STYLE["mode"] == "natural" and "eye style natural" in out[-1], out[-1]
+                out = fn("do_card_load")("F", "(no outfit tags)", "", "", None)
+                assert dt.EYE_STYLE["mode"] == "natural" and "eye style" not in out[-1], out[-1]              # no key = unchanged
+            ck = tmp / "m.safetensors"
+            ck.write_bytes(b"x")
+            msg = fn("do_card_profile")("F", str(ck), "none", "none", 0.7, "none", 0.7, "none", 0.7, "", 832, 1216, 6.0, 12, "Euler a", 1, 0.0, False, 0.0, False, 0.35, False, 0.35)
+            assert "📌 Saved" in msg and CC.load_card("F")["profiles"]["m.safetensors"]["eye_style"] == "natural", CC.load_card("F")
+            dt.set_eye_style("round")
+            fn("do_card_profile")("F", str(ck), "none", "none", 0.7, "none", 0.7, "none", 0.7, "", 832, 1216, 6.0, 12, "Euler a", 1, 0.0, False, 0.0, False, 0.35, False, 0.35)
+            assert CC.load_card("F")["profiles"]["m.safetensors"]["eye_style"] == "round"                      # saving again overwrites it
+        finally:
+            CC.CARDS_DIR = old
+    finally:
+        dt.set_eye_style("round")
+
 
 @test("Round-4 follow-ups: tiny faces get a higher face denoise, inpaint runs the Steps value, truncated uploads fail loudly, eye detail in card profiles")
 def _():
@@ -2915,7 +2983,7 @@ def _():
 
 
 
-@test("🖐 Re-draw a hand: hand-only prompt, N tries at 0.8 with seed, seed+1 …, painted mask or the biggest detected hand; a GPU job; original shown first")
+@test("🖐 Re-draw a hand: hand-only prompt, N tries at 0.7 (round 10; 0.8 before) with seed, seed+1 …, painted mask or the biggest detected hand; a GPU job; original shown first")
 def _():
     from PIL import Image
     import app as _app
@@ -2936,7 +3004,7 @@ def _():
         res = dt.redraw_hand(object(), im, mk, "1girl, holding cup", tries=3, steps=12, seed=10, scheduler="DPM++ 2M AYS")
         assert [u for _i, u in res] == [10, 11, 12] and len(calls) == 3
         c = calls[0]
-        assert c["denoise"] == 0.8 and c["scheduler"] == "DPM++ 2M" and c["steps"] == 13 and c["padding"] == 29 and "five fingers" in c["prompt"], c
+        assert c["denoise"] == 0.7 and c["scheduler"] == "DPM++ 2M" and c["steps"] == 15 and c["padding"] == 29 and "five fingers" in c["prompt"], c          # ceil(max(10, 12 × 0.5) / 0.7) = 15
         assert dt.redraw_hand(object(), im, Image.new("L", (200, 200), 0), "x") == []          # nothing painted → nothing done
         assert len(dt.redraw_hand(object(), im, mk, "x", tries=50, seed=1)) == 8                 # at most 8 tries
     finally:
@@ -2960,7 +3028,7 @@ def _():
         painted = Image.new("RGBA", (128, 128), (0, 0, 0, 0)); painted.paste((255, 255, 255, 255), (10, 10, 30, 30))
         res = run(*args, {"background": bg, "layers": [painted]}, 3, progress=quiet)
         assert len(res[0]) == 4 and res[0][0] is not None and res[4] == [100, 100, 101, 102], res[4]     # original + 3 tries
-        assert saved["tries"] == 3 and saved["mask"][20, 20] and not saved["mask"][100, 100] and saved["meta"]["strength"] == 0.8
+        assert saved["tries"] == 3 and saved["mask"][20, 20] and not saved["mask"][100, 100] and saved["meta"]["strength"] == 0.7
         assert "original" in res[1]
         dt.detect_hands = lambda image, n=6: []                                            # nothing painted, no hand found
         res = run(*args, {"background": bg, "layers": []}, 3, progress=quiet)

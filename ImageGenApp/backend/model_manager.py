@@ -238,10 +238,6 @@ def list_upscalers() -> list:
     return [("Lanczos (built-in)", "Lanczos (built-in)")] + models
 
 
-def list_embeddings() -> list[str]:
-    return _scan(EMBEDDINGS_DIR)
-
-
 def list_all() -> dict[str, list[str]]:
     return {
         "checkpoints": list_checkpoints(),

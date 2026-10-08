@@ -59,10 +59,6 @@ def load(download: bool = True) -> bool:
         return True
 
 
-def is_known(tag: str) -> bool:
-    return _key(tag) in _known
-
-
 def suggest(partial: str, limit: int = 12) -> list[tuple[str, int]]:
     """(tag, post count) for tags starting with `partial` (any word of a multi-word tag
     counts after the ones that start with it), most-used first."""
