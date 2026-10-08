@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 155-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 156-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 150 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 151 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -555,6 +555,19 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
 - The imagegen record and the restore plan moved from app.py to `backend/records.py` (re-exported).
 - SDXL text encoders encode in fp32 (since 2026-09-28): fp16 encodes under ZLUDA scatter by up to 0.03–0.05, i.e. ~6/255 in
   the picture — records made before that regenerate the same picture with that much scatter.
+
+### Eye style, 🖐 at 0.7, cool mode on a weaker charger (2026-10-08)
+- **👁 Eye style** (Settings; a character card / profile can carry `eye_style`; recorded): Round (default — "round pupils" in
+  the eye prompt, "slit pupils, cat eyes" in its negative) or Natural (no pupil words, the slit negative kept: smaller, quieter
+  pupils). Just dropping "round pupils" drew vertical slit pupils in 5 of 6 pictures. Identity (CCIP) is the same for both —
+  a matter of taste.
+- **🖐 Re-draw hand** runs at denoise 0.7 instead of 0.8: on six new broken SD 1.5 hands 21 of 48 tries correct against 4 of
+  48, no whole face drawn onto a hand next to the face (4 of 24 at 0.8), control hands equal. A bigger crop was worse.
+- **Cool mode on a power-limited laptop** (RX 6800M on a USB-C charger, raw SDXL hires step 8–9 s instead of ~3.9 s): one Polish
+  Full body picture took 388 s at cool 1.5 and 202 s at cool 0, no hotter with pause-while-hot at 88; 8 pictures back to back at
+  cool 0 never reached 94 °C (median 90). Cool 1.0 was the worst of the three (more pause-while-hot waits). The charger's
+  wattage can't be read from Windows; the measured step time can tell the two regimes apart. Nothing automatic yet.
+- 14 unused helpers removed.
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the

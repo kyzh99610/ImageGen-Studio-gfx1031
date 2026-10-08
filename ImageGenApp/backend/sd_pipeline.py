@@ -1159,30 +1159,3 @@ def _make_generator(seed: int, device: str) -> tuple:
     # DirectML and some ZLUDA setups don't support CUDA generators — use CPU
     dev = "cpu" if ("privateuseone" in device or device == "cpu") else device.split(":")[0]
     return torch.Generator(device=dev).manual_seed(seed), seed
-
-
-def _save_images(images: list[Image.Image], meta: dict | None = None):
-    from config import OUTPUTS_DIR
-    from PIL.PngImagePlugin import PngInfo
-    ts = int(time.time())
-    for i, img in enumerate(images):
-        pnginfo = PngInfo()
-        if meta:
-            # A1111-compatible "parameters" chunk so SD viewers can parse it
-            params_text = meta.get("prompt", "")
-            neg = meta.get("negative_prompt", "")
-            if neg:
-                params_text += f"\nNegative prompt: {neg}"
-            detail_parts = []
-            for k in ("steps", "cfg_scale", "seed", "scheduler", "width", "height"):
-                if k in meta:
-                    label = {"cfg_scale": "CFG scale", "scheduler": "Sampler"}.get(k, k.capitalize())
-                    detail_parts.append(f"{label}: {meta[k]}")
-            if "model" in meta:
-                detail_parts.append(f"Model: {meta['model']}")
-            if "loras" in meta and meta["loras"]:
-                detail_parts.append(f"LoRAs: {meta['loras']}")
-            if detail_parts:
-                params_text += "\n" + ", ".join(detail_parts)
-            pnginfo.add_text("parameters", params_text)
-        img.save(OUTPUTS_DIR / f"{ts}_{i}.png", pnginfo=pnginfo)

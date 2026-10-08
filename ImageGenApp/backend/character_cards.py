@@ -32,7 +32,6 @@ _CLOTHES_WORDS = ("dress", "bikini", "swimsuit", "jacket", "coat", "uniform", "k
                   "skirt", "shorts", "pants", "headwear", "hat", "headdress", "choker", "gloves", "thighhighs",
                   "pantyhose", "leotard", "apron", "cape", "armor", "hoodie", "sweater", "boots", "bodysuit",
                   "cardigan", "vest", "necktie", "ribbon", "veil", "maid", "serafuku", "hairband", "bow")
-_OPTIONAL_KEYS = ("vae", "negative", "width", "height", "cfg", "steps", "scheduler", "clip_skip", "notes")
 
 
 def safe_name(name) -> str:
@@ -73,6 +72,8 @@ def _fill_settings(d: dict, out: dict) -> dict:
     for k in ("vae", "negative", "scheduler", "notes"):
         if isinstance(d.get(k), str) and d[k].strip():
             out[k] = Path(d[k]).name if k == "vae" else d[k].strip()
+    if isinstance(d.get("eye_style"), str) and d["eye_style"].strip().lower() in ("round", "natural"):
+        out["eye_style"] = d["eye_style"].strip().lower()          # the eye pass's look (detail_tools.EYE_STYLES); 🎴 Load applies it, 📌 saves it
     return out
 
 

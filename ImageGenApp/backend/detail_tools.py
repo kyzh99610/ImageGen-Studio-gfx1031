@@ -584,11 +584,29 @@ def _eye_tags(prompt: str) -> list[str]:
     return keep
 
 
+# Eye style (round 10): "round" = the shipped words (EYE_DETAIL_WORDS + EYE_ROUND in the prompt, EYE_ROUND_NEGATIVE in the negative); "natural" = no pupil words at all (EYE_NATURAL_WORDS), the negative kept:
+# the pass cleans the eyes and leaves the pupil to the base picture, softer and less contrasty than the round-pupil look (round 10's eye study, 6 pictures: sheet_eye10.png). The literal "natural" — the same words minus
+# "round pupils" and its negative — drew vertical slit pupils in 5 of 6 pictures ("detailed pupils" alone does that), so it is not offered. A global like prompt_syntax.EMPHASIS: Settings → Eye style (saved), a card /
+# profile `eye_style` (🎴 Load sets it, 📌 saves it).
+EYE_STYLES = ("round", "natural")
+EYE_STYLE = {"mode": "round"}
+EYE_NATURAL_WORDS = ", ".join(w for w in EYE_DETAIL_WORDS.split(", ") if "pupil" not in w)           # "detailed eyes, beautiful detailed eyes, eyelashes, iris detail"
+
+
+def set_eye_style(mode) -> str:
+    """Switch the eye style ("round" | "natural"; anything else = "round"); returns the mode now in force."""
+    m = str(mode or "").strip().lower()
+    EYE_STYLE["mode"] = m if m in EYE_STYLES else "round"
+    return EYE_STYLE["mode"]
+
+
 def eye_prompt_from(prompt: str) -> str:
     """The prompt the eye pass redraws with: the quality and subject tags of `prompt`, its eye / expression / gaze tags and EYE_DETAIL_WORDS
-    + "round pupils" (the scene, outfit, hair and accessory tags stay out — the crop is only the eyes)."""
+    + "round pupils" (the scene, outfit, hair and accessory tags stay out — the crop is only the eyes). Eye style "natural": EYE_NATURAL_WORDS, no pupil words."""
     from backend.prompt_tools import join_tags
     keep = _eye_tags(prompt)
+    if EYE_STYLE["mode"] == "natural":
+        return join_tags(keep + [EYE_NATURAL_WORDS])
     own_shape = _PUPIL_SHAPE.search(", ".join(keep))
     return join_tags(keep + [EYE_DETAIL_WORDS if own_shape else f"{EYE_DETAIL_WORDS}, {EYE_ROUND}"])
 
@@ -693,7 +711,10 @@ def swap_item(sdp, image: Image.Image, mask: Image.Image, item: str, prompt: str
 # Round 7, 11 genuinely broken hands (10 SD 1.5, 1 SDXL): the hand pass at 0.35–0.55 never fixed a finger count or a tangle; a re-draw
 # of the hand at 0.8 with a hand-only prompt fixed 2 of 10 (+4 plausible but changed), 1.0 invented objects. So one try rarely works —
 # the useful tool makes several (seed, seed+1, …) and lets the user pick.
-HAND_REDRAW_DENOISE = 0.8
+# Round 10 (SD 1.5, blind by-eye ratings, 7 hands): denoise 0.7 instead of 0.8 — 6 new hands × 8 tries: correct 21 / 48 against 4 / 48 (every hand ≥, Fisher p < 0.001), worse 11 against 14;
+# the hand next to her face (a whole face drawn into the box 4 / 24 at 0.8): 0 / 24, correct 11 against 3; the 3 control hands tie (12 / 24 each). A bigger crop (0.9 × the hand) was worse.
+HAND_REDRAW_DENOISE = 0.7
+HAND_REDRAW_PAD = 0.6          # the re-draw's crop = the hand's box + this × its side on every side (round 10: 0.9 was worse than 0.6 on the hand that drew faces: correct 1 / 24 against 3 / 24, faces 2 against 4)
 HAND_EXTRA = "detailed hands, perfect hands, five fingers, detailed fingers, hand focus"
 _HAND_KEEP = re.compile(r"hand|finger|holding|peace|\bv\b|gesture|fist|nail|glove|wrist|bracelet|ring\b|fan|cup|mug|phone|flower|bouquet|"
                         r"umbrella|reaching|outstretched|interlocked|adjusting|pointing|waving|sleeve|cuff", re.I)
@@ -773,8 +794,8 @@ def face_free_mask(image: Image.Image, mask: Image.Image, pad: float = 0.6, face
 def redraw_hand(sdp, image: Image.Image, mask: Image.Image, prompt: str, negative: str = "", *, tries: int = 4,
                 steps: int = 12, cfg: float = 6.0, seed: int = -1, scheduler: str = "DPM++ 2M Karras", clip_skip: int = 1,
                 step_callback=None, on_try=None, out: list | None = None) -> list[tuple[Image.Image, int]]:
-    """`tries` re-draws of the painted hand at denoise 0.8 with `hand_prompt_from`, seeds seed, seed + 1, … (a random base for
-    seed -1). Returns [(image, seed)]. Steps as the hand pass measured them (round 7): ceil(max(10, steps × 0.5) / 0.8).
+    """`tries` re-draws of the painted hand at denoise HAND_REDRAW_DENOISE (0.7) with `hand_prompt_from`, seeds seed, seed + 1, … (a random base for
+    seed -1). Returns [(image, seed)]. Steps as the hand pass measured them (round 7): ceil(max(10, steps × 0.5) / denoise).
     Every finished try is appended to `out` (pass your own list) as soon as it is done: a Stop or an error at try k raises out of
     this function, and the k − 1 finished tries are still in `out`."""
     import math
@@ -788,7 +809,7 @@ def redraw_hand(sdp, image: Image.Image, mask: Image.Image, prompt: str, negativ
     base = int(seed) if seed is not None and int(seed) >= 0 else random.randint(0, 2**32 - 1)
     p = hand_prompt_from(prompt)
     if HAND_FACE_MASK:                                     # a face next to the hand stays as it is (the crop padding below still follows the whole hand)
-        mask, _faces = face_free_mask(image, mask)
+        mask, _faces = face_free_mask(image, mask, pad=HAND_REDRAW_PAD)
     run_steps = min(150, math.ceil(max(10, int(steps) * 0.5) / HAND_REDRAW_DENOISE))
     out = [] if out is None else out
     for k in range(max(1, min(8, int(tries)))):
@@ -796,7 +817,7 @@ def redraw_hand(sdp, image: Image.Image, mask: Image.Image, prompt: str, negativ
             on_try(k)
         img, used = inpaint_region(sdp, image, mask, p, negative, steps=run_steps, cfg=cfg, denoise=HAND_REDRAW_DENOISE,
                                    seed=(base + k) % 2**32, scheduler=uniform_variant(scheduler), clip_skip=clip_skip,
-                                   padding=int(side * 0.6), min_context=0, feather=max(3, side // 12), step_callback=step_callback)
+                                   padding=int(side * HAND_REDRAW_PAD), min_context=0, feather=max(3, side // 12), step_callback=step_callback)
         out.append((img, used))
     return out
 
