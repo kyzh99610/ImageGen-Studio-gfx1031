@@ -353,25 +353,13 @@ def set_cool(factor) -> float:
     return COOL["factor"]
 
 
-def _size_factor(kw) -> float:
-    """Bigger passes pause longer: × (megapixels / 1.05), 1–3. Round 6: the 1248×1824 hires pass (2.3 MP) pinned the thermal
-    zone at 95–96 °C even at cool 1.5 while the 832×1216 base passes (1.0 MP) did not; at the same pause ratio a long big pass
-    heat-soaks the laptop, so it gets a lower duty cycle."""
-    try:
-        lat = kw.get("latents") if isinstance(kw, dict) else None
-        if lat is None:
-            return 1.0
-        mp = int(lat.shape[-1]) * int(lat.shape[-2]) * 64 / 1e6
-        return min(3.0, max(1.0, mp / 1.05))
-    except Exception:
-        return 1.0
-
-
 _THERM_EVERY = 10.0     # seconds between thermal-zone reads inside a pass (a PDH read takes ~1 s)
+# (A pause that grows with the pass size — × megapixels / 1.05, 1–3 — was tried in round 6: the big hires pass lasted longer and plateaued
+# at 92–95 °C instead of cooling, so the pause is uniform; the helper was removed in round 9.)
 
 
 def _cool_callback(orig):
-    """Wrap a diffusers callback_on_step_end: after each step, wait COOL × (size factor) × the step's real GPU time; with
+    """Wrap a diffusers callback_on_step_end: after each step, wait COOL × the step's real GPU time; with
     Settings → pause while hot on, also check the thermal zone every ~10 s and wait there until it has cooled (the same
     rule as between pictures), so a single long hires pass can't heat-soak the laptop either."""
     import time

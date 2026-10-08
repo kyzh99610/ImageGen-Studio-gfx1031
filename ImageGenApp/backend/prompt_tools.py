@@ -307,9 +307,37 @@ def token_report(prompt: str, tokenizer=None) -> dict:
             "exact": tokenizer != "estimate" and (tokenizer or _cached_tokenizer()) is not None}
 
 
+# Lighting / time-of-day tags that pull a picture in opposite directions. Round 8: "golden hour" replaced a night-city or neon scene by a
+# sunset in all 24 pictures made with it (the model follows one lighting word and drops the other). Exact tags only — "dark hair", "dark
+# skin" and "nightgown" are not lighting — and "city lights" is left out (it is as true at dusk).
+_DAY_LIGHT = frozenset({"golden hour", "sunset", "sunrise", "sunlight", "sunshine", "sunny", "daytime", "day", "noon", "midday",
+                        "afternoon", "morning", "blue sky", "dappled sunlight", "bright sunlight"})
+_NIGHT_LIGHT = frozenset({"night", "nighttime", "night time", "midnight", "night sky", "night city", "night scene", "night view",
+                          "moonlight", "moonlit", "starry sky", "neon", "neon lights", "neon light", "neon sign"})
+
+
+def lighting_conflict(prompt: str) -> tuple[list[str], list[str]]:
+    """([daylight tags], [night tags]) of the prompt when it names both kinds, else ([], []). Tags below weight 0.6, dynamic prompts
+    ({a|b}, __wildcard__) and LoRA tags don't count."""
+    day, night = [], []
+    for raw in split_tags(prompt or ""):
+        if raw == "BREAK" or any(c in raw for c in "{}|") or "__" in raw or raw.lstrip("([ ").startswith("<"):
+            continue
+        key, weight, core = parse_tag(raw)
+        if weight < 0.6:
+            continue
+        name = " ".join(key.replace("_", " ").split())
+        if name in _DAY_LIGHT and core not in day:
+            day.append(core)
+        elif name in _NIGHT_LIGHT and core not in night:
+            night.append(core)
+    return (day, night) if day and night else ([], [])
+
+
 def prompt_warnings(prompt: str, negative: str = "", important=(), tokenizer=None) -> list[str]:
     """Things that quietly weaken a prompt: a LoRA trigger word pushed out of the first
-    chunk (it steers far less there), and a tag in both prompts (they cancel out)."""
+    chunk (it steers far less there), a tag in both prompts (they cancel out), and lighting tags
+    that disagree (golden hour / sunset / daytime together with night / neon / moonlight)."""
     warn = []
     chunks = chunk_prompt(prompt, tokenizer)
     if len(chunks) > 1 and important:
@@ -324,6 +352,11 @@ def prompt_warnings(prompt: str, negative: str = "", important=(), tokenizer=Non
     both = [pos[k] for k in (parse_tag(t)[0] for t in split_tags(negative) if t != "BREAK") if k in pos]
     if both:
         warn.append("in both prompts (they cancel out): " + ", ".join(f"<b>{_esc(t)}</b>" for t in both[:6]))
+    day, night = lighting_conflict(prompt)
+    if day:
+        warn.append("lighting tags disagree: " + ", ".join(f"<b>{_esc(t)}</b>" for t in day[:3]) + " (daylight) and "
+                    + ", ".join(f"<b>{_esc(t)}</b>" for t in night[:3]) + " (night) — the picture follows one of them, "
+                    "usually not the one you meant (a golden-hour tag turned a night-city prompt into a sunset); keep one")
     return warn
 
 

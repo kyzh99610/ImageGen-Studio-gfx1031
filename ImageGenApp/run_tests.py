@@ -1283,6 +1283,28 @@ def _():
     assert prompt_warnings("cat, blurry", "Blurry")                     # same tag in both prompts
 
 
+@test("Prompt warning: daylight and night lighting tags in one prompt (golden hour turned a night city into a sunset); no false alarms")
+def _():
+    from backend.prompt_tools import lighting_conflict, prompt_warnings, token_report_html
+    lw = lambda p, n="": [w for w in prompt_warnings(p, n) if w.startswith("lighting tags disagree")]
+    # conflicts: any daylight tag with any night tag, weights and spellings ignored; the message names both sides
+    for p in ("1girl, golden hour, night city", "1girl, (sunset:1.2), moonlight", "daytime, neon lights, street", "1girl, Sunlight, night",
+              "1girl, golden_hour, [night sky]", "1girl, (night:1.3), blue sky, standing"):
+        w = lw(p)
+        assert len(w) == 1 and "(daylight)" in w[0] and "(night)" in w[0], (p, w)
+    w = lw("1girl, golden hour, (night sky:1.2), sunset, neon lights")[0]
+    assert "<b>golden hour</b>, <b>sunset</b> (daylight) and <b>night sky</b>, <b>neon lights</b> (night)" in w, w
+    assert lighting_conflict("golden hour, night") == (["golden hour"], ["night"]) and lighting_conflict("1girl, solo") == ([], [])
+    # no alarm: one side only, lighting words that are something else, weak / dynamic / LoRA mentions, the negative prompt
+    for p in ("golden hour, sunset, sunlight", "night, neon lights, moonlight", "1girl, dark hair, dark skin, nightgown, sunlight",
+              "golden hour, (night:0.3)", "{day|night} city, 1girl", "__lighting__, night", "1girl, <lora:night_style:1>, golden hour",
+              "1girl, night gown, afternoon tea", "dark background, sunset", "city lights, golden hour", ""):
+        assert not lw(p), (p, lw(p))
+    assert not lw("1girl, golden hour", "night, dark") and not lw("1girl, night", "golden hour")        # the negative side is what you don't want
+    assert len(lw("golden hour, night BREAK 1girl")) == 1                                             # BREAK doesn't hide it
+    assert "lighting tags disagree" in token_report_html("1girl, golden hour, night city", "") and "lighting tags disagree" not in token_report_html("1girl, golden hour", "")
+
+
 @test("Chunked encoding concatenates per-chunk embeddings and pads to equal length")
 def _():
     import torch
@@ -2865,7 +2887,7 @@ def _():
         # inside a pass: with the limit set the callback also checks the zone (every ~10 s, emergency brake)
         import inspect, torch
         from backend import sampling as S
-        assert "_size_factor(kw)" not in inspect.getsource(S._cool_callback)    # uniform pause (scaling was slower, not cooler)
+        assert "_size_factor" not in inspect.getsource(S._cool_callback) and not hasattr(S, "_size_factor")    # uniform pause (scaling was slower, not cooler); the helper is gone
         calls = []
         old_wait, old_every, old_cool = T.wait_cool, S._THERM_EVERY, S.COOL["factor"]
         try:
@@ -3019,6 +3041,49 @@ def _():
         assert not res[0] and "stopped" in res[1], res[1]
     finally:
         _app.sd, _app._save_outputs, dt.redraw_hand = keep
+
+
+@test("🖐 Re-draw a hand, face guard: a face reaching into the crop leaves the mask (on by default; the negative / no-subject-tags variants of the A/B are not shipped)")
+def _():
+    from PIL import Image
+    from backend import detail_tools as dt
+    assert dt.HAND_FACE_MASK is True and not hasattr(dt, "HAND_FACE_NEGATIVE") and not hasattr(dt, "HAND_FACE")        # round 9: the mask part shipped, the negative did not
+    px = lambda m: np.array(m) > 127
+    im = Image.new("RGB", (400, 400)); mk = Image.new("L", (400, 400), 0); mk.paste(255, (150, 200, 250, 280))      # a 100 × 80 hand; its crop is x 90–310, y 140–340
+    face_in, far, over = [(170, 130, 250, 210)], [(0, 0, 60, 60)], [(120, 150, 280, 300)]
+    m, inside = dt.face_free_mask(im, mk, faces=far)
+    assert inside == [] and m is mk                                                      # no face in the crop: the very same mask
+    m, inside = dt.face_free_mask(im, mk, faces=face_in)
+    assert inside == face_in and px(m)[270, 200] and not px(m)[205, 210] and px(m).sum() < px(mk).sum(), "the face's ellipse (+15 %) is out of the mask, the rest stays"
+    assert px(m)[240, 150] and px(m)[279, 249]                                          # far from the face: still painted
+    m, inside = dt.face_free_mask(im, mk, faces=over)
+    assert inside == over and px(m).sum() == px(mk).sum()                                # a hand held over her face: the mask would lose > 75 %, it keeps its shape
+    seen, orig = [], (dt.inpaint_region, dt.detect_faces, dt._face_model_cached)
+
+    def boom(*a, **k):
+        raise RuntimeError("detector exploded")
+    redraw = lambda: dt.redraw_hand(object(), im, mk, "1girl, holding cup", "bad hands", tries=1, seed=3)
+    try:
+        dt.inpaint_region = lambda sdp, image, mask, prompt, neg, **k: (seen.append((px(mask), neg, k["padding"], prompt)), (image, k["seed"]))[1]
+        dt.detect_faces = lambda image, mode="auto", **k: face_in
+        dt._face_model_cached = lambda: True
+        redraw()
+        m1, neg1, pad1, prompt1 = seen[-1]
+        assert m1.sum() < px(mk).sum() and not m1[205, 210] and neg1 == "bad hands" and pad1 == 59 and "1girl" in prompt1, (neg1, pad1)   # the face is out of the mask; negative, prompt and the crop padding (59 = 0.6 × the whole hand's side) untouched
+        dt.HAND_FACE_MASK = False
+        redraw()
+        assert seen[-1][0].sum() == px(mk).sum() and seen[-1][2] == 59                    # switched off: exactly as before
+        dt.HAND_FACE_MASK = True
+        dt._face_model_cached = lambda: False                                              # the face model isn't downloaded: nothing is detected, no download from here
+        redraw()
+        assert seen[-1][0].sum() == px(mk).sum()
+        dt._face_model_cached = lambda: True
+        dt.detect_faces = boom                                                             # a failing detector never stops a re-draw
+        redraw()
+        assert seen[-1][0].sum() == px(mk).sum()
+    finally:
+        dt.inpaint_region, dt.detect_faces, dt._face_model_cached = orig
+        dt.HAND_FACE_MASK = True
 
 
 @test("GPU events share one queue slot (Generate during an X/Y grid crashed the process); Stop stays free")
@@ -3804,6 +3869,63 @@ def _():
         IC.available, IC.probs, IS.available = saved
 
 
+@test("⭐ scoring is CPU work: a pause-while-hot wait before the first picture and then at most every 10 s; the outfit batch says how long it paused")
+def _():
+    import re as _re
+    from unittest.mock import patch
+    from PIL import Image
+    import app as _app
+    from backend import image_score as IS
+    # score_images calls pause(k, n) before picture k (before any detector runs) and rates exactly as without it
+    im, box, order, seen = Image.new("RGB", (400, 400), (90, 90, 90)), [(100, 100, 230, 230)], [], []
+    good = {"grey_hair": 0.9, "red_eyes": 0.9}
+    kw = dict(probs_fn=lambda c: good, hands_fn=lambda i: [], speck_fn=None)
+    plain = IS.score_images([im, im, im], "1girl, grey hair, red eyes", faces_fn=lambda i: box, **kw)
+    paused = IS.score_images([im, im, im], "1girl, grey hair, red eyes", faces_fn=lambda i: order.append("faces") or box,
+                             pause=lambda k, n: (seen.append((k, n)), order.append("pause")), **kw)
+    assert paused == plain and seen == [(0, 3), (1, 3), (2, 3)] and order[:2] == ["pause", "faces"], (seen, order)
+    # the app's callback: the first call checks, calls within 10 s don't, a later one does; the waited seconds add up
+    now, calls = [100.0], []
+    fake_time = type("T", (), {"time": staticmethod(lambda: now[0])})
+    with patch.object(_app, "time", fake_time), patch.object(_app, "_thermal_wait", lambda progress=None: calls.append(progress) or 2.5):
+        p = _app._score_pause("progress")
+        p(0, 8)
+        now[0] += 4; p(1, 8)
+        now[0] += 4; p(2, 8)                                  # 8 s after the first check: no new check
+        assert len(calls) == 1 and calls == ["progress"] and p.waited[0] == 2.5, calls
+        now[0] += 3; p(3, 8)                                  # 11 s: checks again
+        assert len(calls) == 2 and p.waited[0] == 5.0, (calls, p.waited)
+        now[0] += 9.5; p(4, 8)
+        assert len(calls) == 2                                # 9.5 s after the second check
+    # the outfit batch hands that callback to the rating and reports the pause
+    class FakePause:
+        waited = [7.0]
+        n = 0
+        def __call__(self, k, n):
+            FakePause.n += 1
+    got = {}
+    def fake_score(images, tags, **k):
+        got["pause"] = k.get("pause")
+        for j in range(len(images)):
+            k["pause"](j, len(images))
+        return [{"stars": 5, "flags": []} for _ in images]
+    saved = (IS.available, IS.score_images, _app._score_pause)
+    try:
+        IS.available = lambda: {"look": True, "faces": False, "hands": False}
+        IS.score_images = fake_score
+        _app._score_pause = lambda progress=None, every=10.0: FakePause()
+        with _BatchEnv() as E:
+            msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11)[-1][1])
+        assert isinstance(got["pause"], FakePause) and FakePause.n == 6, (got, FakePause.n)
+        assert "⭐ 5.0/5" in msg and "the rating paused 7 s while the laptop cooled down" in msg, msg
+        FakePause.waited = [0.4]
+        with _BatchEnv() as E:
+            msg = _re.sub("<[^>]+>", " ", E.run_batch(seed=11)[-1][1])
+        assert "paused" not in msg, msg                       # under a second: nothing to report
+    finally:
+        IS.available, IS.score_images, _app._score_pause = saved
+
+
 @test("CCIP: preprocessing, no silent download, a download that isn't the pinned file is deleted, features come from the session")
 def _():
     import numpy as np
@@ -4062,7 +4184,7 @@ def _():
     assert set(by["on_polish"].inputs and [type(c).__name__ for c in by["on_polish"].inputs]) == {"Dropdown", "Textbox"}
 
 
-@test("Detail passes: the eye pass runs 8 steps instead of 10 (equal quality, 21 % cheaper), face / hand still 10; _detail_pass uses the shared rule; Polish Full body / Wide shot run 8 hires steps")
+@test("Detail passes: the eye pass runs 8 steps instead of 10 (equal quality, 21 % cheaper), face / hand still 10; _detail_pass uses the shared rule; Polish Full body runs 8 hires steps, the Wide shot keeps 14 (round 9: 8 left its eyes softer)")
 def _():
     import inspect
     import app as _app
@@ -4076,7 +4198,8 @@ def _():
     assert dt.detail_schedule_steps("eye", 400, 0.1) == 150                                # never longer than 150
     assert dt.detail_schedule_steps("unknown", 12, 0.5) == 20                              # an unknown pass keeps the 10-step minimum
     assert "detail_schedule_steps(kind, steps, den)" in inspect.getsource(_app._build_generate_tab), "_detail_pass uses the shared rule"
-    assert P.recipe("Full body")["hires_steps"] == 8 and P.recipe("Wide shot")["hires_steps"] == 8 and P.recipe("Full body")["hires_denoise"] == 0.45
+    assert P.recipe("Full body")["hires_steps"] == 8 and P.recipe("Wide shot")["hires_steps"] == 14 and P.recipe("Full body")["hires_denoise"] == 0.45
+    assert P.time_factor("Wide shot") > P.time_factor("Full body") > P.time_factor("Portrait")             # the Wide chain is the longest, with its 14 hires steps
 
 
 @test("Generate: 'Use img2img' with no image loaded says so instead of quietly making a text-to-image")

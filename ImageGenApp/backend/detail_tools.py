@@ -722,6 +722,54 @@ def hand_mask(size: tuple[int, int], box) -> Image.Image:
     return m
 
 
+# Round 9 (SD 1.5, ~220 tries, blind by-eye ratings): on hands next to her face (cheek / chin) the guard-less mask repaints part of her face — 4.7–7.4 / 255 mean change inside the face
+# box against 0.5–0.7 with the face taken out of the mask — and the hands are as good (13 of 24 correct against 11 of 24). Adding "face, head, extra face" to the negative changed
+# details but not the outcome (the same tries still drew a face), and a hand prompt without "1girl, solo" cut the whole-face tries on heart_98902 from 5/40 to 1/40 but lowered
+# the correct-rate (pooled with three controls 22/64 against 26/64): neither is shipped.
+HAND_FACE_MASK = True
+_HAND_FACE_GROW, _HAND_FACE_KEEP = 1.15, 0.25
+
+
+def _face_model_cached() -> bool:
+    """The anime face detector is already downloaded: a hand re-draw uses it only then (no download from this path; the face pass fetches it)."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        return isinstance(try_to_load_from_cache(_YOLO_REPO, _YOLO_FILE), str)
+    except Exception:
+        return False
+
+
+def face_free_mask(image: Image.Image, mask: Image.Image, pad: float = 0.6, faces=None) -> tuple[Image.Image, list]:
+    """(mask, faces that reach into the re-draw's crop). The crop of a hand re-draw is the mask's box + `pad` × its side; a face inside it is
+    taken out of the mask (its ellipse, grown by 15 %), so the model never paints over her face. A mask that would lose more than 75 % of its
+    area (a hand held over her face) keeps its shape. Without the face model (or when detection fails) the mask is returned as it was."""
+    m = np.array(mask.convert("L").resize(image.size, Image.NEAREST)) > 127
+    if not m.any():
+        return mask, []
+    ys, xs = np.nonzero(m)
+    x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+    p = int(max(x2 - x1, y2 - y1, 1) * pad)
+    crop = (x1 - p, y1 - p, x2 + p, y2 + p)
+    if faces is None:
+        try:
+            faces = detect_faces(image, "anime") if _face_model_cached() else []
+        except Exception:
+            faces = []
+    inside = [f for f in faces if f[0] < crop[2] and f[2] > crop[0] and f[1] < crop[3] and f[3] > crop[1]]
+    if not inside:
+        return mask, []
+    el = Image.new("L", image.size, 0)
+    d = ImageDraw.Draw(el)
+    for fx1, fy1, fx2, fy2 in inside:
+        cx, cy = (fx1 + fx2) / 2, (fy1 + fy2) / 2
+        hw, hh = (fx2 - fx1) / 2 * _HAND_FACE_GROW, (fy2 - fy1) / 2 * _HAND_FACE_GROW
+        d.ellipse([cx - hw, cy - hh, cx + hw, cy + hh], fill=255)
+    keep = m & (np.array(el) == 0)
+    if keep.sum() < _HAND_FACE_KEEP * m.sum():
+        return mask, inside
+    return Image.fromarray((keep * 255).astype(np.uint8), "L"), inside
+
+
 def redraw_hand(sdp, image: Image.Image, mask: Image.Image, prompt: str, negative: str = "", *, tries: int = 4,
                 steps: int = 12, cfg: float = 6.0, seed: int = -1, scheduler: str = "DPM++ 2M Karras", clip_skip: int = 1,
                 step_callback=None, on_try=None, out: list | None = None) -> list[tuple[Image.Image, int]]:
@@ -739,6 +787,8 @@ def redraw_hand(sdp, image: Image.Image, mask: Image.Image, prompt: str, negativ
     side = max(int(xs.max() - xs.min()), int(ys.max() - ys.min()), 1)
     base = int(seed) if seed is not None and int(seed) >= 0 else random.randint(0, 2**32 - 1)
     p = hand_prompt_from(prompt)
+    if HAND_FACE_MASK:                                     # a face next to the hand stays as it is (the crop padding below still follows the whole hand)
+        mask, _faces = face_free_mask(image, mask)
     run_steps = min(150, math.ceil(max(10, int(steps) * 0.5) / HAND_REDRAW_DENOISE))
     out = [] if out is None else out
     for k in range(max(1, min(8, int(tries)))):

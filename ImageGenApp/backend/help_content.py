@@ -164,8 +164,10 @@ def prompt_syntax_html() -> str:
              "<b>first</b> chunk steer the image most. A tag is never split between chunks.",
              _cn("提示词下方显示 token 数、分段数及每段起点。不会截断，但第一段影响最大；标签不会被拆开。")],
             ["⚠ warnings",
-             "A LoRA trigger word past the first 75 tokens, or a tag in both the prompt and the negative prompt.",
-             _cn("LoRA 触发词不在第一段，或同一标签同时出现在正负提示词中时提示。")],
+             "A LoRA trigger word past the first 75 tokens, a tag in both the prompt and the negative prompt, or lighting tags that disagree "
+             "(golden hour / sunset / daytime together with night / neon / moonlight: the picture follows one of them, usually not the one you meant).",
+             _cn("LoRA 触发词不在第一段、同一标签同时出现在正负提示词中，或光照标签互相矛盾时提示"
+                 "（如 golden hour / sunset / daytime 与 night / neon / moonlight 同时出现：画面只会跟随其中一个，通常不是你想要的那个）。")],
             ["🧹 Tidy prompts",
              "Merges duplicate tags (masterpiece / (masterpiece:1.3) / masterpiece++) and keeps the strongest weight.",
              _cn("合并重复标签，保留最高权重。")],
@@ -304,14 +306,17 @@ def parameters_html() -> str:
              "🖐 Re-draw hand in the Inpaint box — it makes several 0.8 re-draws of the painted (or the biggest detected) hand with a hand-only prompt, each with its own seed, "
              "and shows them after the original so you can keep the one you like. Measured through the app on the same 11 hands (88 tries, by eye): about every other try is a correct hand "
              "(4 tries: at least one in 10 of 11 hands; 8 tries: all 11), a third are plausible but with another glove, prop or pose (heart hands often come back as a hand HOLDING a heart), "
-             "one in ten is worse (a translucent hand; next to a face the box can draw a whole face — paint the hand only). The pass may touch up hand-shaped things (a ship's turret) — at low denoise they stay what they were. Face and "
+             "one in ten is worse (a translucent hand; next to a face the box can draw a whole face — paint the hand only; a negative \"face, head, extra face\" and a prompt without “1girl, solo” "
+             "did not stop it). A face that reaches into the hand's crop is left out of the mask, so a hand at her cheek or chin no longer repaints part of her face (mean change inside the face box "
+             "4.7–7.4 / 255 before, 0.5–0.7 now; the hands are as good). The pass may touch up hand-shaped things (a ship's turret) — at low denoise they stay what they were. Face and "
              "hand passes use the evenly spaced version of your sampler (Karras / AYS at the same denoise "
              "changed almost nothing).",
              _cn("对手部做同样的重绘（动漫手部检测，手套也算），在脸部之前进行：0.35 清理手指。实测 11 只真正画坏的手：0.35–0.55 约一半能把团块/连指拳变成有手形的拳头，"
                  "但从未修正手指数量或缠在一起的双手；0.8 重画 10 只中有 2 只得到正确的手（另有 4 只合理但手套/道具/姿势变了），1.0 会凭空画出物品。"
                  "手画坏了：先换种子，或用 Inpaint 框里的 🖐 重画手部（涂抹那只手，或不涂抹让它取最大的检测到的手）：用只含手部的提示词在 0.8 下重画多次，每次不同种子，原图在前、各次结果在后，挑一张喜欢的。"
                  "同样 11 只手经应用实测（88 次，人工判断）：约每两次就有一次是正确的手（4 次：11 只中 10 只至少有一次；8 次：11 只全部），约三分之一合理但手套/道具/姿势变了（“比心手”常变成手里拿着一颗心），"
-                 "约十分之一更糟（半透明的手；手靠近脸时框内可能画出一张脸，所以只涂抹手）。脸/手重绘使用均匀步长版本的采样器。")],
+                 "约十分之一更糟（半透明的手；手靠近脸时框内可能画出一张脸，所以只涂抹手；在负面提示词加“face, head, extra face”或去掉“1girl, solo”都没能阻止）。"
+                 "伸进手部重绘范围的脸现在会从遮罩中扣除，手放在脸颊/下巴旁时不再重画她脸上的一部分（脸框内平均变化 4.7–7.4 / 255 → 0.5–0.7，手的效果相当）。脸/手重绘使用均匀步长版本的采样器。")],
             ["👁 Eye detail",
              "Finds the eyes (anime eye detector, on each face) and re-draws both eyes of a face in one pass at high "
              "resolution, after the face pass, with a prompt of only the eye tags (colour, gaze, expression, glasses…) plus “detailed eyes, "
@@ -334,24 +339,28 @@ def parameters_html() -> str:
             ["🌡 Cool mode / pause while hot (Settings)",
              "For laptops that switch themselves off under long GPU runs. Cool mode pauses after every sampling step (1.5 = the GPU "
              "works ~40 % of the time; same pictures, slower). Pause while hot waits before each picture and each hires / face / eye "
-             "pass until the thermal zone is 8 °C under the limit you set (90 suits the RX 6800M laptop, which switched off after "
+             "pass — and before the ⭐ rating of an outfit batch, which is CPU work and heats the same zone (checked again every 10 s "
+             "of rating) — until the thermal zone is 8 °C under the limit you set (90 suits the RX 6800M laptop, which switched off after "
              "minutes at 96 °C). Stop ends any wait. Both are off by default and saved for the next start.",
              _cn("笔记本长时间满载会自动关机时使用。冷却模式在每个采样步之后暂停（1.5 = GPU 约 40% 时间工作，画面不变，速度变慢）；"
-                 "过热暂停会在每张图和每个高清修复/脸/眼重绘之前等待，直到温度比设定值低 8 °C（RX 6800M 笔记本建议 90）。停止按钮可结束等待。默认关闭，设置会保存。")],
+                 "过热暂停会在每张图、每个高清修复/脸/眼重绘以及套装批量的 ⭐ 评分（CPU 运算，同样会升温，评分期间每 10 秒再检查一次）之前等待，"
+                 "直到温度比设定值低 8 °C（RX 6800M 笔记本建议 90）。停止按钮可结束等待。默认关闭，设置会保存。")],
             ["✨ Polish (Generate tab)",
              "The dropdown above Hires fix — Portrait / Cowboy shot / Full body / Wide shot, or Auto (reads the framing tags in the prompt) — "
              "fills hires fix, face detail and eye detail with the recipe for that framing: eyes only for a portrait or cowboy shot (the face is "
              "≥ ~24 % of the width, where face detail changes nothing), hires 1.5× + eyes for a full body, hires 1.5× + face + eyes for a wide shot. "
-             "The note shows how many times the plain picture's time it costs (≈ 1.3× / 1.3× / 3.0× / 3.6×). Hires fix runs 8 steps and the eye pass 8: against 14 and 10 they cost nothing measurable "
-             "(4 pictures, CCIP −0.001, face sharpness ×0.98, eye detail ×0.98, nothing by eye) and make a Full body chain about a quarter cheaper; hires denoise 0.40 instead of 0.45 was slightly worse, "
+             "The note shows how many times the plain picture's time it costs (≈ 1.3× / 1.3× / 3.0× / 4.5×). The eye pass runs 8 steps (against 10: no difference on identical pictures) and a Full body's hires fix 8 (against 14: identity unchanged, "
+             "about a quarter cheaper; eye detail ×0.82–0.98 on three anime checkpoints, nothing visible by eye). The Wide shot keeps 14 hires steps: with 8 its small faces' eyes came out about 25 % softer, "
+             "visibly so in 2 of 3 pictures (identity unchanged). Hires denoise 0.40 instead of 0.45 was slightly worse, "
              "a 10-step base instead of 12 or no PAG are not free (identity −0.02 / hair pin −0.09 resp. −0.19). "
              "Eye detail is skipped on Pony models (it blurs them). Measured (2 seeds each): at a cowboy shot "
              "(face 24–28 %) nothing in the chain changes identity — it is insurance; for a full body the plain face is often damaged and hires 1.5× + eyes "
              "fixes it best (identity score 0.937 → 0.967, the hair pin .42 → .90, face ×1.3 sharper) — the face pass on top of hires adds nothing. "
              "Hands are left out: the hand pass cleans texture but never fixed a finger count. Change any control afterwards.",
              _cn("高清修复上方的下拉框：人像 / 牛仔镜头 / 全身 / 远景（或“自动”，读取提示词里的构图标签）按构图一键填好高清修复、脸部与眼部重绘："
-                 "人像和牛仔镜头只重绘眼睛（脸宽 ≥ 约 24%，脸部重绘无效），全身 高清修复 1.5×+眼，远景 高清修复 1.5×+脸+眼；提示条显示约为普通出图的几倍时间（约 1.3× / 1.3× / 3.0× / 3.6×）。高清修复现在用 8 步、眼部重绘 8 步：与原来的 14 步 / 10 步相比没有可测量的损失"
-                 "（4 张图：身份相似度 −0.001、脸部清晰度 ×0.98、眼部细节 ×0.98，肉眼无差别），全身一条链约省四分之一时间；高清修复降噪 0.40 略差于 0.45，底图 10 步或关闭 PAG 并不是免费的（身份 −0.02 / 发饰 −0.09～−0.19）。"
+                 "人像和牛仔镜头只重绘眼睛（脸宽 ≥ 约 24%，脸部重绘无效），全身 高清修复 1.5×+眼，远景 高清修复 1.5×+脸+眼；提示条显示约为普通出图的几倍时间（约 1.3× / 1.3× / 3.0× / 4.5×）。眼部重绘用 8 步（与 10 步相比，同一张图上没有差别），全身的高清修复用 8 步（与 14 步相比：身份不变，约省四分之一时间；"
+                 "眼部细节在三个动漫模型上 ×0.82–0.98，肉眼看不出）。远景仍用 14 步高清修复：8 步时小脸的眼睛约软 25%（3 张图里有 2 张肉眼可见，身份不变）。"
+                 "高清修复降噪 0.40 略差于 0.45，底图 10 步或关闭 PAG 并不是免费的（身份 −0.02 / 发饰 −0.09～−0.19）。"
                  "实测（各 2 个种子）：牛仔镜头（脸宽 24–28%）整条链几乎不改变相似度，只是保险；全身图的原始脸常有损坏，高清修复 1.5×+眼睛修得最好"
                  "（相似度 0.937→0.967，发饰 .42→.90，脸部清晰度 ×1.3），在其上再做脸部重绘没有额外收益。"
                  "不含手部重绘（只改善纹理，不能修正手指数）。之后仍可调整任何控件。")],
