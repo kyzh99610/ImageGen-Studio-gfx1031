@@ -88,11 +88,13 @@ def available() -> dict:
 
 
 def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=None, speck_fn=colour_specks,
-                 identity=None, feature_fn=None) -> list[dict]:
+                 identity=None, feature_fn=None, pause=None) -> list[dict]:
     """Per image {'stars': 1..5, 'flags': ['no face found', 'grey hair 0.12', 'no butterfly hair ornament 0.31', …]}.
     The detectors default to the app's own, used only for the checks `available()` reports; pass the *_fn arguments to
     replace them (tests). A check that can't run is simply skipped. `identity` = a card's identity (backend/identity_score):
-    a face further from her references than her own pictures are (and at least 100 px wide) costs a star."""
+    a face further from her references than her own pictures are (and at least 100 px wide) costs a star.
+    `pause(k, n)` is called before picture k of n (the app's "pause while hot": scoring is CPU work, and on the laptop the
+    CPU die is what the thermal zone follows)."""
     can = available() if not (probs_fn and faces_fn and hands_fn) else {"look": True, "faces": True, "hands": True}
     ident = identity if identity and (feature_fn is not None or can.get("identity", True) and _ids().available()) else None
     if probs_fn is None and can["look"]:
@@ -104,8 +106,10 @@ def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=No
         from backend.detail_tools import detect_hands
         hands_fn = detect_hands
     traits, acc = ic.traits(tags), accessories(tags)
-    out = []
-    for im in images:
+    out, images = [], list(images)
+    for k, im in enumerate(images):
+        if pause is not None:
+            pause(k, len(images))
         stars, flags = 5, []
         faces = faces_fn(im) if faces_fn else None
         if faces is not None:

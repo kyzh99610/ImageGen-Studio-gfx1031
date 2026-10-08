@@ -121,6 +121,7 @@ from config import (
 )
 from backend.hardware_detector import get_profile, GPUInfo, NPUInfo
 from backend.sd_pipeline    import SDPipeline, SCHEDULER_MAP
+from backend import records as _records
 from backend.upscaler       import Upscaler
 from backend.civitai_client import CivitaiClient, scrub as _civ_scrub
 from backend.model_manager  import (
@@ -642,13 +643,7 @@ def _parse_size_preset(label: str | None):
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
-def _num(v, default: float) -> float:
-    """float(v), or default for None / '' / NaN / text."""
-    try:
-        f = float(v)
-        return default if f != f or f in (float("inf"), float("-inf")) else f
-    except (TypeError, ValueError):
-        return default
+_num = _records.num                                  # moved to backend/records.py (round 9); same name, same behaviour
 
 
 def _clean_gen_args(steps, cfg, width, height, batch, seed, strength=0.75, img2img=False):
@@ -727,35 +722,8 @@ def _family_quality(family: str, prompt: str, negative: str) -> tuple[str, str]:
 
 
 def _clean_extra(extra: dict | None) -> dict:
-    """CLIP skip / variation / hires-fix settings made safe (UI values, saved sessions and
-    restored images can all hold junk)."""
-    e = dict(extra or {})
-    cs = int(round(_num(e.get("clip_skip"), 1)))
-    vs = _num(e.get("var_seed"), -1)
-    method = str(e.get("hires_upscaler") or "Lanczos")
-    if method != "Lanczos" and method not in upscaler.available_methods():
-        method = "Lanczos"
-    return {
-        "clip_skip": 2 if cs >= 2 else 1,
-        "var_seed": -1 if vs < 0 else int(vs) % 2**32,
-        "var_strength": min(1.0, max(0.0, _num(e.get("var_strength"), 0.0))),
-        "hires_on": bool(e.get("hires_on")),
-        "hires_scale": min(2.5, max(1.05, _num(e.get("hires_scale"), 1.5))),
-        "hires_denoise": min(0.9, max(0.05, _num(e.get("hires_denoise"), 0.45))),
-        "hires_steps": int(min(150, max(1, round(_num(e.get("hires_steps"), 15))))),
-        "hires_upscaler": method,
-        "fd_on": bool(e.get("fd_on")),
-        "fd_denoise": min(0.8, max(0.1, _num(e.get("fd_denoise"), 0.4))),
-        "fd_mode": e.get("fd_mode") if e.get("fd_mode") in ("auto", "anime", "photo") else "auto",
-        "fd_prompt": str(e.get("fd_prompt") or "")[:500],
-        "pag_scale": min(6.0, max(0.0, _num(e.get("pag_scale"), 0.0))),
-        "freeu": bool(e.get("freeu")),
-        "cfg_rescale": min(1.0, max(0.0, _num(e.get("cfg_rescale"), 0.0))),
-        "hd_on": bool(e.get("hd_on")),
-        "hd_denoise": min(0.7, max(0.1, _num(e.get("hd_denoise"), 0.35))),
-        "ed_on": bool(e.get("ed_on")),
-        "ed_denoise": min(0.6, max(0.1, _num(e.get("ed_denoise"), 0.4))),      # = detail_tools.EYE_DENOISE
-    }
+    """CLIP skip / variation / hires-fix settings made safe (UI values, saved sessions and restored images can all hold junk): backend/records.clean_extra with this app's upscaler."""
+    return _records.clean_extra(extra, upscaler.available_methods)
 
 
 # LMS / PNDM filled SDXL pictures with iridescent colour noise until 2026-10-02 (4th-order Adams–Bashforth is unstable on
@@ -877,6 +845,21 @@ def _thermal_wait(progress=None) -> float:
         except Exception:
             pass
     return thermal.wait_cool(_generation_abort.is_set, say)
+
+
+def _score_pause(progress=None, every: float = 10.0):
+    """The `pause` callback of image_score.score_images: the 🌡 pause-while-hot wait before the first picture and then at most
+    every `every` seconds of scoring (a zone read costs ~1 s). The ⭐ rating is CPU work and the zone follows the CPU die: with ORT's
+    default threads a few seconds of it read 95–96 °C on the laptop (round 9). `pause.waited[0]` collects the seconds paused."""
+    last, waited = [None], [0.0]
+
+    def pause(k, n):
+        if last[0] is not None and time.time() - last[0] < every:
+            return
+        waited[0] += _thermal_wait(progress)
+        last[0] = time.time()
+    pause.waited = waited
+    return pause
 
 
 def _eye_pass_skipped(pipe) -> bool:
@@ -3848,11 +3831,12 @@ def _build_generate_tab():
         # colours and hair pin on the head crop (scene colour leaking into the eyes was the first thing to go), colour
         # noise. Written onto the contact sheet; the pictures themselves stay clean.
         scored, sheet_cells, looked, face_checked = [], list(cells), False, False
+        score_pause = _score_pause(progress)
         try:
             from backend import image_score as _is
             can = _is.available()
             if n_real and any(can.values()):
-                scored = _is.score_images(cells[:n_real], card.get("tags", ""), identity=card.get("identity"))
+                scored = _is.score_images(cells[:n_real], card.get("tags", ""), identity=card.get("identity"), pause=score_pause)
                 sheet_cells = [_is.badge(c, r) for c, r in zip(cells, scored)]
                 looked = bool(can["look"] and _is.ic.traits(card.get("tags", "")))
                 from backend import identity_score as _ids
@@ -3885,6 +3869,8 @@ def _build_generate_tab():
                 ident += f"<br>✅ hair / eye colours match the card in all {n_real} image(s) (WD14)"
             elif face_checked:
                 ident += f"<br>✅ faces match the card in all {n_real} image(s) (CCIP)"
+            if score_pause.waited[0] >= 1:
+                ident += f"<br>🌡 the rating paused {score_pause.waited[0]:.0f} s while the laptop cooled down"
         msg = (f'<p style="color:#a6e3a1;font-size:13px;">🎴 {html.escape(card["name"])}: {made} new + {reused} '
                f'reused image(s) in {_fmt_elapsed(time.time() - t0)} — contact sheet {spath.name}'
                + (" (stopped early)" if _generation_abort.is_set() else "") + ident + "</p>")
@@ -6550,150 +6536,23 @@ def _smartsplit_vae_choices(cap: SmartSplitCapability) -> list[str]:
     return choices
 
 
-_LORA_TAG = re.compile(r"<lora:([^:>]+)(?::([-\d.]+))?[^>]*>", re.I)
+_LORA_TAG = _records.LORA_TAG
 
 
-def _loras_from_meta(prompt: str, loras_field: str | None):
-    """[(name, weight)] from A1111 <lora:…> prompt tags or our 'LoRAs:' field,
-    plus the prompt with the tags taken out."""
-    found = [(m.group(1).strip(), _num(m.group(2), 0.8) if m.group(2) else 0.8)
-             for m in _LORA_TAG.finditer(prompt or "")]
-    clean = _LORA_TAG.sub("", prompt or "")
-    clean = re.sub(r"\s*,\s*(,\s*)+", ", ", clean)          # ", ," left behind by a tag
-    clean = re.sub(r"[ \t]{2,}", " ", clean).strip().strip(",").strip()
-    if not found and loras_field:
-        for part in loras_field.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            m = re.match(r"(.+?)(?:\s*\(×?([\d.]+)\)|:([-\d.]+))?$", part)
-            name, w = m.group(1).strip(), m.group(2) or m.group(3)
-            found.append((name, _num(w, 0.8) if w else 0.8))
-    return found, clean
+_loras_from_meta = _records.loras_from_meta
 
 
-def _match_local(name: str | None, items: list, hash10: str | None = None) -> str | None:
-    """A local file for a recorded model/VAE/LoRA name: exact file name, then stem (case-
-    insensitive), then — if the file was renamed — its cached SHA-256 prefix."""
-    if not name and not hash10:
-        return None
-    paths = [p for _, p in items]
-    if name:
-        n = Path(str(name)).name.lower()
-        stem = Path(n).stem if Path(n).suffix in (".safetensors", ".ckpt", ".pt", ".bin") else n
-        for label, path in items:
-            if Path(path).name.lower() == n:
-                return path
-        for label, path in items:
-            if Path(path).stem.lower() == stem:
-                return path
-    if hash10:
-        from backend.model_hash import find_by_hash
-        return find_by_hash(hash10, paths)
-    return None
+_match_local = _records.match_local
 
 
 def _restore_plan(meta: dict) -> dict:
-    """What to put in the Generate controls to make an image again, from read_png_info():
-    exact files and weights from our 'imagegen' record when present, else A1111 text."""
-    rec = meta.get("imagegen") or {}
-    plan: dict = {"notes": [], "missing": []}
-    lora_found, clean = _loras_from_meta(meta.get("prompt") or "", None if rec else meta.get("loras"))
-    plan["prompt"] = clean if lora_found else (meta.get("prompt") or None)
-    plan["negative_prompt"] = meta.get("negative_prompt") or None
-    sampler = (meta.get("sampler") or "").lower()
-    plan["scheduler"] = next((n for n in SCHEDULER_MAP if n.lower() == sampler), None) or next(
-        (n for n in SCHEDULER_MAP if sampler and (sampler in n.lower() or n.lower() in sampler)), None)
-    # before record format 2 this app's "DPM++ 2M Karras" / "DPM++ SDE Karras" ran without
-    # Karras sigmas — restore what actually made the image
-    from backend.sampling import LEGACY_NAMES
-    if rec and int(_num(rec.get("format"), 1)) < 2 and plan["scheduler"] in LEGACY_NAMES:
-        plan["scheduler"] = LEGACY_NAMES[plan["scheduler"]]
-    for k in ("steps", "cfg_scale", "seed", "width", "height", "strength"):
-        plan[k] = meta.get(k)
-    # checkpoint
-    mfile = (rec.get("model") or {}).get("file") or meta.get("model")
-    mhash = (rec.get("model") or {}).get("sha256_10") or meta.get("model_hash")
-    plan["model"] = _match_local(mfile, list_checkpoints(), mhash)
-    if mfile and not plan["model"]:
-        if re.fullmatch(r"[\w.-]+/[\w.-]+", str(mfile)):             # a Hugging Face repo ID
-            plan["model"] = str(mfile)
-        else:
-            plan["missing"].append(f"checkpoint {mfile}")
-    # VAE
-    vfile = (rec.get("vae") or {}).get("file") if rec else meta.get("vae")
-    if rec and rec.get("vae") is None and "vae" in rec:
-        plan["vae"] = "none"
-    elif vfile:
-        plan["vae"] = _match_local(vfile, list_vaes(), (rec.get("vae") or {}).get("sha256_10"))
-        if not plan["vae"]:
-            plan["missing"].append(f"VAE {vfile}")
-    else:
-        plan["vae"] = None
-    # LoRAs: exact files + weights from our record, else prompt tags / "LoRAs:" field
-    wanted = ([(l.get("file"), l.get("weight", 0.8), l.get("sha256_10")) for l in rec.get("loras") or []
-               if isinstance(l, dict)] if rec.get("loras") is not None else
-              [(n, w, None) for n, w in lora_found])
-    loras = []
-    for name, w, h in wanted:
-        path = _match_local(name if Path(str(name)).suffix else f"{name}.safetensors", list_loras(), h) \
-            or _match_local(name, list_loras(), h)
-        if path:
-            loras.append((path, min(1.5, max(0.1, float(_num(w, 0.8))))))
-        else:
-            plan["missing"].append(f"LoRA {name}")
-    if len(loras) > 3:
-        plan["notes"].append("only 3 LoRA slots — skipped " + ", ".join(Path(p).stem for p, _ in loras[3:]))
-    plan["loras"] = loras[:3] if (wanted or rec) else None      # None = leave the slots alone
-    # CLIP skip / variation / hires: part of reproducing the image, so always set (defaults = off)
-    plan["clip_skip"] = 2 if int(_num(meta.get("clip_skip"), 1)) >= 2 else 1
-    plan["var_seed"] = meta.get("var_seed") if meta.get("var_strength") else -1
-    plan["var_strength"] = float(_num(meta.get("var_strength"), 0.0)) if meta.get("var_seed") is not None else 0.0
-    plan["hires"] = meta.get("hires") if isinstance(meta.get("hires"), dict) else None
-    plan["face_detail"] = meta.get("face_detail") if isinstance(meta.get("face_detail"), dict) else None
-    plan["hand_detail"] = meta.get("hand_detail") if isinstance(meta.get("hand_detail"), dict) else None
-    plan["eye_detail"] = meta.get("eye_detail") if isinstance(meta.get("eye_detail"), dict) else None
-    plan["pag_scale"] = float(_num(meta.get("pag_scale"), 0.0))
-    plan["freeu"] = bool(meta.get("freeu"))
-    plan["cfg_rescale"] = float(_num(meta.get("cfg_rescale"), 0.0))
-    plan["mode"] = rec.get("mode") or ("img2img" if meta.get("strength") is not None else "txt2img")
-    # weighted prompts look different under the other weighting mode: say so (images from before the
-    # A1111 mode existed were made with Compel's)
-    from backend.prompt_syntax import EMPHASIS
-    made = meta.get("emphasis") or (rec.get("emphasis") if rec else None) or ("compel" if rec else "a1111")
-    if made != EMPHASIS["mode"] and re.search(r"\([^()]*:\s*\d*\.?\d+\s*\)|\(\(|\[", str(meta.get("prompt") or "")):
-        plan["notes"].append(f"made with {'Compel' if made == 'compel' else 'A1111'} prompt weighting — switch "
-                             f"Settings → Prompt weights to reproduce it exactly")
-    plan["exact"] = bool(rec)
-    return plan
+    """What to put in the Generate controls to make an image again, from read_png_info() (backend/records.restore_plan with this app's model lists and sampler table)."""
+    return _records.restore_plan(meta, list_checkpoints=list_checkpoints, list_vaes=list_vaes, list_loras=list_loras, scheduler_map=SCHEDULER_MAP)
 
 
 def _plan_extra_updates(plan: dict) -> list:
-    """CLIP skip, variation seed/strength and hires-fix controls for a restore plan
-    (hires sliders keep their values when the image didn't use hires fix)."""
-    h = plan.get("hires") or {}
-    ex = _clean_extra(dict(clip_skip=plan.get("clip_skip"), var_seed=plan.get("var_seed"),
-                           var_strength=plan.get("var_strength"), hires_on=bool(h),
-                           hires_scale=h.get("scale"), hires_denoise=h.get("denoise"),
-                           hires_steps=h.get("steps"), hires_upscaler=h.get("upscaler")))
-    keep = gr.update()
-    fd = plan.get("face_detail") or {}
-    fdx = _clean_extra(dict(fd_on=bool(fd), fd_denoise=fd.get("denoise"), fd_mode=fd.get("detector"),
-                            fd_prompt=fd.get("prompt")))
-    hd = plan.get("hand_detail") or {}
-    hdx = _clean_extra(dict(hd_on=bool(hd), hd_denoise=hd.get("denoise")))
-    ed = plan.get("eye_detail") or {}
-    edx = _clean_extra(dict(ed_on=bool(ed), ed_denoise=ed.get("denoise")))
-    return [ex["clip_skip"], ex["var_seed"], ex["var_strength"], bool(h),
-            ex["hires_scale"] if h else keep, ex["hires_denoise"] if h else keep,
-            ex["hires_steps"] if h else keep, ex["hires_upscaler"] if h else keep,
-            bool(fd), fdx["fd_denoise"] if fd else keep, fdx["fd_mode"] if fd else keep,
-            fdx["fd_prompt"] if fd else keep,
-            # boosters are part of how the image looks: always set (off when the record has none)
-            *(lambda b: [b["pag_scale"], b["freeu"], b["cfg_rescale"]])(_clean_extra(dict(
-                pag_scale=plan.get("pag_scale"), freeu=plan.get("freeu"), cfg_rescale=plan.get("cfg_rescale")))),
-            bool(hd), hdx["hd_denoise"] if hd else keep,
-            bool(ed), edx["ed_denoise"] if ed else keep]
+    """CLIP skip, variation seed/strength, hires-fix and detail-pass controls for a restore plan (backend/records.plan_extra_updates; `gr.update()` = keep the control)."""
+    return _records.plan_extra_updates(plan, _clean_extra, gr.update())
 
 
 def _plan_summary(plan: dict) -> str:
@@ -6827,28 +6686,7 @@ def _save_pref(key: str, value) -> None:
         print(f"[Prefs] could not save {key}: {e}")
 
 
-def _gen_record(pipe, **settings) -> dict:
-    """Everything needed to make an image again: settings + the exact model, VAE and LoRA
-    files (name, AutoV2 hash when known) that were loaded in `pipe`."""
-    from backend.model_hash import autov2, hash_later
-    rec = {"app": "ImageGen Studio", "format": 2}   # 2: Karras samplers use Karras sigmas
-    from backend.prompt_syntax import EMPHASIS
-    rec["emphasis"] = EMPHASIS["mode"]               # how (tag:1.2) weights were applied
-    rec.update({k: v for k, v in settings.items() if v is not None})
-    if pipe is not None:
-        mp = str(getattr(pipe, "current_model", "") or "")
-        vp = getattr(pipe, "_last_vae_path", None)
-        loras = [(name, path, w) for _, (name, path, w) in sorted(getattr(pipe, "_lora_adapters", {}).items())]
-        hash_later(mp, vp, *[path for _, path, _ in loras])
-        # a local file → its name; a Hugging Face repo ID ("org/name-1.0") → kept whole
-        rec["model"] = {"file": Path(mp).name if Path(mp).is_file() else mp,
-                        "family": getattr(pipe, "model_family", ""), "sha256_10": autov2(mp)}
-        if (getattr(pipe, "prediction", None) or {}).get("v_pred"):
-            rec["model"]["prediction"] = "v"
-        rec["vae"] = {"file": Path(vp).name, "sha256_10": autov2(vp)} if vp else None
-        rec["loras"] = [{"file": Path(path).name, "weight": round(float(w), 3), "sha256_10": autov2(path)}
-                        for name, path, w in loras]
-    return rec
+_gen_record = _records.gen_record
 
 
 def _params_text(rec: dict) -> str:

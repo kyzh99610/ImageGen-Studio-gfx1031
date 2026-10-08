@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 152-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 155-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 147 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 150 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -541,6 +541,20 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
 - **Pause while hot** also goes on once the zone is under the limit and has stopped falling for 20 s (the laptop's idle level):
   with a hot idle floor the wait for limit − 8 took a third of a run. The in-pass emergency brake is unchanged.
 - **🦋 Swap** also handles earrings, a choker and hats (paint the whole hat).
+
+### Rating pause, 🖐 face guard, lighting warning, records.py (2026-10-08)
+- The outfit batch's ⭐ rating (CPU: WD14, detectors, CCIP) also waits while the laptop is hot (before the first picture, then
+  every 10 s). Capping ONNX Runtime at 2 threads halved the CPU seconds but ran slower and *hotter* at its peak — reverted.
+- **🖐 Re-draw hand:** a face that reaches into the crop is taken out of the mask, so a hand on a cheek or chin no longer
+  repaints the face (4.7–7.4 → 0.5–0.7/255 on the face), with hands as good as before. Adding "face, head" to the negative
+  changed nothing; dropping "1girl, solo" from the hand prompt lowered the correct rate — neither shipped. Ranking the tries
+  by detector confidence / sharpness didn't predict the correct ones (AUC ~0.5), so the gallery stays in try order.
+- **✨ Polish:** Full body keeps 8 hires steps (identity unchanged on three checkpoints, ×0.71 time); the Wide shot goes back to
+  14 (at 8 its small faces' eyes came out ~25 % softer); the eye pass's 8 steps were free in both.
+- Prompt warning when daylight and night lighting tags meet ("golden hour" turned a night city into a sunset).
+- The imagegen record and the restore plan moved from app.py to `backend/records.py` (re-exported).
+- SDXL text encoders encode in fp32 (since 2026-09-28): fp16 encodes under ZLUDA scatter by up to 0.03–0.05, i.e. ~6/255 in
+  the picture — records made before that regenerate the same picture with that much scatter.
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
