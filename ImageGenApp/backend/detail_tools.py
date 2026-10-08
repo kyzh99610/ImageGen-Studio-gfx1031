@@ -601,6 +601,17 @@ def eye_negative_from(prompt: str, negative: str = "") -> str:
     return merge_prompts(negative or "", EYE_ROUND_NEGATIVE)
 
 
+# Executed steps of the detail passes: about half the main steps (ADetailer runs steps × denoise), at least 10 — and 8 for the eye pass. Round 8 (an Illustrious checkpoint + a character LoRA, 2 scenes × 2 seeds, CCIP / pin /
+# eye energy / by eye): the eye pass at 8 steps equals the one at 10 (CCIP −0.001, eye energy ×0.98, pin ±0.00) and is 21 % cheaper; at 6 steps it loses 4 % eye energy.
+DETAIL_MIN_STEPS = {"face": 10, "hand": 10, "eye": 8}
+
+
+def detail_schedule_steps(kind: str, steps: int, denoise: float) -> int:
+    """Schedule length of a face / hand / eye detail pass: ceil(max(the pass's minimum, main steps × 0.5) / denoise), so that int(length × denoise) steps run."""
+    import math
+    return min(150, math.ceil(max(DETAIL_MIN_STEPS.get(kind, 10), int(steps) * 0.5) / max(0.05, float(denoise))))
+
+
 EYE_DENOISE = 0.4        # default strength of the eye pass: with the eye-only prompt Laplacian energy of the eyes +17 % (0.3: +6 %) over the old whole-prompt pass at 0.3, no colour bleed
 
 
@@ -653,6 +664,8 @@ _SWAP_OLD = re.compile(r"ornament|clip|hairpin|hair ?stick|barrette|hair ?band|h
                        r"\bveil\b|flower|butterfly|\blace\b|\bmesh\b|accessor", re.I)
 
 
+# Round 8 (an Illustrious checkpoint + a character LoRA, three cowboy pictures): earrings and a choker work with this hair-tag prompt as it is. A hat needs the whole hat PAINTED: a mask that only covered the hair gave a hat in 1 of 3; with a
+# realistic mask (the crown reaching ~100 px above the head) the hair tags are what keeps the model from drawing a second head — without them ("1girl, solo, beret") it drew a tiny girl wearing the beret into the mask.
 def swap_prompt_from(prompt: str, item: str) -> str:
     """The prompt of a swap pass: the quality and subject tags of `prompt` and its hair tags (minus the ones that name an accessory), then
     `item` at weight 1.2 — the scene, outfit and the old accessory stay out, the crop is only hair."""
@@ -674,6 +687,68 @@ def swap_item(sdp, image: Image.Image, mask: Image.Image, item: str, prompt: str
     `swap_prompt_from`. Returns (image, seed used). `steps` is the number of sampling steps (the schedule length at 1.0)."""
     return inpaint_region(sdp, image, mask, swap_prompt_from(prompt, item), negative, steps=steps, cfg=cfg, denoise=SWAP_DENOISE, seed=seed,
                           scheduler=scheduler, clip_skip=clip_skip, padding=max(int(padding), SWAP_MIN_PADDING), step_callback=step_callback)
+
+
+# ── Re-draw a broken hand (several tries to pick from) ────────────────────────
+# Round 7, 11 genuinely broken hands (10 SD 1.5, 1 SDXL): the hand pass at 0.35–0.55 never fixed a finger count or a tangle; a re-draw
+# of the hand at 0.8 with a hand-only prompt fixed 2 of 10 (+4 plausible but changed), 1.0 invented objects. So one try rarely works —
+# the useful tool makes several (seed, seed+1, …) and lets the user pick.
+HAND_REDRAW_DENOISE = 0.8
+HAND_EXTRA = "detailed hands, perfect hands, five fingers, detailed fingers, hand focus"
+_HAND_KEEP = re.compile(r"hand|finger|holding|peace|\bv\b|gesture|fist|nail|glove|wrist|bracelet|ring\b|fan|cup|mug|phone|flower|bouquet|"
+                        r"umbrella|reaching|outstretched|interlocked|adjusting|pointing|waving|sleeve|cuff", re.I)
+
+
+def hand_prompt_from(prompt: str) -> str:
+    """The prompt of a hand re-draw: the quality and subject tags of `prompt`, its tags about hands / what they hold / sleeves, then
+    the hand words (the scene, face and outfit stay out: the crop is only the hand)."""
+    from backend.prompt_tools import _is_quality, join_tags, split_tags
+    keep = []
+    for tag in split_tags(prompt or ""):
+        core = re.sub(r"[()\\]", "", tag).lower()
+        if _is_quality(tag) or re.fullmatch(r"\d?(girl|girls|boy|boys)|solo", core.split(":")[0].strip()) or _HAND_KEEP.search(core):
+            keep.append(tag)
+    return join_tags(keep + [HAND_EXTRA])
+
+
+def hand_mask(size: tuple[int, int], box) -> Image.Image:
+    """The hand pass's mask for a hand box: a rounded box + 12 % (an ellipse clips fingertips)."""
+    W, H = size
+    x1, y1, x2, y2 = box
+    hw, hh = x2 - x1, y2 - y1
+    mx, my = int(hw * 0.12), int(hh * 0.12)
+    m = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(m).rounded_rectangle([x1 - mx, y1 - my, x2 + mx, y2 + my], radius=max(2, min(hw, hh) // 4), fill=255)
+    return m
+
+
+def redraw_hand(sdp, image: Image.Image, mask: Image.Image, prompt: str, negative: str = "", *, tries: int = 4,
+                steps: int = 12, cfg: float = 6.0, seed: int = -1, scheduler: str = "DPM++ 2M Karras", clip_skip: int = 1,
+                step_callback=None, on_try=None, out: list | None = None) -> list[tuple[Image.Image, int]]:
+    """`tries` re-draws of the painted hand at denoise 0.8 with `hand_prompt_from`, seeds seed, seed + 1, … (a random base for
+    seed -1). Returns [(image, seed)]. Steps as the hand pass measured them (round 7): ceil(max(10, steps × 0.5) / 0.8).
+    Every finished try is appended to `out` (pass your own list) as soon as it is done: a Stop or an error at try k raises out of
+    this function, and the k − 1 finished tries are still in `out`."""
+    import math
+    import random
+    from backend.sampling import uniform_variant
+    m = np.array(mask.convert("L").resize(image.size, Image.NEAREST)) > 127
+    if not m.any():
+        return []
+    ys, xs = np.nonzero(m)
+    side = max(int(xs.max() - xs.min()), int(ys.max() - ys.min()), 1)
+    base = int(seed) if seed is not None and int(seed) >= 0 else random.randint(0, 2**32 - 1)
+    p = hand_prompt_from(prompt)
+    run_steps = min(150, math.ceil(max(10, int(steps) * 0.5) / HAND_REDRAW_DENOISE))
+    out = [] if out is None else out
+    for k in range(max(1, min(8, int(tries)))):
+        if on_try is not None:
+            on_try(k)
+        img, used = inpaint_region(sdp, image, mask, p, negative, steps=run_steps, cfg=cfg, denoise=HAND_REDRAW_DENOISE,
+                                   seed=(base + k) % 2**32, scheduler=uniform_variant(scheduler), clip_skip=clip_skip,
+                                   padding=int(side * 0.6), min_context=0, feather=max(3, side // 12), step_callback=step_callback)
+        out.append((img, used))
+    return out
 
 
 # ── Tiled "SD upscale" detail pass ────────────────────────────────────────────

@@ -2691,6 +2691,9 @@ def _():
     for gone in ("butterfly", "lace", "mesh", "ornament", "ribbon", "white dress", "cowboy shot", "simple background", "red eyes", "heroine"):
         assert gone not in p.replace("(red ribbon:1.2)", ""), (gone, p)
     assert dt.swap_prompt_from("", "bow") == "(bow:1.2)"                                   # nothing to keep: just the item
+    for item in ("gold hoop earrings", "black choker", "black beret"):                    # round 8: every kind of item keeps the hair tags (without them a hat mask drew a second girl)
+        pi = [t.strip() for t in dt.swap_prompt_from(canon, item).split(",")]
+        assert "grey hair" in pi and "long hair" in pi and pi[-1] == f"({item}:1.2)" and "white dress" not in pi, (item, pi)
     seen = {}
     orig = dt.inpaint_region
     try:
@@ -2845,6 +2848,13 @@ def _():
         assert T.wait_cool(should_stop=lambda: next(stop), read=lambda: 95.0, sleep=sleep, clock=lambda: now[0]) == 2.0
         now[0] = 0.0
         assert T.wait_cool(read=lambda: 95.0, sleep=sleep, clock=lambda: now[0]) >= 900.0          # gives up after 15 min
+        # between pieces the wait also ends once the zone sits under the limit and stops falling (the laptop's idle level, round 8)
+        temps3 = iter([92.0, 87.0] + [87.0] * 30)
+        now[0] = 0.0
+        w = T.wait_cool(read=lambda: next(temps3), sleep=sleep, clock=lambda: now[0])
+        assert 20.0 <= w <= 24.0, w                                                      # 87 °C for 20 s → go on (never reaches 82)
+        now[0] = 0.0
+        assert T.wait_cool(read=lambda: 95.0, sleep=sleep, clock=lambda: now[0]) >= 900.0          # above the limit: no plateau exit
         # inside a pass: only an emergency brake (act at limit + 6 = 96, resume at the limit) — no stop-go at 90
         assert T.wait_cool(read=lambda: 95.0, sleep=sleep, clock=lambda: now[0], in_pass=True) == 0.0
         temps2 = iter([96.0, 92.0, 89.5, 90.0])
@@ -2880,6 +2890,135 @@ def _():
         assert t is None or 0 < t < 130, t
     finally:
         T.GUARD["limit"] = old
+
+
+
+@test("🖐 Re-draw a hand: hand-only prompt, N tries at 0.8 with seed, seed+1 …, painted mask or the biggest detected hand; a GPU job; original shown first")
+def _():
+    from PIL import Image
+    import app as _app
+    from backend import detail_tools as dt
+    p = dt.hand_prompt_from("masterpiece, best quality, 1girl, solo, grey hair, red eyes, holding cup, peace sign, white dress, night, city lights")
+    tags = [t.strip() for t in p.split(",")]
+    for keep in ("masterpiece", "1girl", "solo", "holding cup", "peace sign", "five fingers", "hand focus"):
+        assert keep in tags, (keep, p)
+    for gone in ("grey hair", "red eyes", "white dress", "night", "city lights"):
+        assert gone not in tags, (gone, p)
+    m = np.array(dt.hand_mask((100, 100), (40, 40, 60, 60)))
+    assert m[50, 50] == 255 and m[38, 50] == 255 and m[10, 10] == 0                      # box + 12 %
+    calls = []
+    orig = dt.inpaint_region
+    try:
+        dt.inpaint_region = lambda sdp, im, mask, prompt, neg, **k: (calls.append(dict(prompt=prompt, **k)), (im, k["seed"]))[1]
+        im = Image.new("RGB", (200, 200)); mk = Image.new("L", (200, 200), 0); mk.paste(255, (80, 80, 120, 130))
+        res = dt.redraw_hand(object(), im, mk, "1girl, holding cup", tries=3, steps=12, seed=10, scheduler="DPM++ 2M AYS")
+        assert [u for _i, u in res] == [10, 11, 12] and len(calls) == 3
+        c = calls[0]
+        assert c["denoise"] == 0.8 and c["scheduler"] == "DPM++ 2M" and c["steps"] == 13 and c["padding"] == 29 and "five fingers" in c["prompt"], c
+        assert dt.redraw_hand(object(), im, Image.new("L", (200, 200), 0), "x") == []          # nothing painted → nothing done
+        assert len(dt.redraw_hand(object(), im, mk, "x", tries=50, seed=1)) == 8                 # at most 8 tries
+    finally:
+        dt.inpaint_region = orig
+    fs = [f for f in _app.build_app().fns if getattr(f.fn, "__name__", "") == "do_hand_redraw_ui"]
+    assert fs and all(f.concurrency_id == "gpu" and f.concurrency_limit == 1 for f in fs), "the hand re-draw is a GPU job"
+    run, saved = fs[0].fn, {}
+    run = getattr(run, "__wrapped__", run)
+
+    class FakeSD:
+        pipe, current_model, _last_vae_path, _lora_adapters = object(), "m", None, {}
+    keep = (_app.sd, _app._save_outputs, dt.redraw_hand, dt.detect_hands)
+    try:
+        _app.sd = FakeSD()
+        _app._save_outputs = lambda imgs, meta, pipe=None: (saved.update(meta=meta, n=len(imgs)), [Path(f"h{i}.png") for i in range(len(imgs))])[1]
+        dt.redraw_hand = lambda sdp, im, mask, prompt, neg, *, tries, **k: (saved.update(mask=np.array(mask), tries=tries),
+                                                                           [(im, 100 + i) for i in range(tries)])[1]
+        quiet = lambda *a, **k: None
+        args = ("m", "none", "none", 0.8, "none", 0.7, "none", 0.7, "1girl, peace sign", "bad hands", "DPM++ 2M Karras", 12, 6.0, 5, 1)
+        bg = Image.new("RGB", (128, 128), (200, 200, 200))
+        painted = Image.new("RGBA", (128, 128), (0, 0, 0, 0)); painted.paste((255, 255, 255, 255), (10, 10, 30, 30))
+        res = run(*args, {"background": bg, "layers": [painted]}, 3, progress=quiet)
+        assert len(res[0]) == 4 and res[0][0] is not None and res[4] == [100, 100, 101, 102], res[4]     # original + 3 tries
+        assert saved["tries"] == 3 and saved["mask"][20, 20] and not saved["mask"][100, 100] and saved["meta"]["strength"] == 0.8
+        assert "original" in res[1]
+        dt.detect_hands = lambda image, n=6: []                                            # nothing painted, no hand found
+        res = run(*args, {"background": bg, "layers": []}, 3, progress=quiet)
+        assert not res[0] and "No hand found" in res[1], res
+        dt.detect_hands = lambda image, n=6: [(60, 60, 90, 100), (5, 5, 15, 15)]          # biggest detected hand is used
+        res = run(*args, {"background": bg, "layers": []}, 2, progress=quiet)
+        assert len(res[0]) == 3 and saved["mask"][80, 75] and not saved["mask"][10, 10] and "biggest of 2" in res[1], res[1]
+    finally:
+        _app.sd, _app._save_outputs, dt.redraw_hand, dt.detect_hands = keep
+
+
+@test("🖐 Re-draw a hand: a Stop or an error at try k keeps, shows and saves the k − 1 finished tries (they used to be thrown away)")
+def _():
+    from PIL import Image
+    import app as _app
+    from backend import detail_tools as dt
+    im = Image.new("RGB", (200, 200)); mk = Image.new("L", (200, 200), 0); mk.paste(255, (80, 80, 120, 130))
+    orig, n = dt.inpaint_region, [0]
+
+    def fake(sdp, image, mask, prompt, neg, **k):
+        n[0] += 1
+        if n[0] == 3:
+            raise RuntimeError("boom")
+        return image, k["seed"]
+    try:
+        dt.inpaint_region = fake
+        out = []
+        try:
+            dt.redraw_hand(object(), im, mk, "1girl", tries=5, steps=12, seed=40, out=out)
+            raise AssertionError("the error at try 3 must propagate")
+        except RuntimeError as e:
+            assert "boom" in str(e)
+        assert [u for _i, u in out] == [40, 41], out                                          # tries 1 and 2 were finished and are kept
+        n[0] = 10
+        assert [u for _i, u in dt.redraw_hand(object(), im, mk, "x", tries=2, seed=7)] == [7, 8]   # without `out` it still returns its list
+    finally:
+        dt.inpaint_region = orig
+    fs = [f for f in _app.build_app().fns if getattr(f.fn, "__name__", "") == "do_hand_redraw_ui"]
+    run, saved = getattr(fs[0].fn, "__wrapped__", fs[0].fn), {}
+
+    class FakeSD:
+        pipe, current_model, _last_vae_path, _lora_adapters = object(), "m", None, {}
+    keep = (_app.sd, _app._save_outputs, dt.redraw_hand)
+    try:
+        _app.sd = FakeSD()
+        _app._save_outputs = lambda imgs, meta, pipe=None: (saved.update(meta=meta, n=len(imgs)), [Path(f"h{i}.png") for i in range(len(imgs))])[1]
+        quiet = lambda *a, **k: None
+        args = ("m", "none", "none", 0.8, "none", 0.7, "none", 0.7, "1girl, peace sign", "bad hands", "DPM++ 2M Karras", 12, 6.0, 5, 1)
+        bg = Image.new("RGB", (128, 128), (200, 200, 200))
+        painted = Image.new("RGBA", (128, 128), (0, 0, 0, 0)); painted.paste((255, 255, 255, 255), (10, 10, 30, 30))
+        ed = {"background": bg, "layers": [painted]}
+
+        def stop_after_two(sdp, image, mask, prompt, neg, *, tries, out=None, **k):
+            out.extend([(image, 500), (image, 501)])
+            raise _app._GenerationAborted()
+        dt.redraw_hand = stop_after_two
+        res = run(*args, ed, 5, progress=quiet)
+        assert len(res[0]) == 3 and res[4] == [500, 500, 501] and saved["n"] == 2 and saved["meta"]["seeds"] == [500, 501], (len(res[0]), res[4], saved)
+        assert "stopped after 2 of 5 tries" in res[1] and "original" in res[1], res[1]
+
+        def fail_at_two(sdp, image, mask, prompt, neg, *, tries, out=None, **k):
+            out.append((image, 600))
+            raise RuntimeError("out of memory")
+        dt.redraw_hand = fail_at_two
+        res = run(*args, ed, 5, progress=quiet)
+        assert len(res[0]) == 2 and "out of memory" in res[1] and "try 2 of 5" in res[1], res[1]
+
+        def fail_at_once(sdp, image, mask, prompt, neg, *, tries, out=None, **k):
+            raise RuntimeError("boom now")
+        dt.redraw_hand = fail_at_once
+        res = run(*args, ed, 5, progress=quiet)
+        assert not res[0] and "failed" in res[1] and "boom now" in res[1], res[1]
+
+        def stop_at_once(sdp, image, mask, prompt, neg, *, tries, out=None, **k):
+            raise _app._GenerationAborted()
+        dt.redraw_hand = stop_at_once
+        res = run(*args, ed, 5, progress=quiet)
+        assert not res[0] and "stopped" in res[1], res[1]
+    finally:
+        _app.sd, _app._save_outputs, dt.redraw_hand = keep
 
 
 @test("GPU events share one queue slot (Generate during an X/Y grid crashed the process); Stop stays free")
@@ -3921,6 +4060,23 @@ def _():
     finally:
         P.RECIPES.clear(); P.RECIPES.update(saved)
     assert set(by["on_polish"].inputs and [type(c).__name__ for c in by["on_polish"].inputs]) == {"Dropdown", "Textbox"}
+
+
+@test("Detail passes: the eye pass runs 8 steps instead of 10 (equal quality, 21 % cheaper), face / hand still 10; _detail_pass uses the shared rule; Polish Full body / Wide shot run 8 hires steps")
+def _():
+    import inspect
+    import app as _app
+    from backend import detail_tools as dt
+    from backend import polish as P
+    for kind, want in (("eye", 8), ("face", 10), ("hand", 10)):
+        for den in (0.3, 0.35, 0.4, 0.55):
+            n = dt.detail_schedule_steps(kind, 12, den)
+            assert int(n * den) == want, (kind, den, n, int(n * den))          # the steps that actually run
+    assert dt.detail_schedule_steps("eye", 30, 0.4) == 38 and int(38 * 0.4) == 15       # more main steps: half of them, as before
+    assert dt.detail_schedule_steps("eye", 400, 0.1) == 150                                # never longer than 150
+    assert dt.detail_schedule_steps("unknown", 12, 0.5) == 20                              # an unknown pass keeps the 10-step minimum
+    assert "detail_schedule_steps(kind, steps, den)" in inspect.getsource(_app._build_generate_tab), "_detail_pass uses the shared rule"
+    assert P.recipe("Full body")["hires_steps"] == 8 and P.recipe("Wide shot")["hires_steps"] == 8 and P.recipe("Full body")["hires_denoise"] == 0.45
 
 
 @test("Generate: 'Use img2img' with no image loaded says so instead of quietly making a text-to-image")

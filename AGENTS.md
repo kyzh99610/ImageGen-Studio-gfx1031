@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 149-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 152-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 144 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 147 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -529,6 +529,18 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   in 48) the pass at 0.35–0.55 never fixed a finger count or a tangle (it turned blobs into fists in about half); hires first fixed
   1 of 10, a hand-only re-draw at 0.8 2 of 10 (+4 plausible but changed), 1.0 invents objects. Re-roll the seed or inpaint the
   hand by hand. Help and the hint say so.
+
+### 🖐 Re-draw a hand, cheaper Polish, a shorter heat pause (2026-10-07)
+- **🖐 Re-draw hand** (Inpaint accordion, "tries" 1–8, default 4; `detail_tools.redraw_hand`): the painted mask, or the biggest
+  detected hand, re-drawn N times at denoise 0.8 with a hand-only prompt (quality / subject / hand and held-object tags +
+  "detailed hands, five fingers…"), seeds seed, seed + 1, …; the gallery shows the original first, then every try (all saved;
+  tries finished before a Stop are kept). Measured on 11 broken hands: half of all tries correct, at least one correct hand
+  within 4 tries for 10 of 11; ~10 s per try on SD 1.5, ~37 s on SDXL (laptop RX 6800M).
+- **✨ Polish** runs 8 hires steps (Full body / Wide shot) and the eye pass 8 steps: the same picture, the chain about a quarter
+  cheaper (measured on Full body; Wide shot by analogy). Time notes: Portrait / Cowboy 1.3×, Full body 3.0×, Wide 3.6×.
+- **Pause while hot** also goes on once the zone is under the limit and has stopped falling for 20 s (the laptop's idle level):
+  with a hot idle floor the wait for limit − 8 took a third of a run. The in-pass emergency brake is unchanged.
+- **🦋 Swap** also handles earrings, a choker and hats (paint the whole hat).
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
