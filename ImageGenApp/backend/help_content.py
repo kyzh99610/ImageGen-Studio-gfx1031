@@ -407,10 +407,13 @@ def parameters_html() -> str:
              "outfits you will judge; the first use downloads the 150 MB CCIP anime-character model) it also flags a face that is further from her than her own pictures are. Measured on 247 existing "
              "pictures: her own held-out pictures flagged ~3 %, a no-LoRA look-alike with her tags up to ~1 in 5, another character with her "
              "tags up to ~1 in 3 (tighter references catch more), another girl every time; faces under 100 px are not judged. A warning, not a verdict. With 12 plain daylight references 15 of the 33 outfits of the v3 card were flagged although every picture was her "
-             "(a hat, ponytail or buns shifts CCIP's fingerprint; references that include such outfits flagged 11 %, and the message then says \"check by eye\").",
+             "(a hat, ponytail or buns shifts CCIP's fingerprint; references that include such outfits flagged 11 %, and the message then says \"check by eye\"). "
+             "Outfits with a hat or hairstyle are therefore flagged only when the face is far off (5 spreads below her references instead of 2: 46 % of her own pictures in such outfits "
+             "fell under the old margin, 13 % under the new one; another girl is still flagged every time). The colour-noise flag is the weakest check — white lace and fur set it off "
+             "on good pictures (20 of 21 such flags in a 130-picture check) and it sees only 4 of 10 truly garbled pictures: look at the picture.",
              _cn("角色卡 →“生成所有服装”：每套服装 × N 个种子（种子相同便于对比），最后生成对比图；已生成的会跳过，可断点续跑。"
                  "对比图上每张图有 ⭐ 评分（n/5）：一张脸/至多两只手、角色卡的发色瞳色与发饰、彩色噪点（仅用已缓存的模型在 CPU 上检查）。"
-                 "用“🧬 Learn her look”（3 张以上她的图，脸宽 ≥ 100 像素，姿势/光线不限，但发型和头饰有影响：请包含要检查的服装里的帽子、马尾、丸子头；首次使用会下载 150 MB 的 CCIP 动漫角色识别模型）学习后还会标出比她本人图更不像她的脸（247 张现有图实测：她自己的图误报约 3%，同标签无 LoRA 的相似脸最多约 1/5，同标签的其他角色最多约 1/3（参考图越相近检出越多），其他女孩 100%；小于 100 像素的脸不判断）。仅作提示，不是定论。参考图只有普通日光照时，v3 角色卡 33 套服装里有 15 套被标记（其实每张都是她）：帽子、马尾、丸子头会改变 CCIP 指纹；参考图包含这类服装后误报降到 11%，提示会写“请肉眼检查”。")],
+                 "用“🧬 Learn her look”（3 张以上她的图，脸宽 ≥ 100 像素，姿势/光线不限，但发型和头饰有影响：请包含要检查的服装里的帽子、马尾、丸子头；首次使用会下载 150 MB 的 CCIP 动漫角色识别模型）学习后还会标出比她本人图更不像她的脸（247 张现有图实测：她自己的图误报约 3%，同标签无 LoRA 的相似脸最多约 1/5，同标签的其他角色最多约 1/3（参考图越相近检出越多），其他女孩 100%；小于 100 像素的脸不判断）。仅作提示，不是定论。参考图只有普通日光照时，v3 角色卡 33 套服装里有 15 套被标记（其实每张都是她）：帽子、马尾、丸子头会改变 CCIP 指纹；参考图包含这类服装后误报降到 11%，提示会写“请肉眼检查”。带帽子或特殊发型的服装现在只有在脸明显不像时才会标记（偏离参考图 5 个标准差，而不是 2 个：这类服装里她自己的图有 46% 低于旧阈值，13% 低于新阈值；其他女孩仍然每次都会标出）。彩色噪点是最不可靠的检查：白色蕾丝和毛皮会让好图误报（130 张图的检查里 20/21 个标记是误报），而且 10 张真正花掉的图只能发现 4 张，请亲眼确认。")],
             ["🗂 History",
              "Search everything in outputs/ by prompt words, model, LoRA or seed; ⭐ favourites; open an image in PNG "
              "Info → Send to Generate to restore exactly how it was made.",

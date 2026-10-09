@@ -35,10 +35,12 @@ _lama_session = None
 # ── Availability checks ────────────────────────────────────────────────────────
 
 def is_ocr_available() -> bool:
+    # find_spec instead of `import easyocr`: the import pulls in torchvision and costs ~1.9 s at every
+    # app start; the real import happens when the first OCR run needs it (`_get_ocr_reader`)
     try:
-        import easyocr  # noqa
-        return True
-    except ImportError:
+        import importlib.util
+        return importlib.util.find_spec("easyocr") is not None
+    except (ImportError, ValueError):
         return False
 
 

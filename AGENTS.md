@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 157-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 158-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 152 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 153 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -586,6 +586,16 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
 - A best-try-first order for 🖐 Re-draw hand was tested on 384 rated tries and not built: no score (hand detector, WD14 tags
   or features) predicted the correct hands well enough (best AUC ~0.6).
 - The Settings tab's preference block moved to `backend/ui_settings.py` (no behaviour change).
+
+### UI cleanup, faster start-up, fewer false star flags (2026-10-09)
+- Generate tab regrouped without behaviour changes (every API endpoint and argument order identical): LoRA slots 2–3 fold
+  away, Sampler / Size / Hires rows no longer wrap, Variations below the boosters, stale hints replaced, the output column
+  stays in view while scrolling.
+- Start-up 21.4 → 14.3 s warm (launch.bat to ready 27 → 21 s): the CPU name comes from the registry instead of three
+  PowerShell calls, and the OCR check no longer imports easyocr.
+- Outfit batch ⭐: the "not her?" flag needs a bigger margin (5 spreads) on outfits with a hat or a distinctive hairstyle —
+  46 % of the character's own pictures in such outfits were flagged, 13 % now. The colour-noise check is the weakest one
+  (it finds 4 of 10 garbled pictures and flags 13 of 37 clean ones) and is left as it is.
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the

@@ -30,6 +30,10 @@ DIM = 768                 # CCIP feature size
 MIN_FACE_PX = 100         # smaller faces give unreliable features: not used as references, never judged
 SD_FLOOR = 0.02           # the references' own spread can't count as smaller than this (near-identical pictures would make a razor-thin tolerance)
 Z_FLAG = 2.0              # flagged when the cosine is this many spreads below the references' own mean
+Z_FLAG_HAIR = 5.0         # … for a picture whose outfit changes the hair / head (hat, ponytail, buns, veil …): CCIP reads hair and headwear as part of the
+                          # character. Round 13, her 66 outfit pictures (all her by eye, 12 references of daylight pictures): of the 46 with such an outfit
+                          # 21 (46 %) fell below z −2, 14 below −3, 10 below −4, 6 (13 %) below −5, 4 below −6 (worst −7.8); the 20 others 3 (15 %) below −2, none below
+                          # −3. Another girl (other hair / eyes) sits at z −29 … −43, so that stays caught at any margin.
 
 
 def available() -> bool:

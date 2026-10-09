@@ -383,7 +383,17 @@ def _detect_npu() -> NPUInfo:
 # ── CPU / RAM info ────────────────────────────────────────────────────────────
 def _cpu_name() -> str:
     # platform.processor() returns a generic "AMD64 Family X Model Y" string on
-    # Windows 11 — use Win32_Processor for the branded name (e.g. "AMD Ryzen 7 8700G")
+    # Windows 11 — use the branded name (e.g. "AMD Ryzen 7 8700G"). The registry holds the same
+    # string Win32_Processor reports and answers in under a millisecond; a PowerShell start-up
+    # costs ~1.5 s and this runs three times per app start (measured, round 13).
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+            name = str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+        if name:
+            return name
+    except Exception:
+        pass
     try:
         out = subprocess.check_output(
             ["powershell", "-NoProfile", "-Command",
@@ -529,11 +539,3 @@ def get_profile() -> HardwareProfile:
     if _PROFILE is None:
         _PROFILE = detect_hardware()
     return _PROFILE
-
-
-def best_hip_device_index() -> int:
-    """Return the HIP_VISIBLE_DEVICES index of the best GPU (for launch scripts)."""
-    p = get_profile()
-    if p.best_gpu and p.best_gpu.hip_index >= 0:
-        return p.best_gpu.hip_index
-    return 0
