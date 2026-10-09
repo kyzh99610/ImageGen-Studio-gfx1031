@@ -353,6 +353,32 @@ def set_cool(factor) -> float:
     return COOL["factor"]
 
 
+# Power-limited hint (round 11). The raw sampling step of an SDXL pass per megapixel and image: ~2.0 s on the full-power charger (Turbo / Manual, base pass with PAG; hires 1.7),
+# 4.0 / 3.7 s on the USB-C charger (round 10). Above POWER["limit"] a pass says "this laptop looks power-limited"; it only ever HINTS, nothing changes by itself.
+POWER = {"limit": 3.0, "passes": []}
+
+
+def reset_power_samples() -> None:
+    POWER["passes"] = []
+
+
+def power_limited_seconds() -> float | None:
+    """The largest per-pass median of the raw step seconds (per megapixel and image) of the passes since reset_power_samples(), None when no pass had 4 timed steps."""
+    import statistics
+    meds = [statistics.median(p) for p in POWER["passes"] if len(p) >= 4]
+    return max(meds) if meds else None
+
+
+def power_hint_html() -> str:
+    """A result-line hint when the passes of this run were slow enough to be a power-limited charger while cool mode pauses: never changes a setting."""
+    s = power_limited_seconds()
+    if COOL["factor"] <= 0 or s is None or s < POWER["limit"]:
+        return ""
+    return ('<p style="color:#f9e2af;font-size:13px;margin:2px 0;">💡 This laptop looks power-limited (a sampling step took '
+            f'{s:.1f} s per megapixel; ~2 s on a full-power charger). Settings → Power profile → "Power-limited" measured safe '
+            'and about 1.9× faster on a USB-C charger — on a full-power charger keep Full power. Nothing was changed.</p>')
+
+
 _THERM_EVERY = 10.0     # seconds between thermal-zone reads inside a pass (a PDH read takes ~1 s)
 # (A pause that grows with the pass size — × megapixels / 1.05, 1–3 — was tried in round 6: the big hires pass lasted longer and plateaued
 # at 92–95 °C instead of cooling, so the pause is uniform; the helper was removed in round 9.)
@@ -365,6 +391,8 @@ def _cool_callback(orig):
     import time
     last = [time.perf_counter()]
     checked = [time.perf_counter()]
+    samples: list = []
+    POWER["passes"] = POWER["passes"][-63:] + [samples]
 
     def cb(pipe, i, t, kw):
         out = orig(pipe, i, t, kw) if orig is not None else kw
@@ -375,6 +403,13 @@ def _cool_callback(orig):
         except Exception:
             pass
         now = time.perf_counter()
+        try:
+            if i >= 1:                               # step 0 carries the prompt encode / kernel warm-up
+                lat = kw.get("latents")
+                b, h, w = int(lat.shape[0]), int(lat.shape[-2]), int(lat.shape[-1])
+                samples.append((now - last[0]) / (max(1, b) * h * w * 64 / 1e6))
+        except Exception:
+            pass
         pause = COOL["factor"] * (now - last[0])     # uniform: scaling by pass size was slower and not cooler (round 6)
         end = now + pause
         while pause > 0 and time.perf_counter() < end:

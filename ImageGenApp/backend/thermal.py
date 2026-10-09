@@ -27,6 +27,32 @@ def set_limit(v) -> float:
     return GUARD["limit"]
 
 
+# Power profiles (Settings → 🌡 Power profile, round 11): a named pair of the two sliders, so the user doesn't have to know the numbers.
+# "full" = the shipped default on a full-power charger (Turbo / Manual): cool 1.5 + pause above 88. "limited" = a power-limited charger (Windows scheme
+# "Performance" / USB-C): cool 0 + pause above 88 (round 10 on USB-C: a Polish Full-body picture 202 s instead of 388 s, no hotter; round 11 re-measured it on the full-power charger).
+PROFILES = {"full": (1.5, 88.0), "limited": (0.0, 88.0)}
+
+
+def profile_of(cool, limit) -> str:
+    """'full' / 'limited' when the two settings are exactly a profile's pair, else 'custom' (the sliders were moved)."""
+    try:
+        pair = (round(float(cool), 3), round(float(limit), 3))
+    except (TypeError, ValueError):
+        return "custom"
+    for name, (c, l) in PROFILES.items():
+        if pair == (c, l):
+            return name
+    return "custom"
+
+
+def set_profile(name, sampling) -> tuple[float, float] | None:
+    """Apply a profile to the live cool factor and pause limit; returns (cool, limit) or None for 'custom' / an unknown name (nothing changes)."""
+    if name not in PROFILES:
+        return None
+    c, l = PROFILES[name]
+    return sampling.set_cool(c), set_limit(l)
+
+
 def apply_saved(prefs: dict, sampling, environ=None) -> bool:
     """Start-up: the saved cool factor and pause limit (Settings). Not under the test suite (IMAGEGEN_TESTS=1): the suite must not depend on a user's
     saved choices — a pause limit makes every fake generate in it read the live sensor and wait while the laptop is hot. Returns whether they were applied."""

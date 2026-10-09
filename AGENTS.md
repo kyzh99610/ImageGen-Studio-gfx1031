@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 156-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 157-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 151 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 152 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -568,6 +568,15 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   cool 0 never reached 94 °C (median 90). Cool 1.0 was the worst of the three (more pause-while-hot waits). The charger's
   wattage can't be read from Windows; the measured step time can tell the two regimes apart. Nothing automatic yet.
 - 14 unused helpers removed.
+
+### Power profile (2026-10-08, evening)
+- **🌡 Settings → Power profile:** Full power (cool 1.5 + pause above 88 — the default) / Power-limited (cool 0 + pause above 88,
+  for a slow charger only: on a USB-C charger it measured 0 % of readings at or above 94 °C over 8 pictures and ~1.6× faster) /
+  Custom. On the full-power charger cool 0 failed (8 % of readings at or above 94 °C, max 95.9) — keep Full power there.
+- A result-line hint (advice only, never changes a setting) when the sampling steps look power-limited (≥ 3 s per megapixel
+  and image while cool mode is on; full power measures ~2).
+- A console audit of every tab (SD 1.5 and SDXL) found no app error. Star ratings for plain Generate batches were checked and
+  not built: they didn't separate the pictures that looked wrong by eye.
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
