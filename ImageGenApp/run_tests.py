@@ -2441,9 +2441,9 @@ def _():
         meta = read_image_metadata(f)
     assert meta["hand_detail"] == {"denoise": 0.45}, meta.get("hand_detail")
     ups = _app._plan_extra_updates(_app._restore_plan(meta))
-    assert ups[-4:-2] == [True, 0.45] and ups[8] is True, ups
+    assert ups[-5:-3] == [True, 0.45] and ups[8] is True, ups
     ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
-    assert ups0[-4] is False
+    assert ups0[-5] is False
 
 
 @test("Inpaint: NaN latents from an fp16 VAE encode (a NoobAI checkpoint's bf16-origin VAE) are retried once in fp32 and the need is remembered; NaN is never pasted")
@@ -2636,7 +2636,7 @@ def _():
         meta = read_image_metadata(f)
     assert meta["eye_detail"] == {"denoise": 0.3}, meta.get("eye_detail")
     ups = _app._plan_extra_updates(_app._restore_plan(meta))
-    assert ups[-2:] == [True, 0.3] and ups[-4:-2] == [True, 0.45], ups
+    assert ups[-3:-1] == [True, 0.3] and ups[-5:-3] == [True, 0.45] and ups[-1] is False, ups
     assert "eye detail" in _app._plan_summary(_app._restore_plan(meta))
 
 
@@ -3841,7 +3841,7 @@ class _BatchEnv:
     def run_xy(self, x_axis, x_vals):
         args = ["x.safetensors", "none", "none", 0.7, "none", 0.7, "none", 0.7, False, "1girl", "bad", "Euler a", 4, 6.0,
                 64, 64, 1, 5, None, 0.5, False, 1, -1, 0.0, False, 1.5, 0.45, 14, "Lanczos", False, 0.35, "auto", "",
-                0.0, False, 0.0, False, 0.35, False, 0.35, x_axis, x_vals, "none", ""]
+                0.0, False, 0.0, False, 0.35, False, 0.35, False, x_axis, x_vals, "none", ""]
         return self.xy(*args, progress=lambda *a, **k: None)
 
 
@@ -3954,7 +3954,12 @@ def _():
     assert by["no face"]["stars"] == 3 and by["no face"]["flags"] == ["no face found"]
     assert by["two faces"]["stars"] == 4 and by["two faces"]["flags"] == ["2 faces"]
     assert by["hands"]["stars"] == 4 and by["hands"]["flags"] == ["3 hands"]
-    assert by["noise"]["stars"] == 4 and by["noise"]["flags"] == ["colour noise"]
+    assert by["noise"] == {"stars": 5, "flags": [], "notes": [S.SPECK_NOTE]}, by["noise"]              # round 14: a note, never a star
+    assert by["wreck"]["notes"] == [S.SPECK_NOTE]
+    import app as _appn
+    assert _appn._speck_note([by["ok"], by["off"]]) == "" and "2 picture(s)" in _appn._speck_note([by["noise"], by["wreck"], by["ok"]]) and "no star was taken" in _appn._speck_note([by["noise"]])
+    badged = S.badge(im, by["noise"])
+    assert badged.size == im.size
     assert by["wreck"]["stars"] == 1 and "no face found" in by["wreck"]["flags"]
     # the probabilities come from the head crop (2.4 face widths); a tag WD14 doesn't know ("red hair bow") is never held against the picture
     heads = []
@@ -4216,6 +4221,74 @@ def _():
     assert _app._identity_margins(card, outs, 2, 11)[10] is None       # a picture beyond the outfit list (stopped batch padding) never crashes
 
 
+@test("Size preset shows the size now set (a matching preset, else W×H); the Generate row sits above the Wildcards accordion; the Power-profile hint is short")
+def _():
+    import app as _app
+    assert _app._size_preset_now({"width": 832, "height": 1216}) == "SDXL · 832×1216 portrait"
+    assert _app._size_preset_now({"width": 900, "height": 600}) == "900×600" and _app._parse_size_preset("900×600") == (900, 600)
+    assert _app._size_preset_now({}) == _app._size_preset_now({"width": _app.DEFAULT_WIDTH, "height": _app.DEFAULT_HEIGHT})
+    assert _app._size_preset_now({"width": "x", "height": None})                       # damaged session values never raise
+    src = open(_app.__file__, encoding="utf-8").read()
+    assert src.index('generate_btn = gr.Button("✨ Generate') < src.index('with gr.Accordion("🎲 Wildcards')
+    assert len(_app._POWER_INFO.split()) < 60, len(_app._POWER_INFO.split())
+
+
+@test("🔬 Max detail (round 14): the Polish entry, the control's plumbing (clean_extra, record, A1111 text, restore), the 2× pass doubles each picture and refuses over 64 MP")
+def _():
+    from PIL import Image
+    import app as _app
+    from backend import polish as P
+    from backend import records as R
+    from backend.png_info import read_png_info
+    r = P.recipe("Full body — max detail")
+    assert r["md_on"] is True and r["ed_on"] is True and r["hires_steps"] == 8 and r["hires_on"] and P.time_factor("Full body — max detail") > P.time_factor("Full body")
+    assert "Real-ESRGAN" in P.summary("Full body — max detail") and "md_on" not in P.recipe("Full body")
+    assert P.shot_type("1girl, full body, standing") == "Full body"                    # Auto never picks the max-detail entry
+    assert _app._clean_extra({"md_on": 1})["md_on"] is True and _app._clean_extra({})["md_on"] is False
+    # record -> restore plan -> control values; the A1111 text says it and PNG Info reads it back
+    rec = {"app": "ImageGen Studio", "format": 2, "mode": "txt2img", "prompt": "1girl", "steps": 12, "cfg_scale": 6.0, "seeds": [1], "scheduler": "DPM++ 2M AYS",
+           "width": 832, "height": 1216, "max_detail": {"scale": 2, "method": "Real-ESRGAN (ONNX)"}, "eye_detail": {"denoise": 0.4}}
+    import json as _j, tempfile
+    from pathlib import Path
+    from PIL.PngImagePlugin import PngInfo
+
+    def meta_of(**texts):
+        pi = PngInfo()
+        for k, v in texts.items():
+            pi.add_text(k, v)
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "m.png"
+            Image.new("RGB", (8, 8)).save(f, pnginfo=pi)
+            with Image.open(f) as im:
+                return read_png_info(im)
+    txt = _app._params_text(rec)
+    assert "Max detail: 2× Real-ESRGAN" in txt and "Eye detail: denoise 0.4" in txt, txt
+    m_rec = meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1")                       # the record (exact restore)
+    plan = _app._restore_plan(m_rec)
+    assert plan["max_detail"] and _app._plan_extra_updates(plan)[-1] is True and "max detail" in _app._plan_summary(plan), plan
+    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-1] is False
+    m_txt = meta_of(parameters="1girl\nSteps: 12, Seed: 1, Max detail: 2× Real-ESRGAN, Eye detail: denoise 0.4")   # the A1111 text alone
+    assert m_txt.get("max_detail") == {"scale": 2, "method": "Real-ESRGAN (ONNX)"}, m_txt
+    # the pass: twice the size per picture (the Real-ESRGAN call is replaced by a resize), the session is released, > 64 MP refused
+    _app_, dg, hires_pass = _app_closures()
+    gcl = dict(zip(dg.__code__.co_freevars, dg.__closure__))
+    md = gcl["_max_detail_pass"].cell_contents
+    calls = []
+    old = (_app._upscale_to, _app.upscaler.release)
+    try:
+        _app._upscale_to = lambda im, w, h, m: calls.append((w, h, m)) or im.resize((w, h))
+        _app.upscaler.release = lambda: calls.append("released")
+        out, note = md([Image.new("RGB", (64, 96)), Image.new("RGB", (64, 96))], lambda *a, **k: None)
+        assert [im.size for im in out] == [(128, 192)] * 2 and calls[:2] == [(128, 192, "Real-ESRGAN (ONNX)")] * 2 and calls[-1] == "released" and "2×" in note, (calls, note)
+        try:
+            md([Image.new("RGB", (6000, 6000))], lambda *a, **k: None)
+            assert False, "over 64 MP must be refused"
+        except RuntimeError as e:
+            assert "64 MP" in str(e)
+    finally:
+        _app._upscale_to, _app.upscaler.release = old
+
+
 @test("🧬 Learn her look: the card keeps the centroid learned from the pictures (refusals say why, CCIP is fetched on first use), the card summary shows it, the outfit batch rates with it")
 def _():
     import re as _re
@@ -4301,7 +4374,7 @@ def _():
         CC.CARDS_DIR = old
 
 
-@test("✨ Polish: every recipe survives _clean_extra, Auto reads the framing tags, the dropdown fills the 11 controls and nothing else")
+@test("✨ Polish: every recipe survives _clean_extra, Auto reads the framing tags, the dropdown fills the 12 controls and nothing else")
 def _():
     import app as _app
     from backend import polish as P
@@ -4323,12 +4396,12 @@ def _():
     by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
     on = by["on_polish"].fn
     n_out = len(by["on_polish"].outputs)
-    assert n_out == 12, n_out                                                           # 11 controls + the note
+    assert n_out == 13, n_out                                                           # 12 controls + the note
     noop = on("(off)", "full body")
     assert all(u == {"__type__": "update"} for u in noop[:-1]) and noop[-1] == "", noop
     ups = on("Full body", "")
     want = P.recipe("Full body")
-    keys = ["hires_on", "hires_scale", "hires_denoise", "hires_steps", "hires_upscaler", "fd_on", "fd_denoise", "hd_on", "hd_denoise", "ed_on", "ed_denoise"]
+    keys = ["hires_on", "hires_scale", "hires_denoise", "hires_steps", "hires_upscaler", "fd_on", "fd_denoise", "hd_on", "hd_denoise", "ed_on", "ed_denoise", "md_on"]
     assert [u.get("value") for u in ups[:-1]] == [want.get(k) for k in keys], ups
     assert "Full body" in ups[-1] and f"{P.time_factor('Full body'):g}×" in ups[-1], ups[-1]
     auto = on("Auto", "1girl, upper body, looking at viewer")

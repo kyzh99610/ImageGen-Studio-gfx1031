@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 158-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 160-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 153 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 155 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -596,6 +596,18 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
 - Outfit batch ⭐: the "not her?" flag needs a bigger margin (5 spreads) on outfits with a hat or a distinctive hairstyle —
   46 % of the character's own pictures in such outfits were flagged, 13 % now. The colour-noise check is the weakest one
   (it finds 4 of 10 garbled pictures and flags 13 of 37 clean ones) and is left as it is.
+
+### Max detail for full-body eyes, specks as a note (2026-10-09)
+- **✨ Polish → "Full body — max detail"** (and a 🔬 Max detail checkbox under the eye controls; trailing extra key
+  `md_on`): Real-ESRGAN 2× of the finished picture right before the eye pass, so a full-body picture ends at 2× size
+  (2496 × 3648 from 832 × 1216). Measured on two Illustrious checkpoints, 3 seeds each, against the plain Full body chain:
+  eye detail ×6.95 at the same display size, face sharpness ×1.71, identity unchanged, +49 % time; a Lanczos 2× gives only
+  ×2.1 and a 2× tiled SD detail pass was slower and softer. Eye quality on a full body is a pixel problem: the eye pass
+  can only draw what the picture has room for.
+- The outfit batch's colour-speck check is a note now, not a lost star (it caught 4 of 10 garbled pictures and flagged
+  lace and fur on clean ones).
+- UI: the Size preset shows the current size, the Generate row sits above Wildcards, a short intro line and Power-profile
+  hint; the Settings Guide's examples are SFW and point to the Help tab.
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the

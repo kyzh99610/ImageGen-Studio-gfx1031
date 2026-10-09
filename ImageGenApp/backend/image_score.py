@@ -6,9 +6,10 @@ Nothing is downloaded here: a check only runs when its model is already in the H
   * look      — WD14 on the *head crop* (in the whole 832×1216 picture a hair pin or the eyes are a few pixels): the hair /
                 eye colours the character card names (backend/identity_check) and its hair accessory ("butterfly hair
                 ornament": WD14 on the head crop separated pictures with and without the pin at AUC 0.99)
-  * artefacts — saturated colour specks in desaturated areas: the iridescent noise an unstable sampler leaves
+  * artefacts — saturated colour specks in desaturated areas (the iridescent noise an unstable sampler left before round 3): since round 14 a NOTE
+                ("colour specks — lace, fur or noise?"), never a star: it flagged 20 good pictures of 21 (white lace, fur) and sees 4 of 10 truly garbled ones
 
-A flag costs a star (no face at all: two); 5 stars = nothing found, 1 = several problems.
+A flag costs a star (no face at all: two); 5 stars = nothing found, 1 = several problems. A note (`notes`, only present when there is one) costs nothing.
 """
 from __future__ import annotations
 
@@ -22,7 +23,8 @@ from backend.prompt_tools import parse_tag, split_tags
 ACCESSORY_WORDS = ("hair ornament", "hairclip", "hair clip", "hairpin", "hair pin", "hair flower", "hair bow",
                    "hair ribbon", "hairband", "hair bell", "hair stick")
 ACCESSORY_THRESHOLD = 0.5          # WD14 probability on the head crop under which the pin counts as missing
-SPECK_LIMIT = 0.0005               # share of specks in the picture above which colour noise is reported
+SPECK_LIMIT = 0.0005               # share of specks in the picture above which the colour-specks note is written
+SPECK_NOTE = "colour specks — lace, fur or noise? look"
 HEAD_SCALE = 2.4                   # head crop = this many face widths
 
 
@@ -89,7 +91,7 @@ def available() -> dict:
 
 def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=None, speck_fn=colour_specks,
                  identity=None, feature_fn=None, pause=None, identity_z=None) -> list[dict]:
-    """Per image {'stars': 1..5, 'flags': ['no face found', 'grey hair 0.12', 'no butterfly hair ornament 0.31', …]}.
+    """Per image {'stars': 1..5, 'flags': ['no face found', 'grey hair 0.12', 'no butterfly hair ornament 0.31', …]} (+ 'notes': [SPECK_NOTE] when the specks check fired: no star).
     The detectors default to the app's own, used only for the checks `available()` reports; pass the *_fn arguments to
     replace them (tests). A check that can't run is simply skipped. `identity` = a card's identity (backend/identity_score):
     a face further from her references than her own pictures are (and at least 100 px wide) costs a star.
@@ -148,10 +150,10 @@ def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=No
             if res and res["flag"]:
                 stars -= 1
                 flags.append(f"not her? face {res['cos']:.2f} (her pictures {res['mean']:.2f})")
+        res_ = {"stars": max(1, stars), "flags": flags}
         if speck_fn and speck_fn(im) > SPECK_LIMIT:
-            stars -= 1
-            flags.append("colour noise")
-        out.append({"stars": max(1, stars), "flags": flags})
+            res_["notes"] = [SPECK_NOTE]
+        out.append(res_)
     return out
 
 
@@ -168,6 +170,7 @@ def badge(img: Image.Image, result: dict) -> Image.Image:
     colour = {5: (166, 227, 161), 4: (166, 227, 161), 3: (249, 226, 175)}.get(result["stars"], (243, 139, 168))
     d.rectangle((0, 0, size * 3, int(size * 1.4)), fill=(17, 17, 27))
     d.text((6, 2), f"{result['stars']}/5", fill=colour, font=font)
-    for i, f in enumerate(result["flags"][:4]):
-        d.text((6, int(size * 1.5) + i * (size // 2 + 6)), f[:40], fill=(17, 17, 27), font=small, stroke_width=2, stroke_fill=colour)
+    lines = [(f, colour) for f in result["flags"][:4]] + [(n, (186, 194, 222)) for n in result.get("notes", [])][:max(0, 5 - len(result["flags"][:4]))]
+    for i, (f, c) in enumerate(lines):
+        d.text((6, int(size * 1.5) + i * (size // 2 + 6)), f[:40], fill=(17, 17, 27), font=small, stroke_width=2, stroke_fill=c)
     return im
