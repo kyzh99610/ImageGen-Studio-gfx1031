@@ -876,6 +876,16 @@ _HAIR_COVER = re.compile(r"\b(hat|cap|bonnet|beret|veil|tiara|crown|headdress|he
                          r"hair bun|ponytail|twintails|braid|braids|hairband|mask on head)\b", re.I)
 
 
+def _identity_margins(card: dict, outfits, n_seeds: int, n: int) -> list:
+    """Per picture of an outfit batch (outfit-major: n_seeds pictures per outfit) the CCIP flag margin: identity_score.Z_FLAG_HAIR for an outfit with a hat /
+    hairstyle (CCIP reads those as part of the character: 46 % of her own pictures in such outfits fell below the normal margin, 13 % below this one),
+    None (the normal margin) for the others."""
+    from backend import identity_score as _ids
+    texts = card.get("outfits") or {}
+    return [(_ids.Z_FLAG_HAIR if _HAIR_COVER.search(texts.get(outfits[min(i // max(1, n_seeds), len(outfits) - 1)], "") or "") else None)
+            for i in range(n)] if outfits else [None] * n
+
+
 def _flag_text(card: dict, outfit: str, flags) -> str:
     """The ⭐ flags of one picture as the outfit batch message shows them. A "not her?" flag on an outfit whose text changes the hair or head
     (hat, ponytail, buns, veil …) says so: CCIP reads hair and headwear as part of the character — round 6 flagged 15 of the 33 outfits of the v3 card with
@@ -1059,31 +1069,34 @@ def _build_generate_tab():
                     apply_lora_btn  = gr.Button("➕ Apply Slot 1", size="sm")
                     remove_lora1_btn = gr.Button("✖ Remove Slot 1", size="sm")
 
-                lora_dd2 = gr.Dropdown(
-                    label="LoRA Slot 2 (Style / Effect)",
-                    choices=_lora_choices(_init_ckpt),
-                    value=_ls_lora(1, 0.7)[0],
-                    info="Style / lighting / concept LoRA — HOW the image looks.",
-                )
-                lora_info2 = gr.HTML("")
-                lora_weight2 = gr.Slider(0.1, 1.5, value=_ls_lora(1, 0.7)[1], step=0.05, label="Weight 2",
-                                         info="0.5–0.7 recommended · keep below the character LoRA's weight.")
-                with gr.Row():
-                    apply_lora_btn2  = gr.Button("➕ Apply Slot 2", size="sm")
-                    remove_lora2_btn = gr.Button("✖ Remove Slot 2", size="sm")
+                # slots 2–3 are for styles / extras: folded away unless the last session used one
+                with gr.Accordion("🎨 LoRA slots 2–3 — style / extra",
+                                  open=any(_ls_lora(i, 0.7)[0] != "none" for i in (1, 2))):
+                    lora_dd2 = gr.Dropdown(
+                        label="LoRA Slot 2 (Style / Effect)",
+                        choices=_lora_choices(_init_ckpt),
+                        value=_ls_lora(1, 0.7)[0],
+                        info="Style / lighting / concept LoRA — HOW the image looks.",
+                    )
+                    lora_info2 = gr.HTML("")
+                    lora_weight2 = gr.Slider(0.1, 1.5, value=_ls_lora(1, 0.7)[1], step=0.05, label="Weight 2",
+                                             info="0.5–0.7 recommended · keep below the character LoRA's weight.")
+                    with gr.Row():
+                        apply_lora_btn2  = gr.Button("➕ Apply Slot 2", size="sm")
+                        remove_lora2_btn = gr.Button("✖ Remove Slot 2", size="sm")
 
-                lora_dd3 = gr.Dropdown(
-                    label="LoRA Slot 3 (Extra / Accent)",
-                    choices=_lora_choices(_init_ckpt),
-                    value=_ls_lora(2, 0.7)[0],
-                    info="Secondary effect. With 3 LoRAs keep the weights' sum ≤ 2.0.",
-                )
-                lora_info3 = gr.HTML("")
-                lora_weight3 = gr.Slider(0.1, 1.5, value=_ls_lora(2, 0.7)[1], step=0.05, label="Weight 3",
-                                         info="0.3–0.5 recommended when all 3 slots are used.")
-                with gr.Row():
-                    apply_lora_btn3  = gr.Button("➕ Apply Slot 3", size="sm")
-                    remove_lora3_btn = gr.Button("✖ Remove Slot 3", size="sm")
+                    lora_dd3 = gr.Dropdown(
+                        label="LoRA Slot 3 (Extra / Accent)",
+                        choices=_lora_choices(_init_ckpt),
+                        value=_ls_lora(2, 0.7)[0],
+                        info="Secondary effect. With 3 LoRAs keep the weights' sum ≤ 2.0.",
+                    )
+                    lora_info3 = gr.HTML("")
+                    lora_weight3 = gr.Slider(0.1, 1.5, value=_ls_lora(2, 0.7)[1], step=0.05, label="Weight 3",
+                                             info="0.3–0.5 recommended when all 3 slots are used.")
+                    with gr.Row():
+                        apply_lora_btn3  = gr.Button("➕ Apply Slot 3", size="sm")
+                        remove_lora3_btn = gr.Button("✖ Remove Slot 3", size="sm")
 
                 remove_lora_btn = gr.Button("🗑 Clear All LoRAs", size="sm", variant="secondary")
                 active_loras_html = gr.HTML("")
@@ -1215,25 +1228,17 @@ def _build_generate_tab():
                             stop_btn     = gr.Button("⏹ Stop", variant="secondary", size="lg", scale=1)
                         gen_info     = gr.HTML("")
 
+                        scheduler_dd = gr.Dropdown(
+                            label="Sampler / Scheduler",
+                            choices=list(SCHEDULER_MAP.keys()),
+                            value=_ls.get("scheduler", "DPM++ 2M Karras"),
+                            info="DPM++ 2M Karras: all-rounder · DPM++ 2M AYS: same quality in 10–12 steps · PNDM / Heun: a little more grain on SDXL",
+                        )
                         with gr.Row():
-                            scheduler_dd = gr.Dropdown(
-                                label="Sampler / Scheduler",
-                                choices=list(SCHEDULER_MAP.keys()),
-                                value=_ls.get("scheduler", "DPM++ 2M Karras"),
-                                info="DPM++ 2M Karras: best all-rounder · DPM++ 2M AYS: similar quality in 10–12 steps · PNDM / Heun leave a little more grain on SDXL.",
-                            )
                             steps_sl    = gr.Slider(1, 150, value=_ls.get("steps", DEFAULT_STEPS), step=1,  label="Steps",
-                                                    info="25–35 is the sweet spot.")
+                                                    info="AYS: 10–12 · Karras / Euler: 20–30")
                             cfg_sl      = gr.Slider(1, 30,  value=_ls.get("cfg_scale", DEFAULT_CFG), step=0.5, label="CFG Scale",
-                                                    info="SD 1.5: 7–9 · Pony/IL: 5–7")
-
-                        with gr.Row():
-                            width_sl    = gr.Slider(256, 2048, value=_ls.get("width", DEFAULT_WIDTH), step=64, label="Width",
-                                                    info="Multiple of 64.")
-                            height_sl   = gr.Slider(256, 2048, value=_ls.get("height", DEFAULT_HEIGHT), step=64, label="Height",
-                                                    info="SD 1.5 ≈ 512 · SDXL ≈ 1024.")
-                            batch_sl    = gr.Slider(1, 8,     value=_ls.get("batch_size", 1), step=1, label="Batch Size",
-                                                    info="Each image gets its own seed.")
+                                                    info="Pony / IL: 5–7 · SD 1.5: 7–9")
 
                         with gr.Row():
                             size_preset_dd = gr.Dropdown(
@@ -1242,6 +1247,14 @@ def _build_generate_tab():
                             )
                             with gr.Column(scale=1, min_width=130):
                                 swap_size_btn = gr.Button("⇄ Swap W/H", size="sm")
+
+                        with gr.Row():
+                            width_sl    = gr.Slider(256, 2048, value=_ls.get("width", DEFAULT_WIDTH), step=64, label="Width",
+                                                    info="Multiple of 64.")
+                            height_sl   = gr.Slider(256, 2048, value=_ls.get("height", DEFAULT_HEIGHT), step=64, label="Height",
+                                                    info="SD 1.5 ≈ 512 · SDXL ≈ 1024.")
+                            batch_sl    = gr.Slider(1, 8,     value=_ls.get("batch_size", 1), step=1, label="Batch Size",
+                                                    info="Each image gets its own seed.")
 
                         with gr.Row():
                             seed_num    = gr.Number(value=-1, label="Seed (-1 = random)", precision=0, scale=3,
@@ -1254,13 +1267,6 @@ def _build_generate_tab():
                                 [1, 2], value=_ls.get("clip_skip") if _ls.get("clip_skip") in (1, 2) else 1,
                                 label="CLIP skip",
                                 info="2 = what most SD 1.5 anime checkpoints expect (A1111 “Clip skip: 2”). SDXL ignores it.")
-                        with gr.Accordion("🔀 Variations — small changes to an image you like", open=False):
-                            with gr.Row():
-                                var_seed_num = gr.Number(value=-1, precision=0, label="Variation seed (-1 = random)")
-                                var_strength_sl = gr.Slider(
-                                    0, 1, value=0, step=0.01, label="Variation strength",
-                                    info="0 = off · 0.05–0.1 = a close relative (pose and details shift, the character stays) · "
-                                         "0.25+ = mostly a new picture · 1 = the variation seed's own image. Keep the main seed fixed.")
                         from backend import polish as _polish
                         with gr.Row():
                             polish_dd = gr.Dropdown(
@@ -1275,30 +1281,32 @@ def _build_generate_tab():
                                 label="Enable hires fix", value=bool(_ls.get("hires_on", False)),
                                 info="Composes at the model's native size (no doubled bodies), upscales, then "
                                      "re-draws details at the big size. About 2–3× the time. txt2img only.")
+                            _hires_ups = ["Lanczos"] + [m for m in upscaler.available_methods() if m != "Lanczos"]
                             with gr.Row():
                                 hires_scale_sl = gr.Slider(1.1, 2.5, value=_ls.get("hires_scale", 1.5), step=0.05,
                                                            label="Upscale by", info="1.5× is the sweet spot on 12 GB.")
                                 hires_denoise_sl = gr.Slider(0.1, 0.8, value=_ls.get("hires_denoise", 0.45), step=0.05,
                                                              label="Hires denoise",
                                                              info="0.3 keeps it · 0.45 adds detail · 0.6+ changes it.")
+                            with gr.Row():
                                 hires_steps_sl = gr.Slider(4, 60, value=_ls.get("hires_steps", 15), step=1,
-                                                           label="Hires steps")
-                            _hires_ups = ["Lanczos"] + [m for m in upscaler.available_methods() if m != "Lanczos"]
-                            hires_up_dd = gr.Dropdown(
-                                _hires_ups, label="Hires upscaler",
-                                value=_ls.get("hires_upscaler") if _ls.get("hires_upscaler") in _hires_ups else "Lanczos",
-                                info="Lanczos is instant; Real-ESRGAN gives sharper line art (a few seconds more).")
+                                                           label="Hires steps",
+                                                           info="8 is enough for a full body · wide shots: 14")
+                                hires_up_dd = gr.Dropdown(
+                                    _hires_ups, label="Hires upscaler",
+                                    value=_ls.get("hires_upscaler") if _ls.get("hires_upscaler") in _hires_ups else "Lanczos",
+                                    info="Lanczos is instant; Real-ESRGAN gives sharper line art (a few seconds more).")
                         with gr.Accordion("✨ Face & hand detail — re-draw faces / hands at full resolution "
                                           "(ADetailer-style)", open=bool(_ls.get("fd_on") or _ls.get("hd_on") or _ls.get("ed_on"))):
                             fd_cb = gr.Checkbox(
                                 label="Enable face detail", value=bool(_ls.get("fd_on", False)),
-                                info="Finds faces and re-draws each one at the model's native size — small faces "
-                                     "in full-body or group shots get proper eyes and mouths. ~5–15 s per face.")
+                                info="Re-draws each face at the model's native size: small faces in full-body or group "
+                                     "shots get proper eyes and mouths · ~5–15 s per face")
                             with gr.Row():
                                 fd_denoise_sl = gr.Slider(0.1, 0.8, value=_ls.get("fd_denoise", 0.4), step=0.05,
                                                           label="Face denoise",
-                                                          info="For big faces (≥ ~150 px): 0.3 = touch-up · 0.4 = fix details. Small faces (≤ ~100 px: "
-                                                               "wide and full-body shots) are raised to 0.55, tiny ones (≤ ~60 px) to 0.65 automatically · 0.8 = can become a different face")
+                                                          info="0.3 = touch-up · 0.4 = fix details · 0.8 = a different face · small faces are raised "
+                                                               "automatically (≤ 100 px: 0.55, ≤ 60 px: 0.65)")
                                 fd_mode_rb = gr.Radio(["auto", "anime", "photo"],
                                                       value=_ls.get("fd_mode") if _ls.get("fd_mode") in
                                                       ("auto", "anime", "photo") else "auto",
@@ -1310,23 +1318,21 @@ def _build_generate_tab():
                             with gr.Row():
                                 hd_cb = gr.Checkbox(
                                     label="✋ Also re-draw hands", value=bool(_ls.get("hd_on", False)),
-                                    info="Finds hands (anime hand detector; gloves count) and re-draws each one at "
-                                         "native size, before the faces. Cleans up smudged fingers — it can't "
-                                         "reliably fix a wrong finger count. ~5–15 s per hand.")
+                                    info="Re-draws each hand at native size, before the faces · cleans up smudged fingers, "
+                                         "never fixes a finger count (use 🖐 in Inpaint) · ~5–15 s per hand")
                                 hd_denoise_sl = gr.Slider(0.1, 0.7, value=_ls.get("hd_denoise", 0.35), step=0.05,
                                                           label="Hand denoise",
-                                                          info="0.3–0.35 = touch-up · 0.45–0.55 = more hand-shaped, can invent things · it never fixes a finger "
-                                                               "count (a broken hand: another seed, or 🖌 Inpaint at ~0.8)")
+                                                          info="0.3–0.35 = touch-up · 0.45–0.55 = more hand-shaped, can invent things · "
+                                                               "a broken hand: another seed, or 🖐 Re-draw hand in Inpaint")
                             with gr.Row():
                                 ed_cb = gr.Checkbox(
                                     label="👁 Also re-draw eyes", value=bool(_ls.get("ed_on", False)),
-                                    info="Finds the eyes (anime eye detector) and re-draws both eyes of each face "
-                                         "at high resolution, after the face pass. The iris colour is kept to the "
-                                         "iris, so it can't tint bangs over the eye or the skin. ~5–25 s per face.")
+                                    info="Re-draws both eyes of each face after the face pass; the colour stays in the iris "
+                                         "(bangs and skin keep theirs) · ~5–25 s per face · skipped on Pony")
                                 ed_denoise_sl = gr.Slider(0.1, 0.6, value=_ls.get("ed_denoise", 0.4), step=0.05,
                                                           label="Eye denoise",
-                                                          info="0.25–0.3 = tidy up · 0.4 = more iris / pupil detail · 0.5+ redraws the "
-                                                               "eye (stray marks). Pupils need the pixels: hires / upscale first")
+                                                          info="0.25–0.3 = tidy up · 0.4 = more iris / pupil detail · 0.5+ = stray marks · "
+                                                               "pupils need the pixels: hires / upscale first")
                         with gr.Accordion("🎚 Quality boosters — PAG, FreeU, CFG rescale",
                                           open=bool(_ls.get("pag_scale") or _ls.get("freeu"))):
                             with gr.Row():
@@ -1340,6 +1346,13 @@ def _build_generate_tab():
                             freeu_cb = gr.Checkbox(label="FreeU", value=bool(_ls.get("freeu", False)),
                                                    info="Re-weights UNet features: more detail and contrast at no "
                                                         "cost; can over-saturate some anime models.")
+                        with gr.Accordion("🔀 Variations — small changes to an image you like", open=False):
+                            with gr.Row():
+                                var_seed_num = gr.Number(value=-1, precision=0, label="Variation seed (-1 = random)")
+                                var_strength_sl = gr.Slider(
+                                    0, 1, value=0, step=0.01, label="Variation strength",
+                                    info="0 = off · 0.05–0.1 = a close relative (pose and details shift, the character stays) · "
+                                         "0.25+ = mostly a new picture · 1 = the variation seed's own image. Keep the main seed fixed.")
                         last_seed_state = gr.State([])      # seed of each image in the gallery
                         selected_idx_state = gr.State(0)    # gallery image the user clicked
 
@@ -1383,8 +1396,8 @@ def _build_generate_tab():
                                 eraser=gr.Eraser(default_size=40))
                             with gr.Row():
                                 inp_denoise_sl = gr.Slider(0.1, 1.0, value=0.75, step=0.05, label="Inpaint denoise",
-                                                           info="0.5 = adjust (expression) · 0.8 = redraw · 1.0 = ignore what's there (swap a small object: 0.95 "
-                                                                "leaves its old shape showing as lace — 🦋 Swap below does it at 1.0). The Steps value runs at every denoise.")
+                                                           info="0.5 = adjust (expression) · 0.8 = redraw · 1.0 = ignore what's there · "
+                                                                "to swap an accessory use 🦋 Swap below (0.9–0.95 leaves the old shape as lace)")
                                 inp_pad_sl = gr.Slider(0, 256, value=48, step=8, label="Context padding (px)",
                                                        info="Surroundings the model sees around the painted area.")
                             gr.HTML('<p style="color:#a6adc8;font-size:13px;margin:2px 0;">Uses the prompt, '
@@ -1395,17 +1408,14 @@ def _build_generate_tab():
                             with gr.Row():
                                 inp_swap_txt = gr.Textbox(value="", label="🦋 Swap an accessory — what should be there instead?", scale=3,
                                                           placeholder="black butterfly hair ornament",
-                                                          info="Paint over the whole old accessory (what is outside the paint stays), type the new one: a hair ornament, earrings, a choker, a hat "
-                                                               "(paint the whole hat, its crown above the head too). One pass at denoise 1.0 with a hair-only prompt + this text — "
-                                                               "at 0.9–0.95 the old shape still shows through as lace. Not there? Try another seed.")
+                                                          info="Paint over the whole old accessory (a hat: its crown above the head too), type the new one: "
+                                                               "hair ornament, earrings, choker, hat · one pass at 1.0 · not there? another seed")
                                 inp_swap_btn = gr.Button("🦋 Swap", size="sm", scale=1)
                             with gr.Row():
                                 inp_hand_tries = gr.Slider(1, 8, value=4, step=1, label="🖐 Re-draw a hand — tries", scale=3,
-                                                           info="Paint over the broken hand (or paint nothing: the biggest detected hand is used). "
-                                                                "Each try re-draws it at 0.7 with a hand-only prompt and its own seed; pick the one you "
-                                                                "like. Measured on 11 broken hands: about every other try is a correct hand (4 tries: at least one in 10 of 11), "
-                                                                "a third are plausible but changed (another glove, prop or pose; heart hands come back holding a heart). "
-                                                                "Paint the hand only: next to a face the box can still draw a face.")
+                                                           info="Paint over the broken hand (nothing painted: the biggest detected hand) · each try has its own seed, "
+                                                                "pick the best · about every other try is a correct hand, 4 tries give one in 10 of 11 · "
+                                                                "a third come back changed (another glove or prop)")
                                 inp_hand_btn = gr.Button("🖐 Re-draw hand", size="sm", scale=1)
 
 
@@ -1494,7 +1504,7 @@ def _build_generate_tab():
         <tr style="background:#313244;"><td style="padding:4px 8px;">Style/Effect LoRA weight</td><td style="padding:4px 8px; text-align:center;"><b>0.40 – 0.65</b></td><td style="padding:4px 8px;">Keep LOWER than character to preserve likeness</td></tr>
         <tr><td style="padding:4px 8px;">CFG Scale (Pony/IL)</td><td style="padding:4px 8px; text-align:center;"><b>5.5 – 7.0</b></td><td style="padding:4px 8px;">Lower than SD 1.5. Over 8 = oversaturated</td></tr>
         <tr style="background:#313244;"><td style="padding:4px 8px;">CFG Scale (SD 1.5)</td><td style="padding:4px 8px; text-align:center;"><b>7.0 – 9.0</b></td><td style="padding:4px 8px;">SD 1.5 needs higher CFG than SDXL</td></tr>
-        <tr><td style="padding:4px 8px;">Steps</td><td style="padding:4px 8px; text-align:center;"><b>25 – 35</b></td><td style="padding:4px 8px;">More ≠ better. 35 is the sweet spot</td></tr>
+        <tr><td style="padding:4px 8px;">Steps</td><td style="padding:4px 8px; text-align:center;"><b>AYS 10–12 · Karras 20–30</b></td><td style="padding:4px 8px;">More ≠ better: AYS 12 matches 25 Karras steps</td></tr>
         <tr style="background:#313244;"><td style="padding:4px 8px;">Resolution (SDXL portrait)</td><td style="padding:4px 8px; text-align:center;"><b>832×1216</b></td><td style="padding:4px 8px;">Or 768×1344 for taller composition</td></tr>
         <tr style="background:#313244;"><td style="padding:4px 8px;">Sampler</td><td style="padding:4px 8px; text-align:center;"><b>DPM++ 2M Karras</b></td><td style="padding:4px 8px;">Euler a = more variety · DDIM = consistent img2img · UniPC = fewer steps</td></tr>
 <tr><td style="padding:4px 8px;">img2img denoise</td><td style="padding:4px 8px; text-align:center;"><b>0.4 – 0.6</b></td><td style="padding:4px 8px;">0.2–0.4 fixes details · 0.5–0.7 restyles · 0.8+ mostly regenerates</td></tr>
@@ -1619,7 +1629,7 @@ def _build_generate_tab():
                         smartsplit_banner = gr.HTML(_build_smartsplit_banner())
 
                     # ── Output column (next to the controls, no scrolling) ────
-                    with gr.Column(scale=4, min_width=360):
+                    with gr.Column(scale=4, min_width=360, elem_id="gen-output-col"):
                         output_gallery = gr.Gallery(
                             label="Output",
                             columns=3,
@@ -3856,7 +3866,8 @@ def _build_generate_tab():
             from backend import image_score as _is
             can = _is.available()
             if n_real and any(can.values()):
-                scored = _is.score_images(cells[:n_real], card.get("tags", ""), identity=card.get("identity"), pause=score_pause)
+                scored = _is.score_images(cells[:n_real], card.get("tags", ""), identity=card.get("identity"), pause=score_pause,
+                                          identity_z=_identity_margins(card, outfits, n_seeds, n_real))
                 sheet_cells = [_is.badge(c, r) for c, r in zip(cells, scored)]
                 looked = bool(can["look"] and _is.ic.traits(card.get("tags", "")))
                 from backend import identity_score as _ids
@@ -6867,6 +6878,11 @@ def build_app() -> gr.Blocks:
     .gr-panel { background: #1e1e2e !important; }
     .tab-nav button { color: #cdd6f4 !important; }
     .tab-nav button.selected { border-bottom: 2px solid #89b4fa !important; }
+
+    /* the output column stays in view while the long controls column scrolls */
+    /* (overflow: clip clips like hidden but isn't a scroll container, so sticky works against the page) */
+    .gradio-container { overflow: clip !important; }
+    #gen-output-col { position: sticky; top: 8px; align-self: flex-start; }
 
     /* ── Readability & accessibility ─────────────────────────────────────── */
     .gradio-container { font-size: 15px; }

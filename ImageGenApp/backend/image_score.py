@@ -88,11 +88,13 @@ def available() -> dict:
 
 
 def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=None, speck_fn=colour_specks,
-                 identity=None, feature_fn=None, pause=None) -> list[dict]:
+                 identity=None, feature_fn=None, pause=None, identity_z=None) -> list[dict]:
     """Per image {'stars': 1..5, 'flags': ['no face found', 'grey hair 0.12', 'no butterfly hair ornament 0.31', …]}.
     The detectors default to the app's own, used only for the checks `available()` reports; pass the *_fn arguments to
     replace them (tests). A check that can't run is simply skipped. `identity` = a card's identity (backend/identity_score):
     a face further from her references than her own pictures are (and at least 100 px wide) costs a star.
+    `identity_z` = per picture the number of spreads below her references' mean that flags it (None / missing = identity_score.Z_FLAG; the outfit
+    batch passes Z_FLAG_HAIR for outfits with a hat or hairstyle).
     `pause(k, n)` is called before picture k of n (the app's "pause while hot": scoring is CPU work, and on the laptop the
     CPU die is what the thermal zone follows)."""
     can = available() if not (probs_fn and faces_fn and hands_fn) else {"look": True, "faces": True, "hands": True}
@@ -141,7 +143,8 @@ def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=No
                     flags.append(f"no {key} {v:.2f}")
         if ident and faces:
             r = _ids().head_feature(im, box=faces[0], feature_fn=feature_fn, min_face_px=_ids().MIN_FACE_PX)      # a small face is not judged
-            res = _ids().check(ident, r[0], r[1]) if r is not None else None
+            zf = identity_z[k] if identity_z is not None and k < len(identity_z) and identity_z[k] else _ids().Z_FLAG
+            res = _ids().check(ident, r[0], r[1], z_flag=zf) if r is not None else None
             if res and res["flag"]:
                 stars -= 1
                 flags.append(f"not her? face {res['cos']:.2f} (her pictures {res['mean']:.2f})")

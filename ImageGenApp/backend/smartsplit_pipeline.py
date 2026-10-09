@@ -171,8 +171,8 @@ def detect_smartsplit_capability() -> SmartSplitCapability:
                 cap.npu_name = "AMD XDNA NPU (via bridge → Ryzen AI conda env)"
             else:
                 # Fall back to hardware_detector for info display
-                from backend.hardware_detector import _detect_npu
-                npu_info = _detect_npu()
+                from backend.hardware_detector import get_profile
+                npu_info = get_profile().npu      # the profile already ran _detect_npu (a PowerShell query, ~1 s)
                 if npu_info.available:
                     cap.npu_name = f"{npu_info.name} (bridge unavailable: {bridge_msg})"
                 elif npu_info.name != "Not detected":

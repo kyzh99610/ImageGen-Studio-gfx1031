@@ -4183,6 +4183,39 @@ def _():
     assert ID.check(tight, with_cos(0.95 - 1.5 * ID.SD_FLOOR), 130)["flag"] is False and ID.check(tight, with_cos(0.95 - 2.5 * ID.SD_FLOOR), 130)["flag"] is True
 
 
+@test("⭐ identity: outfits with a hat / hairstyle get the bigger margin (Z_FLAG_HAIR), the others keep the normal one; the batch maps outfits to pictures")
+def _():
+    import numpy as np
+    from PIL import Image
+    import app as _app
+    from backend import identity_score as ID
+    from backend import image_score as IS
+    rng = np.random.default_rng(5)
+    c = ID._unit(rng.normal(size=ID.DIM))
+    u = ID._unit(rng.normal(size=ID.DIM)); u = ID._unit(u - c * float(u @ c))
+    with_cos = lambda t: np.float32(c * t + u * np.sqrt(1 - t * t))
+    ident = {"model": ID.MODEL_TAG, "n": 8, "centroid": ID.encode_vec(c), "mean": 0.95, "sd": 0.025}
+    sd = ident["sd"]
+    box = [(100, 100, 230, 230)]
+    im = Image.new("RGB", (400, 400), (60, 60, 60))
+    feat = lambda t: (lambda cr: with_cos(t))
+    run = lambda t, z: IS.score_images([im], "1girl", probs_fn=lambda cr: {}, faces_fn=lambda i: box, hands_fn=lambda i: [], speck_fn=None,
+                                       identity=ident, feature_fn=feat(t), identity_z=z)[0]
+    mid = 0.95 - 3.5 * sd                                          # 3.5 spreads below her: flagged at 2, not at 5
+    assert run(mid, None)["stars"] == 4 and run(mid, [None])["stars"] == 4
+    assert run(mid, [ID.Z_FLAG_HAIR]) == {"stars": 5, "flags": []}
+    far = 0.95 - (ID.Z_FLAG_HAIR + 1.5) * sd
+    assert run(far, [ID.Z_FLAG_HAIR])["stars"] == 4 and run(far, [ID.Z_FLAG_HAIR])["flags"][0].startswith("not her?")
+    assert run(0.3, [ID.Z_FLAG_HAIR])["stars"] == 4                  # another girl is flagged at any margin
+    assert run(mid, [])["stars"] == 4                                  # a short list = the normal margin
+    card = {"outfits": {"school": "school uniform, pleated skirt", "hat": "straw hat, sundress", "tail": "ponytail, tank top", "beach": "bikini, sandals"}}
+    outs = ["school", "hat", "tail", "beach", "(no outfit tags)"]
+    z = _app._identity_margins(card, outs, 2, 10)
+    assert z == [None, None, ID.Z_FLAG_HAIR, ID.Z_FLAG_HAIR, ID.Z_FLAG_HAIR, ID.Z_FLAG_HAIR, None, None, None, None], z
+    assert _app._identity_margins(card, [], 2, 3) == [None, None, None] and _app._identity_margins({}, ["x"], 1, 2) == [None, None]
+    assert _app._identity_margins(card, outs, 2, 11)[10] is None       # a picture beyond the outfit list (stopped batch padding) never crashes
+
+
 @test("🧬 Learn her look: the card keeps the centroid learned from the pictures (refusals say why, CCIP is fetched on first use), the card summary shows it, the outfit batch rates with it")
 def _():
     import re as _re
