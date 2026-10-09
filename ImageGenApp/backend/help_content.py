@@ -351,10 +351,19 @@ def parameters_html() -> str:
              "works ~40 % of the time; same pictures, slower). Pause while hot waits before each picture and each hires / face / eye "
              "pass — and before the ⭐ rating of an outfit batch, which is CPU work and heats the same zone (checked again every 10 s "
              "of rating) — until the thermal zone is 8 °C under the limit you set (90 suits the RX 6800M laptop, which switched off after "
-             "minutes at 96 °C). Stop ends any wait. Both are off by default and saved for the next start.",
+             "minutes at 96 °C). Stop ends any wait. Both are off by default and saved for the next start. "
+             "Settings → Power profile sets the two at once: Full power (cool 1.5 + pause above 88 °C: no power-off in 22 h of labs, about 5 % of the readings at 94 °C or more) or "
+             "Power-limited, for a slow charger only — the Windows \"Performance\" scheme on a USB-C charger, where a sampling step takes ~4 s per megapixel instead of ~2: "
+             "there cool 0 + the pause above 88 did a ✨ Polish Full-body picture in 202 s instead of 388 s and 8 pictures back to back stayed under 94 °C. "
+             "On the full-power charger the same setting is not safe (8 % of the readings over 42 minutes at 94 °C or more, max 95.9, a 30 s run, the pause waiting 70 % of the time): keep Full power there. "
+             "Moving a slider switches the profile to Custom. When cool mode is on and a sampling pass is that slow, the result line adds a hint (it never changes a setting).",
              _cn("笔记本长时间满载会自动关机时使用。冷却模式在每个采样步之后暂停（1.5 = GPU 约 40% 时间工作，画面不变，速度变慢）；"
                  "过热暂停会在每张图、每个高清修复/脸/眼重绘以及套装批量的 ⭐ 评分（CPU 运算，同样会升温，评分期间每 10 秒再检查一次）之前等待，"
-                 "直到温度比设定值低 8 °C（RX 6800M 笔记本建议 90）。停止按钮可结束等待。默认关闭，设置会保存。")],
+                 "直到温度比设定值低 8 °C（RX 6800M 笔记本建议 90）。停止按钮可结束等待。默认关闭，设置会保存。"
+                 "设置 → Power profile 可一次设好两项：Full power（冷却 1.5 + 88 °C 以上暂停：22 小时实验中没有关机，约 5% 的读数 ≥ 94 °C）；"
+                 "Power-limited 仅适用于供电不足的充电器——Windows “Performance” 方案配 USB-C 充电器（每百万像素一个采样步约 4 秒，正常约 2 秒）：此时冷却 0 + 88 °C 以上暂停，✨ 精修全身图 202 秒（冷却 1.5 为 388 秒），连续 8 张都低于 94 °C。"
+                 "在满功率充电器上同样的设置不安全（42 分钟内 8% 的读数 ≥ 94 °C，最高 95.9，出现过 30 秒的连续高温，暂停占 70% 的时间），请保持 Full power。拖动任一滑块会切换为 Custom。"
+                 "冷却模式开启且采样明显偏慢时，结果栏会给出提示（不会自动更改任何设置）。")],
             ["✨ Polish (Generate tab)",
              "The dropdown above Hires fix — Portrait / Cowboy shot / Full body / Wide shot, or Auto (reads the framing tags in the prompt) — "
              "fills hires fix, face detail and eye detail with the recipe for that framing: eyes only for a portrait or cowboy shot (the face is "

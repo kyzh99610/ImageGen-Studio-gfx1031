@@ -2893,6 +2893,65 @@ def _():
 
 
 
+@test("🌡 Power profile (round 11): 'full' = cool 1.5 + pause 88 (the shipped default), 'limited' = cool 0 + pause 88, anything else 'custom'; the Settings radio sets and saves both; a slow SDXL pass only HINTS (cool on, ≥ 3 s per megapixel)")
+def _():
+    import time
+    import numpy as np
+    from backend import sampling as S, thermal as T
+    import app as _app
+    assert T.PROFILES == {"full": (1.5, 88.0), "limited": (0.0, 88.0)}
+    assert T.profile_of(1.5, 88) == "full" and T.profile_of(0, 88.0) == "limited" and T.profile_of(1.0, 88) == "custom" and T.profile_of(1.5, 0) == "custom" and T.profile_of("x", 1) == "custom"
+    old_c, old_l, old_save, old_pc = S.COOL["factor"], T.GUARD["limit"], _app._save_pref, S.POWER["passes"]
+    saved = {}
+    try:
+        T.set_limit(0); S.set_cool(0)
+        assert T.set_profile("custom", S) is None and S.COOL["factor"] == 0.0 and T.GUARD["limit"] == 0.0     # nothing changes for 'custom' / unknown
+        assert T.set_profile("full", S) == (1.5, 88.0) and S.COOL["factor"] == 1.5 and T.GUARD["limit"] == 88.0
+        assert T.set_profile("limited", S) == (0.0, 88.0) and S.COOL["factor"] == 0.0 and T.GUARD["limit"] == 88.0
+        # the Settings radio: both sliders move, both prefs are saved; the sliders' own handlers hand the radio back to 'custom' / a profile
+        _app._save_pref = lambda k, v: saved.__setitem__(k, v)
+        fns = {getattr(f.fn, "__name__", ""): f.fn for f in _app.build_app().fns}
+        res = fns["on_power_profile"](_app._POWER_LABELS["full"])
+        assert saved == {"cool": 1.5, "thermal_limit": 88.0} and res[1]["value"] == 1.5 and res[2]["value"] == 88.0 and "Full power" in res[0], (saved, res)
+        res = fns["on_power_profile"](_app._POWER_LABELS["limited"])
+        assert saved == {"cool": 0.0, "thermal_limit": 88.0} and res[1]["value"] == 0.0 and S.COOL["factor"] == 0.0
+        res = fns["on_power_profile"](_app._POWER_LABELS["custom"])
+        assert res[1] == {"__type__": "update"} or "value" not in res[1], res
+        assert saved["cool"] == 0.0                                                            # 'custom' saved nothing new
+        out = fns["on_cool"](1.0)
+        assert out[1]["value"] == _app._POWER_LABELS["custom"] and S.COOL["factor"] == 1.0
+        out = fns["on_cool"](1.5)
+        assert out[1]["value"] == _app._POWER_LABELS["full"]                                   # back on the pair: the radio says 'full' again
+        assert _app._power_choice()["value"] == _app._POWER_LABELS["full"]
+        # the hint: only while cool mode pauses, only from 3 s per megapixel and image, measured from step 1 on, never a setting change
+        clock = [0.0]
+        real_pc = time.perf_counter
+        time.perf_counter = lambda: clock[0]
+        try:
+            def slow(pipe, i, t, kw):
+                clock[0] += 4.0                    # a 4 s step on a ~1 MP latent: the USB-C regime of round 10
+                return kw
+            S.set_cool(0); S.reset_power_samples()
+            cb = S._cool_callback(slow)
+            lat = np.zeros((1, 4, 152, 104))
+            for i in range(6):
+                cb(None, i, 0, {"latents": lat})
+        finally:
+            time.perf_counter = real_pc
+        sec = S.power_limited_seconds()
+        assert sec is not None and 3.8 < sec < 4.1, sec
+        assert S.power_hint_html() == "" and S.COOL["factor"] == 0.0                           # cool 0: nothing to hint about
+        S.set_cool(1.5)
+        h = S.power_hint_html()
+        assert "power-limited" in h and "Power profile" in h and S.COOL["factor"] == 1.5 and T.GUARD["limit"] == 88.0, h
+        S.POWER["passes"] = [[1.9] * 8, [1.7] * 8, [9.0] * 3]                                   # a full-power machine; a pass under 4 timed steps counts for nothing
+        assert S.power_hint_html() == ""
+        S.reset_power_samples()
+        assert S.power_limited_seconds() is None and S.power_hint_html() == ""
+    finally:
+        S.COOL["factor"], T.GUARD["limit"], _app._save_pref, S.POWER["passes"] = old_c, old_l, old_save, old_pc
+
+
 @test("Start-up prefs: the saved cool factor and pause limit are applied except under the test suite (IMAGEGEN_TESTS=1), which must not depend on them")
 def _():
     from backend import thermal as T

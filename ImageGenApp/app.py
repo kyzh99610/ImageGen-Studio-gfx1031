@@ -1872,6 +1872,8 @@ def _build_generate_tab():
         #  here would discard a Stop pressed while the model was loading)
         if _generation_abort.is_set():
             return [], '<p style="color:#fab387;">⏹ Generation stopped.</p>', []
+        from backend.sampling import reset_power_samples
+        reset_power_samples()                          # the "looks power-limited" hint is about this picture's passes
         cool_wait = [_thermal_wait(progress)]          # Settings → 🌡 pause while hot (off unless set)
         if _generation_abort.is_set():
             return [], '<p style="color:#fab387;">⏹ Generation stopped.</p>', []
@@ -2102,6 +2104,11 @@ def _build_generate_tab():
                     )
             except Exception as e:
                 print(f"[VRAM] could not read memory stats: {e}")
+            try:
+                from backend.sampling import power_hint_html
+                info_html += power_hint_html()         # a hint only (cool mode on + slow steps): Settings → Power profile
+            except Exception as e:
+                print(f"[Power] hint failed: {e}")
             return imgs or [], info_html, imgs or []
 
         except _GenerationAborted:
@@ -6139,6 +6146,14 @@ def _build_settings_tab():
                     return f'<p style="color:#a6e3a1;font-size:13px;">✅ Eye style: {mode}</p>'
                 eye_rb.change(on_eye_style, [eye_rb], [eye_status])
                 from backend import sampling as _smp
+                from backend import thermal as _thm
+                gr.Markdown("### 🌡 Power profile")
+                power_rb = gr.Radio(
+                    list(_POWER_LABELS.values()),
+                    value=_POWER_LABELS[_thm.profile_of(_smp.COOL["factor"], _thm.GUARD["limit"])],
+                    label="How the laptop is powered (sets the two sliders below)",
+                    info=_POWER_INFO)
+                power_status = gr.HTML("")
                 gr.Markdown("### 🌡 Cool mode")
                 cool_sl = gr.Slider(0, 3, value=_smp.COOL["factor"], step=0.25,
                                     label="Pause after every sampling step (× the step's time)",
@@ -6152,9 +6167,8 @@ def _build_settings_tab():
                     f = _smp.set_cool(v)
                     _save_pref("cool", f)
                     return (f'<p style="color:#a6e3a1;font-size:13px;">✅ Cool mode: pause {f:g}× the step time</p>' if f
-                            else '<p style="color:#a6adc8;font-size:13px;">Cool mode off</p>')
-                cool_sl.release(on_cool, [cool_sl], [cool_status])
-                from backend import thermal as _thm
+                            else '<p style="color:#a6adc8;font-size:13px;">Cool mode off</p>'), _power_choice()
+                cool_sl.release(on_cool, [cool_sl], [cool_status, power_rb])
                 _t_now = _thm.read_temp()
                 therm_sl = gr.Slider(0, 96, value=_thm.GUARD["limit"], step=1,
                                      label="Pause while hotter than (°C) — 0 = off",
@@ -6169,8 +6183,21 @@ def _build_settings_tab():
                     f = _thm.set_limit(v)
                     _save_pref("thermal_limit", f)
                     return (f'<p style="color:#a6e3a1;font-size:13px;">✅ Pausing above {f:g} °C (resume at {f - 8:g} °C)</p>'
-                            if f else '<p style="color:#a6adc8;font-size:13px;">Pause while hot: off</p>')
-                therm_sl.release(on_therm, [therm_sl], [therm_status])
+                            if f else '<p style="color:#a6adc8;font-size:13px;">Pause while hot: off</p>'), _power_choice()
+                therm_sl.release(on_therm, [therm_sl], [therm_status, power_rb])
+
+                def on_power_profile(choice):
+                    name = next((k for k, v in _POWER_LABELS.items() if v == choice), "custom")
+                    got = _thm.set_profile(name, _smp)
+                    if got is None:                                          # "Custom": the sliders stay as they are
+                        return ('<p style="color:#a6adc8;font-size:13px;">Custom: set the two sliders below.</p>',
+                                gr.update(), gr.update())
+                    cool, limit = got
+                    _save_pref("cool", cool)
+                    _save_pref("thermal_limit", limit)
+                    return (f'<p style="color:#a6e3a1;font-size:13px;">✅ {html.escape(_POWER_LABELS[name])}: pause {cool:g}× the step time, '
+                            f'wait above {limit:g} °C (resume at {limit - 8:g} °C)</p>', gr.update(value=cool), gr.update(value=limit))
+                power_rb.input(on_power_profile, [power_rb], [power_status, cool_sl, therm_sl])
                 gr.Markdown("### 🖥 GPU")
 
                 # ── GPU picker ──────────────────────────────────────────────
@@ -6720,6 +6747,21 @@ def _save_pref(key: str, value) -> None:
         _PREFS_FILE.write_text(_json.dumps(prefs, indent=1), encoding="utf-8")
     except OSError as e:
         print(f"[Prefs] could not save {key}: {e}")
+
+
+_POWER_LABELS = {"full": "Full power (Turbo / Manual): cool 1.5 + pause above 88 °C",
+                 "limited": "Power-limited (Windows \"Performance\" scheme / USB-C charger): cool 0 + pause above 88 °C",
+                 "custom": "Custom (the two sliders below)"}
+_POWER_INFO = ("Full power = what the app ships: cool 1.5 + pause above 88 °C. Power-limited is for a SLOW charger only — the Windows \"Performance\" scheme on a USB-C charger "
+               "(a sampling step takes ~4 s per megapixel instead of ~2): cool 0 + pause above 88 did a ✨ Polish Full-body picture in 202 s instead of 388 s, and 8 pictures back to back "
+               "stayed under 94 °C. On the full-power charger it is NOT safe: 8 % of the readings over 42 minutes were at 94 °C or more (max 95.9), with a 30 s run, and the pause waited 70 % of the time: keep Full power there. "
+               "Custom = move the two sliders below. Saved for the next start.")
+
+
+def _power_choice():
+    """The Power-profile radio value for the live cool factor + pause limit (a gr.update for the Settings radio)."""
+    from backend import sampling, thermal
+    return gr.update(value=_POWER_LABELS[thermal.profile_of(sampling.COOL["factor"], thermal.GUARD["limit"])])
 
 
 _gen_record = _records.gen_record
