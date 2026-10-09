@@ -578,6 +578,15 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
 - A console audit of every tab (SD 1.5 and SDXL) found no app error. Star ratings for plain Generate batches were checked and
   not built: they didn't separate the pictures that looked wrong by eye.
 
+### Soak test, Settings module (2026-10-09)
+- A 97-minute soak of the real app on a laptop RX 6800M (Full power profile; 17 pictures of Polish / X/Y / outfit batches /
+  Auto-Loop, a Stop inside a hires pass, four checkpoint switches with LoRAs fused): no crash or error line, process memory
+  flat after a one-time +0.5 GB (the star rating keeps its CPU models loaded), no VRAM spill, no slowdown over time, the same
+  recipe made four times agrees to < 0.5/255, the stopped job kept its first-stage picture and the next job ran clean.
+- A best-try-first order for 🖐 Re-draw hand was tested on 384 rated tries and not built: no score (hand detector, WD14 tags
+  or features) predicted the correct hands well enough (best AUC ~0.6).
+- The Settings tab's preference block moved to `backend/ui_settings.py` (no behaviour change).
+
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
 auto-quality tags: each tag once (key = lower-case, `_`→space, weight syntax removed), strongest weight wins,
