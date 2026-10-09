@@ -375,14 +375,21 @@ def parameters_html() -> str:
              "Eye detail is skipped on Pony models (it blurs them). Measured (2 seeds each): at a cowboy shot "
              "(face 24–28 %) nothing in the chain changes identity — it is insurance; for a full body the plain face is often damaged and hires 1.5× + eyes "
              "fixes it best (identity score 0.937 → 0.967, the hair pin .42 → .90, face ×1.3 sharper) — the face pass on top of hires adds nothing. "
-             "Hands are left out: the hand pass cleans texture but never fixed a finger count. Change any control afterwards.",
+             "Hands are left out: the hand pass cleans texture but never fixed a finger count. Change any control afterwards. "
+             "<b>Full body — max detail</b> (round 14) is the Full body recipe plus 🔬 Max detail: a Real-ESRGAN 2× of the finished picture right before the eye pass, so a full-body face's eyes (~70 px) are drawn on twice the pixels; "
+             "the picture comes out 2496×3648 instead of 1248×1824. Measured on hassakuXL and waiIllustrious, 3 seeds each, at the same display size: eye detail ×7 (Laplacian energy of the eye boxes), face sharpness ×1.7, the whole picture's "
+             "line energy ×1.9 (crisper), identity unchanged (CCIP +0.004), +49 % time, VRAM peak 10.3 of 12 GB with no spill; a plain Lanczos 2× before the eye pass is free but gives only ×2, a 2× + tiled SD detail pass 0.3 was 2.7× the time and softer. "
+             "The checkbox is under the eye controls (Face & hand detail); the PNG is about 4× bigger (≈ 6 MB instead of 1.5 MB).",
              _cn("高清修复上方的下拉框：人像 / 牛仔镜头 / 全身 / 远景（或“自动”，读取提示词里的构图标签）按构图一键填好高清修复、脸部与眼部重绘："
                  "人像和牛仔镜头只重绘眼睛（脸宽 ≥ 约 24%，脸部重绘无效），全身 高清修复 1.5×+眼，远景 高清修复 1.5×+脸+眼；提示条显示约为普通出图的几倍时间（约 1.3× / 1.3× / 3.0× / 4.5×）。眼部重绘用 8 步（与 10 步相比，同一张图上没有差别），全身的高清修复用 8 步（与 14 步相比：身份不变，约省四分之一时间；"
                  "眼部细节在三个动漫模型上 ×0.82–0.98，肉眼看不出）。远景仍用 14 步高清修复：8 步时小脸的眼睛约软 25%（3 张图里有 2 张肉眼可见，身份不变）。"
                  "高清修复降噪 0.40 略差于 0.45，底图 10 步或关闭 PAG 并不是免费的（身份 −0.02 / 发饰 −0.09～−0.19）。"
                  "实测（各 2 个种子）：牛仔镜头（脸宽 24–28%）整条链几乎不改变相似度，只是保险；全身图的原始脸常有损坏，高清修复 1.5×+眼睛修得最好"
                  "（相似度 0.937→0.967，发饰 .42→.90，脸部清晰度 ×1.3），在其上再做脸部重绘没有额外收益。"
-                 "不含手部重绘（只改善纹理，不能修正手指数）。之后仍可调整任何控件。")],
+                 "不含手部重绘（只改善纹理，不能修正手指数）。之后仍可调整任何控件。"
+                 "“全身 — 最大细节”（第 14 轮）= 全身方案 + 🔬 最大细节：在眼部重绘之前把成图用 Real-ESRGAN 放大 2×，让全身脸的眼睛（约 70 像素）有两倍像素可画；图片变为 2496×3648（原 1248×1824）。"
+                 "实测（hassakuXL 与 waiIllustrious 各 3 个种子，相同显示尺寸）：眼部细节 ×7，脸部清晰度 ×1.7，整图线条能量 ×1.9（更利落），相似度不变（CCIP +0.004），耗时 +49%，显存峰值 10.3/12 GB 无溢出；"
+                 "仅用 Lanczos 2× 再重绘眼睛免费但只有 ×2，2× 加分块 SD 细节 0.3 慢 2.7 倍且更软。复选框在“脸与手细节”里眼部控件下方；PNG 约大 4 倍（约 6 MB，原 1.5 MB）。")],
             ["⚖️ Prompt weights & colour bleeding",
              "(tag:1.3) works like A1111 now (Settings → Prompt weights): the app used to apply weights 2–5× harder, so "
              "weighted background / lighting / colour tags flooded their colour onto the character. If a scene colour "
@@ -402,18 +409,18 @@ def parameters_html() -> str:
              "with the current settings, then a labelled contact sheet. Pairs already made with the same settings "
              "are skipped, so a stopped run resumes. Every picture gets a ⭐ rating (n/5) on the sheet from CPU checks "
              "whose models are already cached: one face / at most two hands, the card's hair and eye colours and its "
-             "hair pin on the head crop, colour noise — with the reasons for anything below 5. After “🧬 Learn her look” (3 or more "
+             "hair pin on the head crop — with the reasons for anything below 5. After “🧬 Learn her look” (3 or more "
              "pictures of her with a face ≥ 100 px — pose and lighting don't matter, but hair and headwear do: include the hats, ponytails and buns of the "
              "outfits you will judge; the first use downloads the 150 MB CCIP anime-character model) it also flags a face that is further from her than her own pictures are. Measured on 247 existing "
              "pictures: her own held-out pictures flagged ~3 %, a no-LoRA look-alike with her tags up to ~1 in 5, another character with her "
              "tags up to ~1 in 3 (tighter references catch more), another girl every time; faces under 100 px are not judged. A warning, not a verdict. With 12 plain daylight references 15 of the 33 outfits of the v3 card were flagged although every picture was her "
              "(a hat, ponytail or buns shifts CCIP's fingerprint; references that include such outfits flagged 11 %, and the message then says \"check by eye\"). "
              "Outfits with a hat or hairstyle are therefore flagged only when the face is far off (5 spreads below her references instead of 2: 46 % of her own pictures in such outfits "
-             "fell under the old margin, 13 % under the new one; another girl is still flagged every time). The colour-noise flag is the weakest check — white lace and fur set it off "
-             "on good pictures (20 of 21 such flags in a 130-picture check) and it sees only 4 of 10 truly garbled pictures: look at the picture.",
+             "fell under the old margin, 13 % under the new one; another girl is still flagged every time). The colour-specks check is only a note since round 14 (📝 \"colour specks — lace, fur or noise? look\", no star taken): white lace and fur set it off "
+             "on good pictures (20 of 21 such flags in a 130-picture check) and it sees only 4 of 10 truly garbled pictures, so look at the picture.",
              _cn("角色卡 →“生成所有服装”：每套服装 × N 个种子（种子相同便于对比），最后生成对比图；已生成的会跳过，可断点续跑。"
-                 "对比图上每张图有 ⭐ 评分（n/5）：一张脸/至多两只手、角色卡的发色瞳色与发饰、彩色噪点（仅用已缓存的模型在 CPU 上检查）。"
-                 "用“🧬 Learn her look”（3 张以上她的图，脸宽 ≥ 100 像素，姿势/光线不限，但发型和头饰有影响：请包含要检查的服装里的帽子、马尾、丸子头；首次使用会下载 150 MB 的 CCIP 动漫角色识别模型）学习后还会标出比她本人图更不像她的脸（247 张现有图实测：她自己的图误报约 3%，同标签无 LoRA 的相似脸最多约 1/5，同标签的其他角色最多约 1/3（参考图越相近检出越多），其他女孩 100%；小于 100 像素的脸不判断）。仅作提示，不是定论。参考图只有普通日光照时，v3 角色卡 33 套服装里有 15 套被标记（其实每张都是她）：帽子、马尾、丸子头会改变 CCIP 指纹；参考图包含这类服装后误报降到 11%，提示会写“请肉眼检查”。带帽子或特殊发型的服装现在只有在脸明显不像时才会标记（偏离参考图 5 个标准差，而不是 2 个：这类服装里她自己的图有 46% 低于旧阈值，13% 低于新阈值；其他女孩仍然每次都会标出）。彩色噪点是最不可靠的检查：白色蕾丝和毛皮会让好图误报（130 张图的检查里 20/21 个标记是误报），而且 10 张真正花掉的图只能发现 4 张，请亲眼确认。")],
+                 "对比图上每张图有 ⭐ 评分（n/5）：一张脸/至多两只手、角色卡的发色瞳色与发饰（仅用已缓存的模型在 CPU 上检查；彩色斑点只作备注，不扣星）。"
+                 "用“🧬 Learn her look”（3 张以上她的图，脸宽 ≥ 100 像素，姿势/光线不限，但发型和头饰有影响：请包含要检查的服装里的帽子、马尾、丸子头；首次使用会下载 150 MB 的 CCIP 动漫角色识别模型）学习后还会标出比她本人图更不像她的脸（247 张现有图实测：她自己的图误报约 3%，同标签无 LoRA 的相似脸最多约 1/5，同标签的其他角色最多约 1/3（参考图越相近检出越多），其他女孩 100%；小于 100 像素的脸不判断）。仅作提示，不是定论。参考图只有普通日光照时，v3 角色卡 33 套服装里有 15 套被标记（其实每张都是她）：帽子、马尾、丸子头会改变 CCIP 指纹；参考图包含这类服装后误报降到 11%，提示会写“请肉眼检查”。带帽子或特殊发型的服装现在只有在脸明显不像时才会标记（偏离参考图 5 个标准差，而不是 2 个：这类服装里她自己的图有 46% 低于旧阈值，13% 低于新阈值；其他女孩仍然每次都会标出）。彩色斑点检查现在只是备注，不再扣星（📝“colour specks”）：白色蕾丝和毛皮会让好图误报（130 张图的检查里 20/21 个标记是误报），而且 10 张真正花掉的图只能发现 4 张，请亲眼确认。")],
             ["🗂 History",
              "Search everything in outputs/ by prompt words, model, LoRA or seed; ⭐ favourites; open an image in PNG "
              "Info → Send to Generate to restore exactly how it was made.",

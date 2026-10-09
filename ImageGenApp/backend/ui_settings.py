@@ -12,10 +12,8 @@ import gradio as gr
 POWER_LABELS = {"full": "Full power (Turbo / Manual): cool 1.5 + pause above 88 °C",
                 "limited": "Power-limited (Windows \"Performance\" scheme / USB-C charger): cool 0 + pause above 88 °C",
                 "custom": "Custom (the two sliders below)"}
-POWER_INFO = ("Full power = what the app ships: cool 1.5 + pause above 88 °C. Power-limited is for a SLOW charger only — the Windows \"Performance\" scheme on a USB-C charger "
-              "(a sampling step takes ~4 s per megapixel instead of ~2): cool 0 + pause above 88 did a ✨ Polish Full-body picture in 202 s instead of 388 s, and 8 pictures back to back "
-              "stayed under 94 °C. On the full-power charger it is NOT safe: 8 % of the readings over 42 minutes were at 94 °C or more (max 95.9), with a 30 s run, and the pause waited 70 % of the time: keep Full power there. "
-              "Custom = move the two sliders below. Saved for the next start.")
+POWER_INFO = ("Full power = the shipped default (cool 1.5 + pause above 88 °C). Power-limited = cool 0 + pause 88, for a SLOW charger only (Windows \"Performance\" scheme on a USB-C charger); "
+              "on the full-power charger keep Full power. Custom = the two sliders below. The measurements are in Help → Cool mode. Saved for the next start.")
 
 
 def power_choice():

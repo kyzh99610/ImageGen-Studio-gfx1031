@@ -49,6 +49,7 @@ def clean_extra(extra: dict | None, available_methods) -> dict:
         "hd_denoise": min(0.7, max(0.1, num(e.get("hd_denoise"), 0.35))),
         "ed_on": bool(e.get("ed_on")),
         "ed_denoise": min(0.6, max(0.1, num(e.get("ed_denoise"), 0.4))),      # = detail_tools.EYE_DENOISE
+        "md_on": bool(e.get("md_on")),                                        # round 14: Real-ESRGAN 2x right before the eye pass
     }
 
 
@@ -152,6 +153,7 @@ def restore_plan(meta: dict, *, list_checkpoints, list_vaes, list_loras, schedul
     plan["face_detail"] = meta.get("face_detail") if isinstance(meta.get("face_detail"), dict) else None
     plan["hand_detail"] = meta.get("hand_detail") if isinstance(meta.get("hand_detail"), dict) else None
     plan["eye_detail"] = meta.get("eye_detail") if isinstance(meta.get("eye_detail"), dict) else None
+    plan["max_detail"] = meta.get("max_detail") if isinstance(meta.get("max_detail"), dict) else None
     plan["pag_scale"] = float(num(meta.get("pag_scale"), 0.0))
     plan["freeu"] = bool(meta.get("freeu"))
     plan["cfg_rescale"] = float(num(meta.get("cfg_rescale"), 0.0))
@@ -191,7 +193,8 @@ def plan_extra_updates(plan: dict, clean_extra, keep) -> list:
             *(lambda b: [b["pag_scale"], b["freeu"], b["cfg_rescale"]])(clean_extra(dict(
                 pag_scale=plan.get("pag_scale"), freeu=plan.get("freeu"), cfg_rescale=plan.get("cfg_rescale")))),
             bool(hd), hdx["hd_denoise"] if hd else keep,
-            bool(ed), edx["ed_denoise"] if ed else keep]
+            bool(ed), edx["ed_denoise"] if ed else keep,
+            bool(plan.get("max_detail"))]
 
 
 def gen_record(pipe, **settings) -> dict:
