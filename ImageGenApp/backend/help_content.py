@@ -379,7 +379,9 @@ def parameters_html() -> str:
              "<b>Full body — max detail</b> (round 14) is the Full body recipe plus 🔬 Max detail: a Real-ESRGAN 2× of the finished picture right before the eye pass, so a full-body face's eyes (~70 px) are drawn on twice the pixels; "
              "the picture comes out 2496×3648 instead of 1248×1824. Measured on hassakuXL and waiIllustrious, 3 seeds each, at the same display size: eye detail ×7 (Laplacian energy of the eye boxes), face sharpness ×1.7, the whole picture's "
              "line energy ×1.9 (crisper), identity unchanged (CCIP +0.004), +49 % time, VRAM peak 10.3 of 12 GB with no spill; a plain Lanczos 2× before the eye pass is free but gives only ×2, a 2× + tiled SD detail pass 0.3 was 2.7× the time and softer. "
-             "The checkbox is under the eye controls (Face & hand detail); the PNG is about 4× bigger (≈ 6 MB instead of 1.5 MB).",
+             "The checkbox is under the eye controls (Face & hand detail); the PNG is about 4× bigger (≈ 6 MB instead of 1.5 MB). "
+             "<b>Wide shot — max detail</b> (round 15) is the Wide shot chain plus the same 2× pass (3648×2496, ≈ 10 MB): a wide shot's eyes are ~20 px each, so the plain chain leaves them blurred. Measured on hassakuXL, "
+             "3 seeds, faces 107–129 px: eye detail ×8.5, face sharpness ×3, identity up (CCIP +0.02), the hair clip intact by eye, ×1.29 the time of the plain Wide shot.",
              _cn("高清修复上方的下拉框：人像 / 牛仔镜头 / 全身 / 远景（或“自动”，读取提示词里的构图标签）按构图一键填好高清修复、脸部与眼部重绘："
                  "人像和牛仔镜头只重绘眼睛（脸宽 ≥ 约 24%，脸部重绘无效），全身 高清修复 1.5×+眼，远景 高清修复 1.5×+脸+眼；提示条显示约为普通出图的几倍时间（约 1.3× / 1.3× / 3.0× / 4.5×）。眼部重绘用 8 步（与 10 步相比，同一张图上没有差别），全身的高清修复用 8 步（与 14 步相比：身份不变，约省四分之一时间；"
                  "眼部细节在三个动漫模型上 ×0.82–0.98，肉眼看不出）。远景仍用 14 步高清修复：8 步时小脸的眼睛约软 25%（3 张图里有 2 张肉眼可见，身份不变）。"
@@ -389,7 +391,9 @@ def parameters_html() -> str:
                  "不含手部重绘（只改善纹理，不能修正手指数）。之后仍可调整任何控件。"
                  "“全身 — 最大细节”（第 14 轮）= 全身方案 + 🔬 最大细节：在眼部重绘之前把成图用 Real-ESRGAN 放大 2×，让全身脸的眼睛（约 70 像素）有两倍像素可画；图片变为 2496×3648（原 1248×1824）。"
                  "实测（hassakuXL 与 waiIllustrious 各 3 个种子，相同显示尺寸）：眼部细节 ×7，脸部清晰度 ×1.7，整图线条能量 ×1.9（更利落），相似度不变（CCIP +0.004），耗时 +49%，显存峰值 10.3/12 GB 无溢出；"
-                 "仅用 Lanczos 2× 再重绘眼睛免费但只有 ×2，2× 加分块 SD 细节 0.3 慢 2.7 倍且更软。复选框在“脸与手细节”里眼部控件下方；PNG 约大 4 倍（约 6 MB，原 1.5 MB）。")],
+                 "仅用 Lanczos 2× 再重绘眼睛免费但只有 ×2，2× 加分块 SD 细节 0.3 慢 2.7 倍且更软。复选框在“脸与手细节”里眼部控件下方；PNG 约大 4 倍（约 6 MB，原 1.5 MB）。"
+                 "“远景 — 最大细节”（第 15 轮）= 远景方案 + 同样的 2× 步骤（3648×2496，约 10 MB）：远景里每只眼睛只有约 20 像素，普通方案会把眼睛留得很糊。"
+                 "实测（hassakuXL，3 个种子，脸宽 107–129 像素）：眼部细节 ×8.5，脸部清晰度 ×3，相似度提高（CCIP +0.02），发饰肉眼完好，耗时为普通远景的 1.29 倍。")],
             ["⚖️ Prompt weights & colour bleeding",
              "(tag:1.3) works like A1111 now (Settings → Prompt weights): the app used to apply weights 2–5× harder, so "
              "weighted background / lighting / colour tags flooded their colour onto the character. If a scene colour "
@@ -429,6 +433,21 @@ def parameters_html() -> str:
              "After upscaling, re-draws the image in native-size tiles at low denoise (0.25–0.35) with the loaded "
              "model — real detail beyond hires fix's 1536 / 2048 px limit. Higher denoise can put faces into tiles.",
              _cn("放大后用已加载模型分块低降噪重绘，超越高清修复的尺寸上限；降噪过高可能在分块里画出多余的脸。")],
+            ["🔬 Sharpen eyes (Upscale tab)",
+             "For a picture that already exists — made here (any time, also before round 14) or anywhere else: Real-ESRGAN 2× of the picture, then the eye pass on the 2× picture, "
+             "using the picture's own settings: its prompt, seed, sampler and eye style / denoise from the saved record, and — when they are installed — the checkpoint and LoRAs it was made with "
+             "(they are loaded for the job and stay loaded). If its checkpoint is not installed, or the picture has no record, the loaded model is used and the result says so (the eyes may look a little different). "
+             "Refused with a message, nothing saved: no face found, a 2× result over 64 MP, a picture that already is max detail, a Pony-family model (the eye pass softens it). "
+             "It lives on the Upscale tab rather than PNG Info because the result is an upscaled picture and that tab already carries the picture's record forward; PNG Info stays a viewer. "
+             "Measured on six full-body pictures of one character (hassakuXL ×5, waiIllustrious ×1; 4 from before the Max detail option): eye detail ×6.2 at the same display size, face sharpness ×1.9, "
+             "identity unchanged (CCIP +0.007), 1–2.5 min per picture on the full-power laptop (a checkpoint switch adds ~1 min). The result is saved next to the others with the record updated "
+             "(Max detail + Eye detail), so PNG Info → Send to Generate shows it.",
+             _cn("对已有图片（本应用生成的任何时候的图，或其他来源的图）：先用 Real-ESRGAN 放大 2×，再在放大后的图上做眼部重绘，使用图片自己的设置——保存的记录里的提示词、种子、采样器、眼部风格/降噪，"
+                 "以及（已安装时）生成它的底模与 LoRA（任务期间加载，之后保持加载）。底模未安装或图片没有记录时用当前已加载的模型并在结果里提示（眼睛可能略有不同）。"
+                 "以下情况会给出提示且不保存：没有找到人脸、2× 结果超过 64 MP、图片已是最大细节、Pony 系模型（眼部重绘会让它变软）。"
+                 "放在“放大”页而不是 PNG Info，因为结果是一张放大后的图，而该页本来就会沿用图片的记录；PNG Info 只负责查看。"
+                 "实测 6 张同一角色的全身图（hassakuXL ×5、waiIllustrious ×1；4 张来自最大细节选项之前）：眼部细节 ×6.2（相同显示尺寸），脸部清晰度 ×1.9，相似度不变（CCIP +0.007），"
+                 "满功率笔记本上每张 1–2.5 分钟（切换底模约多 1 分钟）。结果与其他图一起保存，记录已更新（最大细节 + 眼部重绘），可在 PNG Info → 发送到 Generate 里看到。")],
             ["🖌 Inpaint",
              "Paint over any area and describe what should be there; only that area is redrawn, at native "
              "resolution, with your model, LoRAs and seed. Good for small things — measured: to swap a hair "

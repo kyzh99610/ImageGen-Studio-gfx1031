@@ -4244,6 +4244,9 @@ def _():
     assert r["md_on"] is True and r["ed_on"] is True and r["hires_steps"] == 8 and r["hires_on"] and P.time_factor("Full body — max detail") > P.time_factor("Full body")
     assert "Real-ESRGAN" in P.summary("Full body — max detail") and "md_on" not in P.recipe("Full body")
     assert P.shot_type("1girl, full body, standing") == "Full body"                    # Auto never picks the max-detail entry
+    w = P.recipe("Wide shot — max detail")                                              # round 15: the Wide shot chain + the 2× pass, 14 hires steps kept
+    assert w["md_on"] and w["fd_on"] and w["ed_on"] and w["hires_steps"] == 14 and P.time_factor("Wide shot — max detail") > P.time_factor("Wide shot")
+    assert P.shot_type("1girl, very wide shot, from far away") == "Wide shot"
     assert _app._clean_extra({"md_on": 1})["md_on"] is True and _app._clean_extra({})["md_on"] is False
     # record -> restore plan -> control values; the A1111 text says it and PNG Info reads it back
     rec = {"app": "ImageGen Studio", "format": 2, "mode": "txt2img", "prompt": "1girl", "steps": 12, "cfg_scale": 6.0, "seeds": [1], "scheduler": "DPM++ 2M AYS",
@@ -4270,9 +4273,7 @@ def _():
     m_txt = meta_of(parameters="1girl\nSteps: 12, Seed: 1, Max detail: 2× Real-ESRGAN, Eye detail: denoise 0.4")   # the A1111 text alone
     assert m_txt.get("max_detail") == {"scale": 2, "method": "Real-ESRGAN (ONNX)"}, m_txt
     # the pass: twice the size per picture (the Real-ESRGAN call is replaced by a resize), the session is released, > 64 MP refused
-    _app_, dg, hires_pass = _app_closures()
-    gcl = dict(zip(dg.__code__.co_freevars, dg.__closure__))
-    md = gcl["_max_detail_pass"].cell_contents
+    md = _app._max_detail_pass                                                          # module level since round 15 (the Upscale tab's 🔬 Sharpen eyes reuses it)
     calls = []
     old = (_app._upscale_to, _app.upscaler.release)
     try:
@@ -4287,6 +4288,125 @@ def _():
             assert "64 MP" in str(e)
     finally:
         _app._upscale_to, _app.upscaler.release = old
+
+
+@test("🔬 Sharpen eyes (round 15): the picture's own record drives the 2× + eye pass; refuses no face / over 64 MP / already max detail / Pony / no model; Stop and 'no eyes' save nothing; the eye style is restored")
+def _():
+    import json, tempfile
+    from pathlib import Path
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    import app as _app
+    from backend import detail_tools as DT
+    from backend.png_info import read_png_info
+    tmp = Path(tempfile.mkdtemp(prefix="sharpen15_"))
+    ck = tmp / "own.safetensors"; ck.write_bytes(b"x")
+    rec = {"app": "ImageGen Studio", "format": 2, "mode": "txt2img", "prompt": "1girl, red eyes", "negative_prompt": "bad", "steps": 12, "cfg_scale": 6.0,
+           "seeds": [77], "scheduler": "DPM++ 2M AYS", "width": 64, "height": 96, "eye_detail": {"denoise": 0.3, "style": "natural"},
+           "model": {"file": "own.safetensors", "family": "illustrious"}, "loras": [{"file": "her.safetensors", "weight": 0.75}]}
+
+    def make(name, **over):
+        r = dict(rec, **over)
+        pi = PngInfo(); pi.add_text("parameters", "1girl, red eyes\nSteps: 12, Seed: 77"); pi.add_itxt("imagegen", json.dumps(r))
+        p = tmp / name
+        Image.new("RGB", (64, 96), (200, 200, 200)).save(p, pnginfo=pi)
+        im = Image.open(p); im.load()
+        return im
+
+    class FakeSD:
+        pipe, current_model, model_family = object(), "loaded.safetensors", "illustrious"
+    calls = {"faces": 0, "eye": [], "ensure": [], "loras": [], "style": []}
+
+    def fake_eye(sdp, im, prompt, neg, **kw):
+        calls["eye"].append((im.size, prompt, neg, kw["denoise"], kw["seed"], kw["steps"])); calls["style"].append(DT.EYE_STYLE["mode"])
+        if calls.get("raise"):
+            raise calls["raise"]
+        return im.copy(), calls.get("found", 1)
+
+    def fake_faces(im, mode="auto"):
+        calls["faces"] += 1
+        return [] if calls.get("noface") else [(10, 10, 40, 40)]
+    saved_attrs = {k: getattr(_app, k) for k in ("sd", "_GEN_HELPERS", "_upscale_to", "_thermal_wait", "_unique_output", "list_checkpoints", "list_loras", "list_vaes")}
+    saved_dt = {k: getattr(DT, k) for k in ("detect_faces", "eye_detail", "eye_detector_available")}
+    saved_style = DT.EYE_STYLE["mode"]
+    saved_rel = _app.upscaler.release
+    try:
+        _app.sd = FakeSD()
+        _app._GEN_HELPERS = {"ensure_model": lambda m, v, p: calls["ensure"].append(m) or (True, "ok"),
+                             "sync_loras": lambda slots, p: calls["loras"].append(slots) or ""}
+        _app._upscale_to = lambda im, w, h, m: im.resize((w, h))
+        _app._thermal_wait = lambda p=None: 0.0
+        _app._unique_output = lambda base: tmp / f"{base}.png"
+        _app.list_checkpoints = lambda: [("own.safetensors", str(ck))]
+        _app.list_loras = lambda: [("her.safetensors", str(tmp / "her.safetensors"))]
+        (tmp / "her.safetensors").write_bytes(b"x")
+        _app.list_vaes = lambda: []
+        _app.upscaler.release = lambda: None
+        DT.detect_faces, DT.eye_detail, DT.eye_detector_available = fake_faces, fake_eye, lambda: True
+        # a real gr.Progress raises IndexError from __len__ outside an event (the real-app run found `progress or …` dying on it)
+        import gradio as _gr
+        assert "Drop a picture" in _app._sharpen_eyes(None, _gr.Progress())[1]
+        # no picture / over 64 MP (the face detector must not even run) / no face
+        assert "Drop a picture" in _app._sharpen_eyes(None)[1]
+        out, msg = _app._sharpen_eyes(Image.new("RGB", (5000, 4000)))
+        assert out is None and "64 MP" in msg and calls["faces"] == 0, msg
+        calls["noface"] = True
+        out, msg = _app._sharpen_eyes(make("a.png"))
+        assert out is None and "no face found" in msg and not calls["eye"], msg
+        calls["noface"] = False
+        # the picture's own checkpoint + LoRAs are loaded; the record's prompt / seed / denoise / style drive the eye pass on the 2× picture; the result is saved with the record updated
+        out, msg = _app._sharpen_eyes(make("b.png"))
+        assert out is not None and out.size == (128, 192) and calls["ensure"] == [str(ck)] and calls["loras"] and "her" in msg, (msg, calls)
+        size, prompt, neg, den, seed, steps = calls["eye"][-1]
+        assert size == (128, 192) and prompt == "1girl, red eyes" and neg == "bad" and den == 0.3 and seed == 77 and steps == DT.detail_schedule_steps("eye", 12, 0.3), calls["eye"][-1]
+        assert calls["style"][-1] == "natural" and DT.EYE_STYLE["mode"] == saved_style                      # the record's style during the pass, the global restored after
+        saved = Path(out.info["saved_path"])
+        assert saved.is_file()
+        m = read_png_info(Image.open(saved))
+        assert m["max_detail"] == {"scale": 2, "method": "Real-ESRGAN (ONNX)"} and m["eye_detail"] == {"denoise": 0.3, "style": "natural"}, m
+        assert "Max detail: 2× Real-ESRGAN" in Image.open(saved).info["parameters"] and json.loads(Image.open(saved).info["imagegen"])["seeds"] == [77]
+        # already max detail
+        out, msg = _app._sharpen_eyes(make("c.png", max_detail={"scale": 2, "method": "Real-ESRGAN (ONNX)"}))
+        assert out is None and "already" in msg
+        # checkpoint not installed: the loaded model is used and the result says so; no record at all: same
+        n_eye = len(calls["eye"])
+        out, msg = _app._sharpen_eyes(make("d.png", model={"file": "gone.safetensors", "family": "illustrious"}, loras=[]))
+        assert out is not None and "isn't installed" in msg and "loaded" in msg and len(calls["eye"]) == n_eye + 1, msg
+        bare = Image.new("RGB", (64, 96)); bare.load()
+        out, msg = _app._sharpen_eyes(bare)
+        assert out is not None and "no generation record" in msg and calls["eye"][-1][1] == "1girl, solo, detailed eyes", msg
+        # no model at all / a Pony-family model
+        _app.sd = type("S", (), {"pipe": None, "current_model": "", "model_family": ""})()
+        out, msg = _app._sharpen_eyes(make("e.png", model={"file": "gone.safetensors"}))
+        assert out is None and "load a checkpoint" in msg, msg
+        _app.sd = type("S", (), {"pipe": object(), "current_model": "p.safetensors", "model_family": "pony"})()
+        out, msg = _app._sharpen_eyes(make("f.png", model={"file": "gone.safetensors"}))
+        assert out is None and "Pony" in msg, msg
+        # Stop / no eyes found / an error: nothing saved, the style restored
+        _app.sd = FakeSD()
+        before = sorted(p.name for p in tmp.glob("*_md.png")) + sorted(p.name for p in tmp.glob("sharpen_*.png"))
+        calls["raise"] = _app._GenerationAborted()
+        out, msg = _app._sharpen_eyes(make("g.png"))
+        assert out is None and "Stopped" in msg and DT.EYE_STYLE["mode"] == saved_style, msg
+        calls["raise"] = None; calls["found"] = 0
+        out, msg = _app._sharpen_eyes(make("h.png"))
+        assert out is None and "no eyes" in msg
+        calls["found"] = 1; calls["raise"] = RuntimeError("boom")
+        out, msg = _app._sharpen_eyes(make("i.png"))
+        assert out is None and "boom" in msg and DT.EYE_STYLE["mode"] == saved_style, msg
+        assert before == sorted(p.name for p in tmp.glob("*_md.png")) + sorted(p.name for p in tmp.glob("sharpen_*.png"))
+        calls["raise"] = None
+    finally:
+        for k, v in saved_attrs.items():
+            setattr(_app, k, v)
+        for k, v in saved_dt.items():
+            setattr(DT, k, v)
+        DT.EYE_STYLE["mode"] = saved_style
+        _app.upscaler.release = saved_rel
+    # the button and its handler exist on the Upscale tab, the handler is a GPU job, and no existing endpoint changed its arguments
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    assert "do_sharpen_eyes" in by and getattr(by["do_sharpen_eyes"].fn, "_gpu_job", False) and len(by["do_sharpen_eyes"].inputs) == 1 and len(by["do_sharpen_eyes"].outputs) == 2
+    assert len(by["do_upscale"].inputs) == 5 and len(by["do_upscale_folder"].inputs) == 3
 
 
 @test("🧬 Learn her look: the card keeps the centroid learned from the pictures (refusals say why, CCIP is fetched on first use), the card summary shows it, the outfit batch rates with it")
