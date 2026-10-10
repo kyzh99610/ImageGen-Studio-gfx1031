@@ -847,6 +847,160 @@ def _carry_params(src_img, note: str | None):
     return info
 
 
+def _max_detail_pass(imgs, progress):
+    """🔬 Max detail (round 14): Real-ESRGAN 2× of each finished picture, right before the eye pass — a full-body face is ~70 px of eye per 1248 px picture and the eye pass can only
+    draw what the pixels hold (eye detail ×7 at the same display size, +49 % time on the chain; Lanczos 2× alone gives ×2 for free)."""
+    t0 = time.time()
+    out = []
+    for i, im in enumerate(imgs):
+        if _generation_abort.is_set():
+            raise _GenerationAborted()
+        w, h = im.size
+        if w * 2 * h * 2 > 64_000_000:
+            raise RuntimeError(f"2× of {w}×{h} would be over 64 MP")
+        progress(0, desc=f"Max detail {i + 1}/{len(imgs)}: Real-ESRGAN {w}×{h} → {w * 2}×{h * 2}…")
+        out.append(_upscale_to(im, w * 2, h * 2, "Real-ESRGAN (ONNX)"))
+    upscaler.release()
+    w, h = imgs[0].size
+    return out, f'<br>🔬 Max detail: Real-ESRGAN 2× · {w}×{h} → {w * 2}×{h * 2} · {time.time() - t0:.1f}s'
+
+
+_GEN_HELPERS: dict = {}                   # the Generate tab registers its model helpers here (`ensure_model`, `sync_loras`: closures over its controls) for the Upscale tab's 🔬 Sharpen eyes
+_SHARPEN_MAX_PIXELS = 64_000_000          # the 2x result may not exceed this (the Upscale tab's limit: Pillow refuses to reopen more)
+
+
+def _sharpen_err(msg: str) -> str:
+    return f'<p style="color:#f38ba8;font-size:13px;">❌ {msg}</p>'
+
+
+def _sharpen_params(image, rec_updates: dict, note: str):
+    """PngInfo for a sharpened picture: the source's A1111 text (+ what was done) and its imagegen record with `rec_updates` merged in
+    (a picture without a record gets none: the note goes into its text)."""
+    import json as _j
+    from PIL.PngImagePlugin import PngInfo
+    info = PngInfo()
+    src = getattr(image, "info", None) or {}
+    params = src.get("parameters")
+    if isinstance(params, bytes):
+        params = params.decode("utf-8", "replace")
+    info.add_text("parameters", f"{params}\n{note}" if params else note)
+    rec = None
+    try:
+        rec = _j.loads(src["imagegen"]) if src.get("imagegen") else None
+    except Exception:
+        rec = None
+    if isinstance(rec, dict):
+        rec.update(rec_updates)
+        info.add_itxt("imagegen", _j.dumps(rec, ensure_ascii=False))
+    return info
+
+
+def _sharpen_eyes(image, progress=None):
+    """🔬 Sharpen eyes for an EXISTING picture (Upscale tab): Real-ESRGAN 2× (`_max_detail_pass`) + the eye pass on the 2× picture, with the picture's own record —
+    prompt, seed, sampler, eye style / denoise, and the checkpoint + LoRAs it was made with (loaded for the job when installed; otherwise the loaded model is used and the
+    result says so). Returns (the 2× picture or None, an html message). Refuses a picture whose 2× would be over 64 MP, one without a face, one that already is max detail,
+    a Pony-family model (the eye pass blurs it), and a run with no model at all."""
+    if progress is None:                      # (not `progress or …`: gr.Progress defines __len__, which raises outside a running event)
+        progress = lambda *a, **k: None
+    _generation_abort.clear()
+    if image is None or not hasattr(image, "size"):
+        return None, _sharpen_err("Drop a picture into the Input Image box first.")
+    w, h = image.size
+    if w * 2 * h * 2 > _SHARPEN_MAX_PIXELS:
+        return None, _sharpen_err(f"{w}×{h} at 2× would be {w * 2}×{h * 2} ({w * h * 4 / 1e6:.0f} MP) — over the 64 MP limit; use a smaller picture.")
+    rgb = image.convert("RGB")
+    from backend.detail_tools import (detect_faces, detail_schedule_steps, eye_detail, eye_detector_available, EYE_STYLE)
+    try:
+        faces = detect_faces(rgb, "anime")
+    except Exception as e:
+        return None, _sharpen_err(f"the face detector failed: {html.escape(str(e).splitlines()[0][:160] if str(e) else type(e).__name__)}")
+    if not faces:
+        return None, _sharpen_err("no face found in this picture — nothing to sharpen (the eye pass needs a face).")
+    try:
+        from backend.png_info import read_png_info
+        meta = read_png_info(image) if getattr(image, "info", None) else {}
+        plan = _restore_plan(meta) if meta else {}
+    except Exception:
+        plan = {}
+    if plan.get("max_detail"):
+        return None, _sharpen_err("this picture already is max detail (Real-ESRGAN 2× + eyes) — sharpening it again would only add noise.")
+    notes = []
+    want = plan.get("model")
+    if want and Path(str(want)).is_file():
+        ok, status = _GEN_HELPERS["ensure_model"](want, plan.get("vae") or "none", progress)
+        if not ok:
+            return None, _sharpen_err(f"could not load the picture's checkpoint: {html.escape(str(status)[:200])}")
+        if plan.get("loras") is not None:
+            slots = (list(plan["loras"]) + [("none", None)] * 3)[:3]
+            err = _GEN_HELPERS["sync_loras"]([(p, (0.8 if wt is None else wt)) for p, wt in slots], progress)
+            if err:
+                return None, _sharpen_err(f"LoRA problem: {html.escape(str(err)[:200])}")
+        notes.append(f"made with {html.escape(Path(str(want)).stem)}" + (" + " + ", ".join(html.escape(Path(str(p)).stem) for p, _ in plan["loras"]) if plan.get("loras") else ""))
+    elif getattr(sd, "pipe", None) is None:
+        return None, _sharpen_err("no model is loaded and this picture's own checkpoint isn't installed — load a checkpoint on the Generate tab first.")
+    else:
+        which = Path(str(sd.current_model)).stem
+        why = "the picture's checkpoint isn't installed" if plan.get("prompt") else "the picture has no generation record"
+        notes.append(f'<span style="color:#f9e2af;">⚠ {why} — used the loaded model ({html.escape(which)}); eyes may look a little different</span>')
+    if _eye_pass_skipped(sd):
+        return None, _sharpen_err("the eye pass is skipped on Pony-family checkpoints (it blurs them) — nothing to do with this model.")
+    if not eye_detector_available():
+        return None, _sharpen_err("the eye detector couldn't be loaded (it is retried in 5 minutes).")
+    prompt = plan.get("prompt") or "1girl, solo, detailed eyes"
+    neg = plan.get("negative_prompt") or ""
+    seed = int(_num(plan.get("seed"), 0)) % 2**32
+    cfg = float(_num(plan.get("cfg_scale"), 6.0))
+    steps = int(_num(plan.get("steps"), 12))
+    sched = plan.get("scheduler") if plan.get("scheduler") in SCHEDULER_MAP else "DPM++ 2M"
+    clip_skip = 2 if int(_num(plan.get("clip_skip"), 1)) >= 2 else 1
+    ed = plan.get("eye_detail") or {}
+    den = min(0.6, max(0.1, float(_num(ed.get("denoise"), 0.4))))
+    style = ed.get("style") if ed.get("style") in ("round", "natural") else EYE_STYLE["mode"]
+    t0 = time.time()
+    old_style = EYE_STYLE["mode"]
+    try:
+        (big,), md_note = _max_detail_pass([rgb], progress)
+        _thermal_wait(progress)
+        if _generation_abort.is_set():
+            raise _GenerationAborted()
+
+        def cb(step, total):
+            if _generation_abort.is_set():
+                raise _GenerationAborted()
+            progress(step / total, desc=f"Eye pass on the 2× picture: step {step}/{total}")
+        EYE_STYLE["mode"] = style
+        out, found = eye_detail(sd, big, prompt, neg, denoise=den, steps=detail_schedule_steps("eye", steps, den), cfg=cfg, seed=seed,
+                                scheduler=sched, clip_skip=clip_skip, step_callback=cb)
+    except _GenerationAborted:
+        return None, '<p style="color:#fab387;font-size:13px;">⏹ Stopped — nothing was saved.</p>'
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        if "out of memory" in str(e).lower():
+            import gc
+            gc.collect()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            return None, _sharpen_err("out of GPU memory — try a smaller picture.")
+        return None, _sharpen_err(f"sharpening failed: {html.escape(str(e).splitlines()[0][:200] if str(e) else type(e).__name__)}")
+    finally:
+        EYE_STYLE["mode"] = old_style
+    if not found:
+        return None, _sharpen_err("the eye detector found no eyes on the 2× picture — nothing was saved.")
+    rec_up = {"max_detail": {"scale": 2, "method": "Real-ESRGAN (ONNX)"}, "eye_detail": {"denoise": den, **({"style": "natural"} if style == "natural" else {})}}
+    meta_out = _sharpen_params(image, rec_up, f"Max detail: 2× Real-ESRGAN, Eye detail: denoise {den:g}" + (", Eye style: natural" if style == "natural" else ""))
+    src = (getattr(image, "info", None) or {}).get("saved_path")
+    path = _unique_output(f"{Path(src).stem}_md" if src else f"sharpen_{int(time.time())}")
+    out.save(path, pnginfo=meta_out)
+    out.info["saved_path"] = str(path)
+    msg = (f'<p style="color:#a6adc8;font-size:13px;">🔬 Sharpened: {w}×{h} → {out.width}×{out.height} · {found} eye(s) re-drawn (denoise {den:g}'
+           f'{", natural style" if style == "natural" else ""}) · {time.time() - t0:.0f}s<br>{" · ".join(notes)}<br>Saved: outputs/{path.name}</p>')
+    return out, msg
+
+
 def _thermal_wait(progress=None) -> float:
     """Settings → 🌡 pause while hot: wait until the laptop is cooler before a picture or a post pass (Stop ends the wait).
     Returns the seconds waited."""
@@ -1593,7 +1747,7 @@ def _build_generate_tab():
                             with gr.Row():
                                 user_preset_name = gr.Textbox(
                                     label="Preset name",
-                                    placeholder="e.g. Cozy cafe",
+                                    placeholder="e.g. cafe scene, white dress",
                                     scale=3,
                                 )
                                 user_save_btn = gr.Button("💾 Save Prompt", size="sm", scale=1)
@@ -1853,23 +2007,6 @@ def _build_generate_tab():
             note += (f'<br><span style="color:#f38ba8;">{icon} {label} detail failed on {len(errors)} image(s): '
                      f'{html.escape(errors[0])}</span>')
         return out, note
-
-    def _max_detail_pass(imgs, progress):
-        """🔬 Max detail (round 14): Real-ESRGAN 2× of each finished picture, right before the eye pass — a full-body face is ~70 px of eye per 1248 px picture and the eye pass can only
-        draw what the pixels hold (eye detail ×7 at the same display size, +49 % time on the chain; Lanczos 2× alone gives ×2 for free)."""
-        t0 = time.time()
-        out = []
-        for i, im in enumerate(imgs):
-            if _generation_abort.is_set():
-                raise _GenerationAborted()
-            w, h = im.size
-            if w * 2 * h * 2 > 64_000_000:
-                raise RuntimeError(f"2× of {w}×{h} would be over 64 MP")
-            progress(0, desc=f"Max detail {i + 1}/{len(imgs)}: Real-ESRGAN {w}×{h} → {w * 2}×{h * 2}…")
-            out.append(_upscale_to(im, w * 2, h * 2, "Real-ESRGAN (ONNX)"))
-        upscaler.release()
-        w, h = imgs[0].size
-        return out, f'<br>🔬 Max detail: Real-ESRGAN 2× · {w}×{h} → {w * 2}×{h * 2} · {time.time() - t0:.1f}s'
 
     def _hires_pass(imgs, seeds, prompt, neg_prompt, cfg, scheduler, ex, progress):
         """Hires fix: upscale each first-pass image and re-draw it with img2img at that size
@@ -3989,6 +4126,7 @@ def _build_generate_tab():
         "gal_send_up_btn": gal_send_up_btn,
         "gal_status": gal_status,
     }
+    _GEN_HELPERS.update(ensure_model=_ensure_model, sync_loras=_sync_loras)
     return model_dd, lora_dd, vae_dd, gen_controls
 
 
@@ -4390,6 +4528,7 @@ def _build_upscale_tab():
                     up_sd_den = gr.Slider(0.15, 0.5, value=0.3, step=0.05, label="Detail denoise", scale=1,
                                           info="0.25 subtle · 0.35 more detail · higher can put faces into tiles")
                 upscale_btn = gr.Button("🔍 Upscale", variant="primary")
+                sharpen_btn = gr.Button("🔬 Sharpen eyes — Real-ESRGAN 2× + eye pass (uses the picture's own settings)", variant="secondary")
                 up_info     = gr.HTML("")
                 with gr.Accordion("📁 Batch — upscale a whole folder", open=False):
                     up_folder = gr.Textbox(label="Folder with images",
@@ -4473,6 +4612,13 @@ def _build_upscale_tab():
                      f'Saved: outputs/{path.name}</p>')
 
     upscale_btn.click(do_upscale, [up_input, up_scale, up_method, up_sd_cb, up_sd_den], [up_output, up_info])
+
+    @gpu_job
+    def do_sharpen_eyes(image, progress=gr.Progress()):
+        """🔬 Sharpen eyes of an existing picture (round 15): Real-ESRGAN 2× + the eye pass, with the picture's own record (see _sharpen_eyes)."""
+        return _sharpen_eyes(image, progress)
+
+    sharpen_btn.click(do_sharpen_eyes, [up_input], [up_output, up_info])
 
     def do_upscale_folder(folder, scale, method, progress=gr.Progress()):
         from PIL import Image as _Image

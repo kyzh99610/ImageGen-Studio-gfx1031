@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-SHOTS = ("Portrait", "Cowboy shot", "Full body", "Wide shot", "Full body — max detail")
+SHOTS = ("Portrait", "Cowboy shot", "Full body", "Wide shot", "Full body — max detail", "Wide shot — max detail")
 
 # extra-settings keys of app._clean_extra that a recipe may set; anything not listed is left as the user has it
 _KEYS = ("hires_on", "hires_scale", "hires_denoise", "hires_steps", "hires_upscaler", "fd_on", "fd_denoise", "hd_on", "hd_denoise",
@@ -41,13 +41,18 @@ RECIPES: dict[str, dict] = {
     # high-frequency energy x1.9 (crisper linework); +49 % time. Lanczos 2x + the eye pass is free (x0.99 time) but only x2 eye energy; 2x + tiled SD detail 0.3 was slower (x2.7) and softer.
     "Full body — max detail": dict(hires_on=True, hires_scale=1.5, hires_denoise=0.45, hires_steps=8, hires_upscaler="Lanczos",
                                    fd_on=False, hd_on=False, ed_on=True, ed_denoise=0.4, md_on=True),
+    # round 15 (hassakuXL, 3 seeds, 1216x832, faces 107-129 px): the Wide shot chain + Real-ESRGAN 2x before the eye pass (3648x2496): eye detail at the same display size x8.5 (Laplacian energy
+    # at 144 px: 3.9 -> 33.7), face sharpness x3.0, CCIP +0.020 (z +1.0), red eyes +0.032, WD14 pin -0.05 (the clip is intact by eye), whole-picture line energy x1.7; x1.29 time (USB-C regime:
+    # the 2x stage 63-94 s, the eye pass 18-31 s). The plain Wide shot's eyes are ~20 px each: the cleanup pass has nothing to draw on; by eye A is blurred, W crisp.
+    "Wide shot — max detail": dict(hires_on=True, hires_scale=1.5, hires_denoise=0.45, hires_steps=14, hires_upscaler="Lanczos",
+                                   fd_on=True, fd_denoise=0.35, hd_on=False, ed_on=True, ed_denoise=0.4, md_on=True),
 }
 
 # time of the whole recipe relative to the plain picture (RX 6800M, SDXL 832x1216, AYS 12 + PAG 2 ~30 s): the measured pieces added up —
 # hires 1.5x ~80 s at 14 steps (round 8: 8 steps give the same picture, ~46 s), face pass ~20 s, eye pass ~13 s at 10 steps (8 steps ~10 s) (laptop heat-soaked: a cool one is faster).
 # Round 8, stage seconds under cool 1.5 (Turbo, 1 plain base = 60 s): the Full body chain 222 s with 14 + 10 steps, 168 s with hires 8 (0.76x), 165 s with hires 10 + eyes 8.
 # Round 9 (Manual / AC, cool 1.5), whole chain / the plain base of the same seed: Full body 8 + 8 steps 2.7x (hassakuXL's round-8 chain 2.8x), 14 + 10 steps 3.8x; Wide shot 8 + 8 3.25-3.57x, 14 hires + 8 eye steps 4.1-4.6x (mean 4.35).
-TIME_FACTOR = {"Portrait": 1.3, "Cowboy shot": 1.3, "Full body": 3.0, "Wide shot": 4.5, "Full body — max detail": 4.5}
+TIME_FACTOR = {"Portrait": 1.3, "Cowboy shot": 1.3, "Full body": 3.0, "Wide shot": 4.5, "Full body — max detail": 4.5, "Wide shot — max detail": 5.8}
 
 # framing tags, widest first (a prompt with several takes the widest); no tag at all → the middle recipe
 _FRAMES = (

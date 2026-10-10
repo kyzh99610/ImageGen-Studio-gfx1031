@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 160-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 161-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 155 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 156 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -608,6 +608,16 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   lace and fur on clean ones).
 - UI: the Size preset shows the current size, the Generate row sits above Wildcards, a short intro line and Power-profile
   hint; the Settings Guide's examples are SFW and point to the Help tab.
+
+### Sharpen eyes for existing pictures, Wide shot max detail (2026-10-09)
+- **🔬 Sharpen eyes** (Upscale tab; a new endpoint, existing ones unchanged): Real-ESRGAN 2× + the eye pass for a
+  picture you already have, using its own record (checkpoint and LoRAs when installed — otherwise the loaded model with a
+  warning —, prompt, seed, eye style); saved with the source's parameters plus `max_detail` / `eye_detail`. Refuses
+  pictures over 64 MP and pictures with no face. On six existing full-body pictures: eye detail ×6.2 at the same display
+  size, identity unchanged.
+- **✨ Polish → "Wide shot — max detail"**: the Wide chain + Real-ESRGAN 2× before the eye pass — eye detail ×8.5, face
+  sharpness ×3, ×1.29 time.
+- Max detail on a full-power laptop RX 6800M: a Full body picture 175 s → 282 s (×1.62; the Real-ESRGAN stage ~110 s).
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
