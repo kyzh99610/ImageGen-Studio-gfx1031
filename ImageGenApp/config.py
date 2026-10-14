@@ -22,8 +22,6 @@ for _stream in (sys.stdout, sys.stderr):
 # ── Directory layout ───────────────────────────────────────────────────────────
 APP_DIR    = Path(__file__).parent.resolve()
 REPO_DIR   = APP_DIR.parent
-ZLUDA_DIR  = REPO_DIR / "ZLUDA_v6" / "zluda"
-PYTHON_DIR = REPO_DIR / "python-3.10"
 
 MODELS_DIR      = APP_DIR / "models"
 CHECKPOINTS_DIR = MODELS_DIR / "checkpoints"
@@ -34,6 +32,18 @@ EMBEDDINGS_DIR       = MODELS_DIR / "embeddings"
 EMBEDDINGS_SD15_DIR  = EMBEDDINGS_DIR / "sd15"
 EMBEDDINGS_SDXL_DIR  = EMBEDDINGS_DIR / "sdxl"
 OUTPUTS_DIR     = APP_DIR / "outputs"
+# IMAGEGEN_OUTPUT_SUBDIR=<relative/sub/folder>: every picture this process saves goes to outputs/<that folder> instead of outputs/ itself (test harnesses and labs set it so their
+# pictures stay out of the 🗂 History tab, which lists the top level of outputs/ only). Unset / empty = outputs/ as always. Absolute paths, "..", drive letters are ignored.
+def _output_subdir(raw: str) -> str:
+    parts = [p for p in str(raw or "").replace("\\", "/").split("/") if p.strip()]
+    if not parts or any(p in (".", "..") or ":" in p or p != p.strip() for p in parts) or str(raw).strip().startswith(("/", "\\")):
+        if parts:
+            print(f"[Config] Ignoring IMAGEGEN_OUTPUT_SUBDIR={raw!r} (must be a relative folder name inside outputs/)")
+        return ""
+    return "/".join(parts)
+OUTPUT_SUBDIR = _output_subdir(os.environ.get("IMAGEGEN_OUTPUT_SUBDIR", ""))
+if OUTPUT_SUBDIR:
+    OUTPUTS_DIR = OUTPUTS_DIR / OUTPUT_SUBDIR
 PRESETS_DIR     = APP_DIR / "presets"
 PRESETS_SD15    = PRESETS_DIR / "sd15"
 PRESETS_XL      = PRESETS_DIR / "xl"
@@ -225,7 +235,6 @@ DEFAULT_STEPS    = 20
 DEFAULT_CFG      = 7.5
 DEFAULT_WIDTH    = 512
 DEFAULT_HEIGHT   = 512
-DEFAULT_SAMPLER  = "DPMSolverMultistepScheduler"
 DEFAULT_NEGATIVE = (
     "(worst quality:1.4), (low quality:1.4), normal quality, "
     "bad anatomy, bad hands, extra fingers, missing fingers, "
@@ -239,9 +248,3 @@ REALESRGAN_MODEL_URL = (
     "v0.1.0/RealESRGAN_x4plus.pth"
 )
 REALESRGAN_MODEL_PATH = UPSCALERS_DIR / "RealESRGAN_x4plus.pth"
-
-# ── ONNX Real-ESRGAN (lighter, no PyTorch required for upscaling) ─────────────
-REALESRGAN_ONNX_URL = (
-    "https://github.com/cszn/BSRGAN/releases/download/v1.0/"
-    "BSRGAN.onnx"
-)

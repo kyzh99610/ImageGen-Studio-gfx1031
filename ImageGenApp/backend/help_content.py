@@ -459,7 +459,10 @@ def parameters_html() -> str:
              "<b>For a whole folder:</b> under “Batch — upscale a whole folder” the button 🔬 Sharpen eyes for every picture in this folder does the same for each PNG / JPG / WebP "
              "and writes outputs/sharpened_<folder>/ (the originals stay). It pauses while the laptop is hot before each picture, groups pictures made with the same checkpoint to save model switches, "
              "and skips with a reason what it cannot do: no face, a 2× result over 64 MP, a picture that already is max detail, a Pony-family model; a picture without a record uses the loaded model and the summary says so. "
-             "⏹ Stop after this picture ends it between pictures — the finished ones are kept. Measured on 4 existing full-body pictures: eye detail ×6.1, identity unchanged, about 2 minutes per picture (full-power laptop).",
+             "⏹ Stop after this picture ends it between pictures — the finished ones are kept. Measured on 4 existing full-body pictures: eye detail ×6.1, identity unchanged, about 2 minutes per picture (full-power laptop). "
+             "<b>For your favourites:</b> in the 🗂 History tab the button 🔬 Sharpen eyes for every ⭐ favourite runs the same job over all pictures you starred and writes outputs/sharpened_favourites/ "
+             "(the originals stay). A favourite that already has its result there is skipped, so pressing it again only does the new ones; a favourite whose file is gone is listed as not found; "
+             "the other skips, the thermal pause and ⏹ Stop after this picture work as for a folder.",
              _cn("对已有图片（本应用生成的任何时候的图，或其他来源的图）：先用 Real-ESRGAN 放大 2×，再在放大后的图上做眼部重绘，使用图片自己的设置——保存的记录里的提示词、种子、采样器、眼部风格/降噪，"
                  "以及（已安装时）生成它的底模与 LoRA（任务期间加载，之后保持加载）。底模未安装或图片没有记录时用当前已加载的模型并在结果里提示（眼睛可能略有不同）。"
                  "以下情况会给出提示且不保存：没有找到人脸、2× 结果超过 64 MP、图片已是最大细节、Pony 系模型（眼部重绘会让它变软）。"
@@ -468,6 +471,8 @@ def parameters_html() -> str:
                  "满功率笔记本上每张 1–2.5 分钟（切换底模约多 1 分钟）。结果与其他图一起保存，记录已更新（最大细节 + 眼部重绘），可在 PNG Info → 发送到 Generate 里看到。"
                  "整个文件夹：在“批量——放大整个文件夹”下的按钮“🔬 对此文件夹的每张图修复眼睛”对每张 PNG / JPG / WebP 做同样的事，结果写入 outputs/sharpened_<文件夹>/（原图不动）。"
                  "每张图之前过热会先暂停；同一底模的图会放在一起处理以减少切换；做不了的会带原因跳过：没有人脸、2× 结果超过 64 MP、已是最大细节、Pony 系模型；没有记录的图用已加载的模型并在摘要里说明。"
+                 "收藏的图：在“🗂 历史”页，按钮“🔬 对每张 ⭐ 收藏的图修复眼睛”对所有加星的图做同样的事，结果写入 outputs/sharpened_favourites/（原图不动）。"
+                 "已有结果的收藏会被跳过，所以再按一次只处理新加的；文件已不存在的会列为“未找到”；其他跳过、过热暂停和“⏹ 本张之后停止”与文件夹版相同。"
                  "“⏹ 本张之后停止”会在两张图之间结束，已完成的保留。实测 4 张已有的全身图：眼部细节 ×6.1，相似度不变，每张约 2 分钟（满功率笔记本）。")],
             ["🖌 Inpaint",
              "Paint over any area and describe what should be there; only that area is redrawn, at native "

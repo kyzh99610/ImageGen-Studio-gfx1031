@@ -4877,6 +4877,95 @@ def _():
         _app.upscaler.release = saved_rel
 
 
+@test("🔬 Sharpen eyes for every ⭐ favourite (round 19): the folder logic over settings/_favourites.json → outputs/sharpened_favourites/; already done / missing / no face are skipped with a reason, Stop keeps the finished ones, originals untouched, the button is a GPU job with no input")
+def _():
+    import json, tempfile
+    from pathlib import Path
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    import app as _app
+    from backend import detail_tools as DT
+    from backend import history as H
+    from backend.png_info import read_png_info
+    import gradio as _gr
+    tmp = Path(tempfile.mkdtemp(prefix="sharpen19_"))
+    out_root = tmp / "outputs"; out_root.mkdir()
+    ck = tmp / "own.safetensors"; ck.write_bytes(b"x")
+    rec = {"app": "ImageGen Studio", "format": 2, "mode": "txt2img", "prompt": "1girl, red eyes", "negative_prompt": "bad", "steps": 12, "cfg_scale": 6.0, "seeds": [77],
+           "scheduler": "DPM++ 2M AYS", "width": 64, "height": 96, "model": {"file": "own.safetensors", "family": "illustrious"}, "loras": []}
+
+    def put(name, size=(64, 96)):
+        pi = PngInfo(); pi.add_text("parameters", "1girl, red eyes\nSteps: 12, Seed: 77"); pi.add_itxt("imagegen", json.dumps(rec))
+        Image.new("RGB", size, (200, 200, 200)).save(out_root / name, pnginfo=pi)
+    put("a.png"); put("b_noface.png", size=(50, 50)); put("c.png"); put("d_notfav.png")
+    (out_root / "e.txt").write_text("x")
+    favfile = tmp / "_favourites.json"
+
+    class FakeSD:
+        pipe, current_model, model_family = object(), "loaded.safetensors", "illustrious"
+    calls = {"eye": [], "thermal": 0}
+    saved = {k: getattr(_app, k) for k in ("sd", "_GEN_HELPERS", "_upscale_to", "_thermal_wait", "OUTPUTS_DIR", "list_checkpoints", "list_loras", "list_vaes")}
+    saved_dt = {k: getattr(DT, k) for k in ("detect_faces", "eye_detail", "eye_detector_available")}
+    saved_rel, saved_fav = _app.upscaler.release, H.FAV_FILE
+    try:
+        _app.sd = FakeSD()
+        _app._GEN_HELPERS = {"ensure_model": lambda m, v, p: (True, "ok"), "sync_loras": lambda slots, p: ""}
+        _app._upscale_to = lambda im, w, h, m: im.resize((w, h))
+        _app._thermal_wait = lambda p=None: calls.__setitem__("thermal", calls["thermal"] + 1) or 0.0
+        _app.OUTPUTS_DIR = out_root
+        _app.list_checkpoints = lambda: [("own.safetensors", str(ck))]
+        _app.list_loras = lambda: []
+        _app.list_vaes = lambda: []
+        _app.upscaler.release = lambda: None
+        DT.detect_faces = lambda im, mode="auto": [] if im.size == (50, 50) else [(10, 10, 40, 40)]
+        DT.eye_detail = lambda sdp, im, prompt, neg, **kw: (calls["eye"].append(im.size) or im.copy(), 2)
+        DT.eye_detector_available = lambda: True
+        H.FAV_FILE = favfile
+        # no favourites yet
+        assert "No favourites yet" in _app._sharpen_favourites()
+        favfile.write_text(json.dumps(["a.png", "b_noface.png", "c.png", "gone.png", "e.txt"]), encoding="utf-8")
+        msg = _app._sharpen_favourites(_gr.Progress())                                        # a real gr.Progress (never `progress or …`)
+        dest = out_root / "sharpened_favourites"
+        assert sorted(p.name for p in dest.glob("*.png")) == ["a_md.png", "c_md.png"], sorted(p.name for p in dest.glob("*.png"))
+        assert "Sharpened 2 of 3" in msg and "outputs/sharpened_favourites/" in msg, msg          # d_notfav.png is not a favourite: never touched
+        assert "no face: b_noface.png" in msg and "file not found" in msg and "gone.png" in msg and "e.txt" in msg, msg
+        assert len(calls["eye"]) == 2 and all(s == (128, 192) for s in calls["eye"]) and calls["thermal"] >= 3, calls
+        im = Image.open(dest / "a_md.png"); im.load()
+        assert im.size == (128, 192) and _app._restore_plan(read_png_info(im))["max_detail"] and json.loads(im.info["imagegen"])["eye_detail"]["denoise"] == 0.4
+        assert Image.open(out_root / "a.png").size == (64, 96) and not (dest / "d_notfav_md.png").exists()    # the originals stay
+        # a second press skips the finished ones instead of making _1 copies
+        calls["eye"].clear()
+        msg = _app._sharpen_favourites()
+        assert not calls["eye"] and "already sharpened: a.png, c.png" in msg and not (dest / "a_md_1.png").exists(), msg
+        # Stop between pictures keeps the finished one
+        for p in dest.glob("*.png"):
+            p.unlink()
+        state = {"n": 0}
+        orig_core = _app._sharpen_core
+
+        def counting(*a, **k):
+            r = orig_core(*a, **k); state["n"] += 1; return r
+        _app._sharpen_core = counting
+        try:
+            msg = _app._sharpen_favourites(stop=lambda: state["n"] >= 1)
+        finally:
+            _app._sharpen_core = orig_core
+        assert "Stopped before picture" in msg and len(list(dest.glob("*.png"))) == 1, msg
+        # only missing favourites
+        favfile.write_text(json.dumps(["gone.png"]), encoding="utf-8")
+        assert "None of the 1 favourite" in _app._sharpen_favourites()
+        # the button: a GPU job with no inputs and one output; the Stop button has no API name
+        by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+        assert getattr(by["do_sharpen_favourites"].fn, "_gpu_job", False) and len(by["do_sharpen_favourites"].inputs) == 0 and len(by["do_sharpen_favourites"].outputs) == 1
+    finally:
+        for k, v in saved.items():
+            setattr(_app, k, v)
+        for k, v in saved_dt.items():
+            setattr(DT, k, v)
+        _app.upscaler.release = saved_rel
+        H.FAV_FILE = saved_fav
+
+
 @test("⚡ Use the measured recipe: Illustrious / NoobAI fill Sampler / Steps / CFG / PAG, every other family keeps the settings and says so, nothing else is touched (round 16)")
 def _():
     import app as _app
@@ -4921,6 +5010,47 @@ def _():
             _app.sd.model_family = old_mf
     finally:
         _sp._model_family, _ps.EMPHASIS["mode"], _app.sd.pipe = old_fam, old_mode, old_pipe
+
+
+@test("IMAGEGEN_OUTPUT_SUBDIR (round 19): a harness process saves into outputs/<sub-folder> (relative names only), keeps its own History index, and the user's History never lists sub-folders")
+def _():
+    import subprocess
+    import shutil
+    import tempfile
+    from PIL import Image
+    import config as _cfg
+    from backend import history as _H
+    f = _cfg._output_subdir
+    assert f("") == "" and f(None) == "" and f("  ") == ""
+    assert f("_lab/r19") == "_lab/r19" and f("_lab\\r19") == "_lab/r19" and f("lab//x/") == "lab/x"
+    for bad in ("/abs", "\\abs", "..", "a/../b", "C:/x", "./x/.."):
+        assert f(bad) == "", bad
+    # unset: today's behaviour
+    assert _cfg.OUTPUT_SUBDIR == "" or os.environ.get("IMAGEGEN_OUTPUT_SUBDIR")
+    # History lists the top level of outputs/ only: a sub-folder's pictures never show, and a sub-folder process has its own index file
+    tmp = Path(tempfile.mkdtemp(prefix="hist19_"))
+    (tmp / "sub").mkdir()
+    Image.new("RGB", (8, 8)).save(tmp / "a.png"); Image.new("RGB", (8, 8)).save(tmp / "sub" / "b.png")
+    old = _H.INDEX_FILE
+    try:
+        _H.INDEX_FILE = tmp / "idx.json"
+        assert set(_H.build_index(tmp)) == {"a.png"}
+    finally:
+        _H.INDEX_FILE = old
+    # a real process with the variable set: OUTPUTS_DIR and the index file follow it (the folder it makes is removed again)
+    app_dir = Path(__file__).resolve().parent
+    sub = "_lab/_unit_test19"
+    env = dict(os.environ, IMAGEGEN_OUTPUT_SUBDIR=sub, IMAGEGEN_TESTS="1")
+    try:
+        out = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, '.'); import config; from backend import history; print(config.OUTPUTS_DIR.as_posix()); print(history.INDEX_FILE.name)"],
+                             cwd=str(app_dir), env=env, capture_output=True, text=True, timeout=120).stdout.split("\n")
+        assert out[0].endswith("/outputs/" + sub) and out[1] == "_history_index___lab__unit_test19.json", out
+    finally:
+        shutil.rmtree(app_dir / "outputs" / "_lab" / "_unit_test19", ignore_errors=True)
+        try:
+            (app_dir / "outputs" / "_lab").rmdir()
+        except OSError:
+            pass
 
 
 @test("make_zip.ps1: its exclusion list keeps settings, outputs, models, scripts, logs and api keys out of the zip and the code in (round 16: scripts / wildcards / detectors / logs shipped)")

@@ -12,9 +12,12 @@ from pathlib import Path
 
 from PIL import Image
 
-from config import OUTPUTS_DIR, SETTINGS_DIR
+import re
 
-INDEX_FILE = SETTINGS_DIR / "_history_index.json"
+from config import OUTPUT_SUBDIR, OUTPUTS_DIR, SETTINGS_DIR
+
+# a process that saves into a sub-folder of outputs/ (IMAGEGEN_OUTPUT_SUBDIR: harnesses, labs) keeps its own index: the stale-entry pruning below would otherwise delete the user's entries
+INDEX_FILE = SETTINGS_DIR / (f"_history_index__{re.sub(r'[^A-Za-z0-9_.-]+', '_', OUTPUT_SUBDIR)}.json" if OUTPUT_SUBDIR else "_history_index.json")
 FAV_FILE = SETTINGS_DIR / "_favourites.json"
 THUMBS = OUTPUTS_DIR / ".thumbs"
 THUMB_SIDE = 256
