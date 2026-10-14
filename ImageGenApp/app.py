@@ -912,20 +912,44 @@ def _sharpen_eyes(image, progress=None):
         return None, s.html
 
 
+_SHARPEN_EXT = (".png", ".jpg", ".jpeg", ".webp")
+
+
 def _sharpen_folder(folder, progress=None, stop=None):
-    """🔬 Sharpen eyes for every picture of a folder → outputs/sharpened_<folder>/ (do_sharpen_folder's work, no UI): a thermal pause and a Stop check before each picture; pictures it cannot
-    process are skipped with a reason (no face, over 64 MP, already max detail, no record → the loaded model + a note, …). Returns the html summary."""
+    """🔬 Sharpen eyes for every picture of a folder → outputs/sharpened_<folder>/ (do_sharpen_folder's work, no UI); see _sharpen_files."""
+    src = Path(str(folder or "").strip().strip('"'))
+    if not str(folder or "").strip() or not src.is_dir():
+        return '<p style="color:#f38ba8;">❌ Enter an existing folder.</p>'
+    files = sorted(p for p in src.iterdir() if p.suffix.lower() in _SHARPEN_EXT)
+    if not files:
+        return '<p style="color:#f38ba8;">❌ No PNG / JPG / WebP images in that folder.</p>'
+    _generation_abort.clear()
+    return _sharpen_files(files, OUTPUTS_DIR / f"sharpened_{_safe_name(src.name) or 'folder'}", progress, stop)
+
+
+def _sharpen_favourites(progress=None, stop=None):
+    """🔬 Sharpen eyes for every ⭐ favourite of the History tab (settings/_favourites.json) → outputs/sharpened_favourites/ (do_sharpen_favourites' work, no UI): the folder logic over that list;
+    a favourite that already has its result there is skipped ("already sharpened"), one whose file is gone is listed. The originals are never touched."""
+    from backend import history as _hist
+    names = sorted(_hist.favourites())
+    if not names:
+        return '<p style="color:#f9e2af;font-size:13px;">⭐ No favourites yet — star pictures in the list above first.</p>'
+    files = [OUTPUTS_DIR / n for n in names if Path(n).suffix.lower() in _SHARPEN_EXT and (OUTPUTS_DIR / n).is_file()]
+    missing = [n for n in names if not ((OUTPUTS_DIR / n).is_file() and Path(n).suffix.lower() in _SHARPEN_EXT)]
+    if not files:
+        return '<p style="color:#f38ba8;font-size:13px;">❌ None of the ' + str(len(names)) + ' favourite(s) is in outputs/ any more.</p>'
+    _generation_abort.clear()
+    return _sharpen_files(files, OUTPUTS_DIR / "sharpened_favourites", progress, stop, skip_done=True, missing=missing)
+
+
+def _sharpen_files(files, dest, progress=None, stop=None, skip_done=False, missing=()):
+    """The work of the folder / favourites buttons: 🔬 Sharpen eyes for each file → `dest`/<stem>_md.png. A thermal pause and a Stop check before each picture; pictures it cannot process are skipped with a reason
+    (no face, over 64 MP, already max detail, no record → the loaded model + a note, …); `skip_done`: a picture whose result is already in `dest` is skipped; `missing`: names that were asked for but are gone.
+    Returns the html summary."""
     from PIL import Image as _Image
     if progress is None:                      # (never `progress or …`: gr.Progress defines __len__, which raises outside a running event)
         progress = lambda *a, **k: None
     stop = stop or _generation_abort.is_set
-    src = Path(str(folder or "").strip().strip('"'))
-    if not str(folder or "").strip() or not src.is_dir():
-        return '<p style="color:#f38ba8;">❌ Enter an existing folder.</p>'
-    files = sorted(p for p in src.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
-    if not files:
-        return '<p style="color:#f38ba8;">❌ No PNG / JPG / WebP images in that folder.</p>'
-    _generation_abort.clear()
 
     def model_key(f):                                                  # the same checkpoint together: fewer model switches
         try:
@@ -934,15 +958,19 @@ def _sharpen_folder(folder, progress=None, stop=None):
             return str((rec.get("model") or {}).get("file") or "")
         except Exception:
             return ""
-    files.sort(key=lambda f: (model_key(f), f.name))
-    dest = OUTPUTS_DIR / f"sharpened_{_safe_name(src.name) or 'folder'}"
+    files = sorted(files, key=lambda f: (model_key(f), Path(f).name))
     done, skipped, fallbacks, t0, stopped_at = [], {}, [], time.time(), None
+    for n in missing:
+        skipped.setdefault("file not found", []).append(n)
     for i, f in enumerate(files):
         if stop():
             stopped_at = i
             break
+        if skip_done and (dest / f"{Path(f).stem}_md.png").exists():
+            skipped.setdefault("already sharpened", []).append(Path(f).name)
+            continue
         try:
-            progress(i / len(files), desc=f"{i + 1}/{len(files)}: {f.name}")
+            progress(i / len(files), desc=f"{i + 1}/{len(files)}: {Path(f).name}")
         except Exception:                                                  # a progress call must not stop the batch (Gradio 4.19 raises before the first step of an API call)
             pass
         _thermal_wait(progress)
@@ -952,17 +980,17 @@ def _sharpen_folder(folder, progress=None, stop=None):
         try:
             with _Image.open(f) as im:
                 im.load()
-                _out, _msg, fb = _sharpen_core(im, progress, dest=dest, stem=f.stem)
-            done.append(f.name)
+                _out, _msg, fb = _sharpen_core(im, progress, dest=dest, stem=Path(f).stem)
+            done.append(Path(f).name)
             if fb:
-                fallbacks.append(f.name)
+                fallbacks.append(Path(f).name)
         except _SharpenSkip as sk:
             if sk.reason == "stopped":
                 stopped_at = i
                 break
-            skipped.setdefault(sk.reason, []).append(f.name)
+            skipped.setdefault(sk.reason, []).append(Path(f).name)
         except Exception as e:
-            skipped.setdefault("error: " + html.escape(str(e)[:60]), []).append(f.name)
+            skipped.setdefault("error: " + html.escape(str(e)[:60]), []).append(Path(f).name)
     msg = (f'<p style="color:#a6e3a1;font-size:13px;">🔬 Sharpened {len(done)} of {len(files)} images in '
            f'{_fmt_elapsed(time.time() - t0)} → <code>outputs/{dest.name}/</code></p>')
     if stopped_at is not None:
@@ -6184,6 +6212,10 @@ def _build_history_tab(gen_controls: dict, up_input, png_input) -> dict:
             h_i2i = gr.Button("🖼 Send to img2img", size="sm")
             h_up = gr.Button("🔍 Send to Upscale", size="sm")
             h_open = gr.Button("📂 Show in folder", size="sm")
+        with gr.Row():
+            h_sharpen = gr.Button("🔬 Sharpen eyes for every ⭐ favourite", size="sm", scale=3)
+            h_sharpen_stop = gr.Button("⏹ Stop after this picture", size="sm", scale=1)
+        h_sharpen_info = gr.HTML("")
 
     def _page(names, page):
         page = max(0, min(int(page or 0), max(0, (len(names) - 1) // PAGE)))
@@ -6265,6 +6297,14 @@ def _build_history_tab(gen_controls: dict, up_input, png_input) -> dict:
     h_i2i.click(lambda n: (_load(n) or gr.update(), True) if n else (gr.update(), gr.update()),
                 [h_sel], [gen_controls["init_image"], gen_controls["use_i2i"]])
     h_up.click(lambda n: _load(n) or gr.update(), [h_sel], [up_input])
+
+    @gpu_job
+    def do_sharpen_favourites(progress=gr.Progress()):
+        """🔬 Sharpen eyes for every ⭐ favourite (round 19; see _sharpen_favourites)."""
+        return _sharpen_favourites(progress)
+
+    h_sharpen.click(do_sharpen_favourites, None, [h_sharpen_info])
+    h_sharpen_stop.click(lambda: _generation_abort.set(), None, None, api_name=False)
     return {"to_png": h_png, "to_generate": h_i2i, "to_upscale": h_up}
 
 

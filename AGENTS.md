@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 164-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 166-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 159 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 161 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -651,6 +651,15 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
 - A native ×2 Real-ESRGAN model (facefusion-assets models-3.0.0) makes the Max-detail upscale stage ×5.3 faster than the
   ×4 model + downscale, but the finished eyes come out softer (eye detail ×0.74): not used. The ×4 model with 384 px
   DirectML tiles crashes the GPU driver; 256 px tiles stay.
+
+### Lab pictures in their own folder, Sharpen eyes on favourites (2026-10-14)
+- `IMAGEGEN_OUTPUT_SUBDIR` (environment variable, relative folders only): every save goes to `outputs/<subdir>`; test
+  harnesses use it so their pictures never reach the 🗂 History tab (which lists the top level of `outputs/` only).
+- **🔬 Sharpen eyes for every ⭐ favourite** (History tab; a new endpoint): the folder logic over the favourites list →
+  `outputs/sharpened_favourites/`; already-done favourites, missing files and pictures with no face are skipped with a
+  reason; Stop and the heat pause between pictures; originals untouched.
+- On a USB-C charger after the cooling service: a Polish Full-body picture in 165 s with the Power-limited profile, max
+  90.9 °C, no reading at or above 94 °C (3 pictures).
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
