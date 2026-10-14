@@ -2709,6 +2709,20 @@ def _():
         dt.set_eye_style("round")
 
 
+def _buttons_wired_to(demo, fn_name):
+    """The components that trigger the Gradio function `fn_name` in build_app() (following `.then()` chains back to the first event): a behaviour check of 'this button runs that handler'."""
+    deps = demo.config["dependencies"]
+    f = next(x for x in demo.fns if getattr(x.fn, "__name__", "") == fn_name)
+    i = demo.fns.index(f)
+    while True:
+        real = [t for t in deps[i]["targets"] if t[0] is not None]
+        if real:
+            return f, [(demo.blocks[t[0]], t[1]) for t in real]
+        if deps[i].get("trigger_after") is None:
+            return f, []
+        i = deps[i]["trigger_after"]
+
+
 @test("Round-4 follow-ups: tiny faces get a higher face denoise, inpaint runs the Steps value, truncated uploads fail loudly, eye detail in card profiles")
 def _():
     import io
@@ -2741,8 +2755,29 @@ def _():
         for den in (0.4, 0.5, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0):
             assert int(_app._inpaint_steps(steps, den) * den) == steps, (steps, den)
     assert len({_app._inpaint_steps(12, d) for d in (0.75, 0.8)}) == 2
-    src = inspect.getsource(_app._build_generate_tab)
-    assert "steps=_inpaint_steps(steps, denoise)" in src
+    # the handler (round 16: a behaviour check instead of a look at app.py's source): the 🖌 button runs do_inpaint_ui and the Steps value reaches inpaint_region as _inpaint_steps(steps, denoise)
+    import app as _a2
+    from backend import detail_tools as _dt2
+    demo = _a2.build_app()
+    f_inp, btns = _buttons_wired_to(demo, "do_inpaint_ui")
+    assert any(type(b).__name__ == "Button" and "Inpaint" in str(b.value) and e == "click" for b, e in btns), btns
+    editor = {"background": Image.new("RGB", (128, 128), (200, 200, 200)), "layers": [Image.new("RGBA", (128, 128), (255, 255, 255, 255))]}
+
+    class _FakeSD:
+        pipe, current_model, _last_vae_path, _lora_adapters = object(), "m", None, {}
+    seen_steps = []
+    keep = (_a2.sd, _a2._save_outputs, _dt2.inpaint_region)
+    try:
+        _a2.sd = _FakeSD()
+        _a2._save_outputs = lambda imgs, meta, pipe=None: [Path("x.png")]
+        _dt2.inpaint_region = lambda sdp, im, mask, prompt, neg, **k: (seen_steps.append((k["steps"], k["denoise"])), (im, 3))[1]
+        for den in (0.5, 0.75, 0.8, 1.0):
+            res = f_inp.fn("m", "none", "none", 0.8, "none", 0.7, "none", 0.7, "1girl", "bad", "DPM++ 2M Karras", 12, 6.0, 5, 1, editor, den, 48, progress=lambda *a, **k: None)
+            assert len(res[0]) == 1, res
+        assert [(st, d) for st, d in seen_steps] == [(_a2._inpaint_steps(12, d), d) for d in (0.5, 0.75, 0.8, 1.0)], seen_steps
+        assert all(int(st * d) == 12 for st, d in seen_steps)
+    finally:
+        _a2.sd, _a2._save_outputs, _dt2.inpaint_region = keep
     # truncated files: generation inputs fail instead of decoding to a half-black picture; metadata still reads
     from PIL import ImageFile
     assert ImageFile.LOAD_TRUNCATED_IMAGES is False
@@ -2797,11 +2832,12 @@ def _():
         assert seen["padding"] == 200                                                      # a wider context the user chose is kept
     finally:
         dt.inpaint_region = orig
-    import inspect
-    src = inspect.getsource(_app._build_generate_tab)
-    assert _re.search(r"@gpu_job\s+def do_swap_ui", src) and "inp_swap_btn.click" in src and "inp_swap_txt" in src and "swap_item(sd," in src
-    fs = [f for f in _app.build_app().fns if getattr(f.fn, "__name__", "") == "do_swap_ui"]
-    assert fs and all(f.concurrency_id == "gpu" and f.concurrency_limit == 1 for f in fs), "the swap is a GPU job"
+    demo = _app.build_app()
+    f_swap, btns = _buttons_wired_to(demo, "do_swap_ui")                                  # round 16: wiring checked on the built app, not on app.py's source text
+    assert any(type(b).__name__ == "Button" and "Swap" in str(b.value) and e == "click" for b, e in btns), btns
+    assert f_swap.concurrency_id == "gpu" and f_swap.concurrency_limit == 1 and getattr(f_swap.fn, "_gpu_job", False), "the swap is a GPU job"
+    assert any(type(c).__name__ == "Textbox" and "Swap an accessory" in str(c.label) for c in f_swap.inputs), "the item box is an input"
+    fs = [f_swap]
     # the handler itself (the UI build only constructs it): a fake editor value, the model / LoRA / save steps stubbed, the inpaint recorded
     run, saved = fs[0].fn, {}
     editor = {"background": Image.new("RGB", (128, 128), (200, 200, 200)), "layers": [Image.new("RGBA", (128, 128), (255, 255, 255, 255))]}
@@ -3668,9 +3704,9 @@ def _():
         m = read_image_metadata(f)
     assert m["prompt"] == "1girl" and m["steps"] == 20 and m["seed"] == 7
     # the VRAM bar with a cleared box (None) mustn't raise
-    import inspect
-    src = inspect.getsource(_app)
-    assert "int(_num(width, 512))" in src
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    html_out = by["_update_gen_vram"].fn("m.safetensors", None, None, None, "none", "none", False)      # round 16: run the handler with cleared boxes
+    assert isinstance(html_out, str) and html_out
 
 
 @test("Civitai: a same-name file of another size is another version (not '✅ Downloaded'); keys scrubbed from errors")
@@ -4748,6 +4784,166 @@ def _():
         assert not any("weighting" in n for n in _app._restore_plan(meta)["notes"])
     finally:
         PS.set_emphasis(old)
+
+
+@test("🔬 Sharpen eyes for a folder (round 16): every picture → outputs/sharpened_<folder>/ with its record updated; no face / over 64 MP / already max detail are skipped with a reason, no record uses the loaded model + a note; Stop between pictures keeps the finished ones")
+def _():
+    import json, tempfile
+    from pathlib import Path
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    import app as _app
+    from backend import detail_tools as DT
+    from backend.png_info import read_png_info
+    tmp = Path(tempfile.mkdtemp(prefix="sharpen16_"))
+    src, out_root = tmp / "pics", tmp / "outputs"
+    src.mkdir(); out_root.mkdir()
+    ck = tmp / "own.safetensors"; ck.write_bytes(b"x")
+    rec = {"app": "ImageGen Studio", "format": 2, "mode": "txt2img", "prompt": "1girl, red eyes", "negative_prompt": "bad", "steps": 12, "cfg_scale": 6.0, "seeds": [77],
+           "scheduler": "DPM++ 2M AYS", "width": 64, "height": 96, "model": {"file": "own.safetensors", "family": "illustrious"}, "loras": []}
+
+    def put(name, size=(64, 96), record=True, **over):
+        pi = PngInfo(); pi.add_text("parameters", "1girl, red eyes\nSteps: 12, Seed: 77")
+        if record:
+            pi.add_itxt("imagegen", json.dumps(dict(rec, **over)))
+        Image.new("RGB", size, (200, 200, 200)).save(src / name, pnginfo=pi)
+    put("a.png"); put("b_noface.png", size=(50, 50)); put("c_done.png", max_detail={"scale": 2, "method": "Real-ESRGAN (ONNX)"}); put("d_big.png", size=(4200, 4200))
+    put("e_norecord.png", record=False); put("f.png"); (src / "notes.txt").write_text("x")
+
+    class FakeSD:
+        pipe, current_model, model_family = object(), "loaded.safetensors", "illustrious"
+    calls = {"eye": [], "ensure": [], "thermal": 0}
+    saved = {k: getattr(_app, k) for k in ("sd", "_GEN_HELPERS", "_upscale_to", "_thermal_wait", "OUTPUTS_DIR", "list_checkpoints", "list_loras", "list_vaes")}
+    saved_dt = {k: getattr(DT, k) for k in ("detect_faces", "eye_detail", "eye_detector_available")}
+    saved_rel = _app.upscaler.release
+    try:
+        _app.sd = FakeSD()
+        _app._GEN_HELPERS = {"ensure_model": lambda m, v, p: calls["ensure"].append(Path(m).name) or (True, "ok"), "sync_loras": lambda slots, p: ""}
+        _app._upscale_to = lambda im, w, h, m: im.resize((w, h))
+        _app._thermal_wait = lambda p=None: calls.__setitem__("thermal", calls["thermal"] + 1) or 0.0
+        _app.OUTPUTS_DIR = out_root
+        _app.list_checkpoints = lambda: [("own.safetensors", str(ck))]
+        _app.list_loras = lambda: []
+        _app.list_vaes = lambda: []
+        _app.upscaler.release = lambda: None
+        DT.detect_faces = lambda im, mode="auto": [] if im.size == (50, 50) else [(10, 10, 40, 40)]
+        DT.eye_detail = lambda sdp, im, prompt, neg, **kw: (calls["eye"].append(im.size) or im.copy(), 2)
+        DT.eye_detector_available = lambda: True
+        import gradio as _gr
+        msg = _app._sharpen_folder(str(src), _gr.Progress())                                   # a real gr.Progress: the object raises on `or` / len() outside an event
+        dest = out_root / "sharpened_pics"
+        files = sorted(p.name for p in dest.glob("*.png"))
+        assert files == ["a_md.png", "e_norecord_md.png", "f_md.png"], files                    # a, f (own model) + e (no record: the loaded model)
+        assert "Sharpened 3 of 6" in msg and "outputs/sharpened_pics/" in msg, msg
+        assert "no face: b_noface.png" in msg and "over 64 MP: d_big.png" in msg and "already max detail: c_done.png" in msg, msg
+        assert "1 used the loaded model" in msg and "e_norecord.png" in msg, msg
+        assert calls["thermal"] >= 6 and len(calls["eye"]) == 3 and all(s == (128, 192) for s in calls["eye"]), calls
+        assert calls["ensure"].count("own.safetensors") == 2                                    # the two pictures with a record
+        im = Image.open(dest / "a_md.png"); im.load()
+        assert im.size == (128, 192)
+        plan = _app._restore_plan(read_png_info(im))
+        assert plan["max_detail"] and "Max detail: 2× Real-ESRGAN" in im.info["parameters"] and json.loads(im.info["imagegen"])["eye_detail"]["denoise"] == 0.4
+        assert (src / "a.png").stat().st_size > 0 and Image.open(src / "a.png").size == (64, 96)    # the originals stay
+        # a second run keeps the first results (never overwrites): _1 names
+        _app._sharpen_folder(str(src))
+        assert (dest / "a_md_1.png").is_file() and (dest / "a_md.png").is_file()
+        # Stop between pictures: the finished one is kept, the message says so
+        n0 = len(list(dest.glob("*.png")))
+        state = {"n": 0}
+
+        def stop():
+            return state["n"] >= 1
+        orig_core = _app._sharpen_core
+
+        def counting(*a, **k):
+            r = orig_core(*a, **k); state["n"] += 1; return r
+        _app._sharpen_core = counting
+        try:
+            msg = _app._sharpen_folder(str(src), stop=stop)
+        finally:
+            _app._sharpen_core = orig_core
+        assert "Stopped before picture" in msg and "Sharpened 1 of 6" in msg, msg
+        assert len(list(dest.glob("*.png"))) == n0 + 1
+        # bad input
+        assert "existing folder" in _app._sharpen_folder(str(tmp / "nope")) and "No PNG" in _app._sharpen_folder(str(tmp))
+        # the button's handler is a GPU job with one input and one output; the folder-upscale button keeps its 3 inputs
+        by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+        assert getattr(by["do_sharpen_folder"].fn, "_gpu_job", False) and len(by["do_sharpen_folder"].inputs) == 1 and len(by["do_sharpen_folder"].outputs) == 1 and len(by["do_upscale_folder"].inputs) == 3
+    finally:
+        for k, v in saved.items():
+            setattr(_app, k, v)
+        for k, v in saved_dt.items():
+            setattr(DT, k, v)
+        _app.upscaler.release = saved_rel
+
+
+@test("⚡ Use the measured recipe: Illustrious / NoobAI fill Sampler / Steps / CFG / PAG, every other family keeps the settings and says so, nothing else is touched (round 16)")
+def _():
+    import app as _app
+    from backend import recipes as RC
+    from backend import sd_pipeline as _sp
+    from backend import prompt_syntax as _ps
+    r = RC.recipe_for("illustrious")
+    assert (r["scheduler"], r["steps"], r["cfg"], r["pag"]) == ("DPM++ 2M AYS", 12, 6.0, 2.0) and "Illustrious / NoobAI" in RC.family_label("illustrious")
+    assert r["scheduler"] in _app.SCHEDULER_MAP
+    r["steps"] = 99
+    assert RC.recipe_for("illustrious")["steps"] == 12                                 # copies
+    assert RC.recipe_for("pony") is None and RC.recipe_for("sd15") is None and RC.recipe_for("sdxl") is None and RC.recipe_for(None) is None
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    fn, spec = by["on_measured_recipe"].fn, by["on_measured_recipe"]
+    assert len(spec.inputs) == 1 and type(spec.inputs[0]).__name__ == "Dropdown" and len(spec.outputs) == 5, (len(spec.inputs), len(spec.outputs))
+    assert [type(c).__name__ for c in spec.outputs] == ["Dropdown", "Slider", "Slider", "Slider", "HTML"]
+    old_fam, old_mode, old_pipe = _sp._model_family, _ps.EMPHASIS["mode"], _app.sd.pipe
+    try:
+        _sp._model_family = lambda p: "illustrious"
+        out = fn("D:/x/model.safetensors")
+        vals = [o.get("value") if isinstance(o, dict) else o for o in out[:4]]
+        assert vals == ["DPM++ 2M AYS", 12, 6.0, 2.0], vals
+        assert "Illustrious / NoobAI" in out[4] and "untouched" in out[4] and "Compel" not in out[4], out[4]
+        _ps.EMPHASIS["mode"] = "compel"
+        assert "Compel" in fn("D:/x/model.safetensors")[4]                             # the recipe was measured with A1111 weights: say so
+        _ps.EMPHASIS["mode"] = "a1111"
+        for fam in ("pony", "sd15", "sdxl"):                                           # no measurement: every control stays, the message says so
+            _sp._model_family = lambda p, f=fam: f
+            out = fn("D:/x/model.safetensors")
+            assert all(o == {"__type__": "update"} or (isinstance(o, dict) and "value" not in o) for o in out[:4]), (fam, out[:4])
+            assert "No measured recipe" in out[4] and RC.family_label(fam) in out[4], out[4]
+        # no checkpoint selected: the loaded one decides; neither: a message
+        _app.sd.pipe = None
+        out = fn(None)
+        assert "No checkpoint" in out[4]
+        _app.sd.pipe = object()
+        old_mf = getattr(_app.sd, "model_family", None)
+        _app.sd.model_family = "illustrious"
+        try:
+            assert [o.get("value") for o in fn(None)[:4]] == ["DPM++ 2M AYS", 12, 6.0, 2.0]
+        finally:
+            _app.sd.model_family = old_mf
+    finally:
+        _sp._model_family, _ps.EMPHASIS["mode"], _app.sd.pipe = old_fam, old_mode, old_pipe
+
+
+@test("make_zip.ps1: its exclusion list keeps settings, outputs, models, scripts, logs and api keys out of the zip and the code in (round 16: scripts / wildcards / detectors / logs shipped)")
+def _():
+    import fnmatch
+    import re as _re
+    zip_script = Path(__file__).resolve().parent.parent / "installer" / "make_zip.ps1"
+    if not zip_script.exists():
+        raise Skip("installer/make_zip.ps1 is not part of this checkout")
+    text = zip_script.read_text(encoding="utf-8")
+    block = _re.search(r"\$APP_EXCLUDES = @\((.*?)\r?\n\)", text, _re.S).group(1)
+    excl = [m.group(1) for l in block.splitlines() for m in [_re.match(r'\s*"(.*?)"', l)] if m]
+
+    def shipped(rel):                                     # Copy-Filtered's test: `$rel -like "*$ex*" -or $_.Name -like $ex`
+        name = rel.split("\\")[-1]
+        return not any(fnmatch.fnmatchcase(rel.lower(), f"*{ex}*".lower()) or fnmatch.fnmatchcase(name.lower(), ex.lower()) for ex in excl)
+    for rel in ("settings\\api_keys.json", "settings\\_prefs.json", "settings\\characters\\x.json", "outputs\\a.png", "outputs\\.thumbs\\a.jpg", "scripts\\gen_sprites.py", "logs\\desktop-backend.log",
+                "models\\checkpoints\\a.safetensors", "models\\loras\\a.safetensors", "models\\wildcards\\my_pose.txt", "models\\detectors\\anime_eye_detect_v1.0_s.onnx",
+                "models\\vae\\a.safetensors", "onnx_cache\\m\\a.onnx", "presets\\xl\\mine.json", "backend\\__pycache__\\a.pyc"):
+        assert not shipped(rel), f"{rel} would ship"
+    for rel in ("app.py", "config.py", "backend\\detail_tools.py", "wildcards\\outfit.txt", "download_models.py", "README.md", "requirements.txt", "install.bat", "launch.bat", "run_zluda.bat"):
+        assert shipped(rel), f"{rel} would be left out"
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # Summary

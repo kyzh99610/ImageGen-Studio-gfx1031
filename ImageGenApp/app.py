@@ -895,27 +895,109 @@ def _sharpen_params(image, rec_updates: dict, note: str):
     return info
 
 
+class _SharpenSkip(Exception):
+    """A picture 🔬 Sharpen eyes does not process: `reason` is a short phrase (the folder summary groups by it), `html` the message."""
+    def __init__(self, reason: str, html_msg: str):
+        super().__init__(reason)
+        self.reason, self.html = reason, html_msg
+
+
 def _sharpen_eyes(image, progress=None):
-    """🔬 Sharpen eyes for an EXISTING picture (Upscale tab): Real-ESRGAN 2× (`_max_detail_pass`) + the eye pass on the 2× picture, with the picture's own record —
+    """🔬 Sharpen eyes for one picture (Upscale tab): returns (the 2× picture or None, an html message); see _sharpen_core."""
+    _generation_abort.clear()
+    try:
+        out, msg, _fallback = _sharpen_core(image, progress)
+        return out, msg
+    except _SharpenSkip as s:
+        return None, s.html
+
+
+def _sharpen_folder(folder, progress=None, stop=None):
+    """🔬 Sharpen eyes for every picture of a folder → outputs/sharpened_<folder>/ (do_sharpen_folder's work, no UI): a thermal pause and a Stop check before each picture; pictures it cannot
+    process are skipped with a reason (no face, over 64 MP, already max detail, no record → the loaded model + a note, …). Returns the html summary."""
+    from PIL import Image as _Image
+    if progress is None:                      # (never `progress or …`: gr.Progress defines __len__, which raises outside a running event)
+        progress = lambda *a, **k: None
+    stop = stop or _generation_abort.is_set
+    src = Path(str(folder or "").strip().strip('"'))
+    if not str(folder or "").strip() or not src.is_dir():
+        return '<p style="color:#f38ba8;">❌ Enter an existing folder.</p>'
+    files = sorted(p for p in src.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
+    if not files:
+        return '<p style="color:#f38ba8;">❌ No PNG / JPG / WebP images in that folder.</p>'
+    _generation_abort.clear()
+
+    def model_key(f):                                                  # the same checkpoint together: fewer model switches
+        try:
+            with _Image.open(f) as im:
+                rec = _json.loads(im.info.get("imagegen") or "{}")
+            return str((rec.get("model") or {}).get("file") or "")
+        except Exception:
+            return ""
+    files.sort(key=lambda f: (model_key(f), f.name))
+    dest = OUTPUTS_DIR / f"sharpened_{_safe_name(src.name) or 'folder'}"
+    done, skipped, fallbacks, t0, stopped_at = [], {}, [], time.time(), None
+    for i, f in enumerate(files):
+        if stop():
+            stopped_at = i
+            break
+        try:
+            progress(i / len(files), desc=f"{i + 1}/{len(files)}: {f.name}")
+        except Exception:                                                  # a progress call must not stop the batch (Gradio 4.19 raises before the first step of an API call)
+            pass
+        _thermal_wait(progress)
+        if stop():
+            stopped_at = i
+            break
+        try:
+            with _Image.open(f) as im:
+                im.load()
+                _out, _msg, fb = _sharpen_core(im, progress, dest=dest, stem=f.stem)
+            done.append(f.name)
+            if fb:
+                fallbacks.append(f.name)
+        except _SharpenSkip as sk:
+            if sk.reason == "stopped":
+                stopped_at = i
+                break
+            skipped.setdefault(sk.reason, []).append(f.name)
+        except Exception as e:
+            skipped.setdefault("error: " + html.escape(str(e)[:60]), []).append(f.name)
+    msg = (f'<p style="color:#a6e3a1;font-size:13px;">🔬 Sharpened {len(done)} of {len(files)} images in '
+           f'{_fmt_elapsed(time.time() - t0)} → <code>outputs/{dest.name}/</code></p>')
+    if stopped_at is not None:
+        msg += f'<p style="color:#fab387;font-size:13px;">⏹ Stopped before picture {stopped_at + 1} of {len(files)}; the {len(done)} finished one(s) are saved.</p>'
+    if skipped:
+        parts = [f"{html.escape(r)}: " + ", ".join(html.escape(n) for n in names[:6]) + (" …" if len(names) > 6 else "") for r, names in skipped.items()]
+        msg += f'<p style="color:#f9e2af;font-size:13px;">Skipped {sum(len(v) for v in skipped.values())} — ' + " · ".join(parts) + "</p>"
+    if fallbacks:
+        msg += (f'<p style="color:#f9e2af;font-size:13px;">⚠ {len(fallbacks)} used the loaded model (no record or checkpoint not installed): '
+                + ", ".join(html.escape(n) for n in fallbacks[:6]) + (" …" if len(fallbacks) > 6 else "") + "</p>")
+    return msg
+
+
+def _sharpen_core(image, progress=None, dest=None, stem=None):
+    """The work of 🔬 Sharpen eyes (one picture; `_sharpen_eyes` and the folder button call it): returns (the 2× picture, an html message, whether the loaded model was used instead of the picture's own);
+    every refusal raises _SharpenSkip(reason, html). `dest` / `stem`: save as <dest>/<stem>_md.png instead of outputs/.
+    🔬 Sharpen eyes for an EXISTING picture (Upscale tab): Real-ESRGAN 2× (`_max_detail_pass`) + the eye pass on the 2× picture, with the picture's own record —
     prompt, seed, sampler, eye style / denoise, and the checkpoint + LoRAs it was made with (loaded for the job when installed; otherwise the loaded model is used and the
     result says so). Returns (the 2× picture or None, an html message). Refuses a picture whose 2× would be over 64 MP, one without a face, one that already is max detail,
     a Pony-family model (the eye pass blurs it), and a run with no model at all."""
     if progress is None:                      # (not `progress or …`: gr.Progress defines __len__, which raises outside a running event)
         progress = lambda *a, **k: None
-    _generation_abort.clear()
     if image is None or not hasattr(image, "size"):
-        return None, _sharpen_err("Drop a picture into the Input Image box first.")
+        raise _SharpenSkip("no picture", _sharpen_err("Drop a picture into the Input Image box first."))
     w, h = image.size
     if w * 2 * h * 2 > _SHARPEN_MAX_PIXELS:
-        return None, _sharpen_err(f"{w}×{h} at 2× would be {w * 2}×{h * 2} ({w * h * 4 / 1e6:.0f} MP) — over the 64 MP limit; use a smaller picture.")
+        raise _SharpenSkip("over 64 MP", _sharpen_err(f"{w}×{h} at 2× would be {w * 2}×{h * 2} ({w * h * 4 / 1e6:.0f} MP) — over the 64 MP limit; use a smaller picture."))
     rgb = image.convert("RGB")
     from backend.detail_tools import (detect_faces, detail_schedule_steps, eye_detail, eye_detector_available, EYE_STYLE)
     try:
         faces = detect_faces(rgb, "anime")
     except Exception as e:
-        return None, _sharpen_err(f"the face detector failed: {html.escape(str(e).splitlines()[0][:160] if str(e) else type(e).__name__)}")
+        raise _SharpenSkip("face detector failed", _sharpen_err(f"the face detector failed: {html.escape(str(e).splitlines()[0][:160] if str(e) else type(e).__name__)}"))
     if not faces:
-        return None, _sharpen_err("no face found in this picture — nothing to sharpen (the eye pass needs a face).")
+        raise _SharpenSkip("no face", _sharpen_err("no face found in this picture — nothing to sharpen (the eye pass needs a face)."))
     try:
         from backend.png_info import read_png_info
         meta = read_png_info(image) if getattr(image, "info", None) else {}
@@ -923,29 +1005,31 @@ def _sharpen_eyes(image, progress=None):
     except Exception:
         plan = {}
     if plan.get("max_detail"):
-        return None, _sharpen_err("this picture already is max detail (Real-ESRGAN 2× + eyes) — sharpening it again would only add noise.")
+        raise _SharpenSkip("already max detail", _sharpen_err("this picture already is max detail (Real-ESRGAN 2× + eyes) — sharpening it again would only add noise."))
     notes = []
+    fallback = False
     want = plan.get("model")
     if want and Path(str(want)).is_file():
         ok, status = _GEN_HELPERS["ensure_model"](want, plan.get("vae") or "none", progress)
         if not ok:
-            return None, _sharpen_err(f"could not load the picture's checkpoint: {html.escape(str(status)[:200])}")
+            raise _SharpenSkip("checkpoint load failed", _sharpen_err(f"could not load the picture's checkpoint: {html.escape(str(status)[:200])}"))
         if plan.get("loras") is not None:
             slots = (list(plan["loras"]) + [("none", None)] * 3)[:3]
             err = _GEN_HELPERS["sync_loras"]([(p, (0.8 if wt is None else wt)) for p, wt in slots], progress)
             if err:
-                return None, _sharpen_err(f"LoRA problem: {html.escape(str(err)[:200])}")
+                raise _SharpenSkip("LoRA problem", _sharpen_err(f"LoRA problem: {html.escape(str(err)[:200])}"))
         notes.append(f"made with {html.escape(Path(str(want)).stem)}" + (" + " + ", ".join(html.escape(Path(str(p)).stem) for p, _ in plan["loras"]) if plan.get("loras") else ""))
     elif getattr(sd, "pipe", None) is None:
-        return None, _sharpen_err("no model is loaded and this picture's own checkpoint isn't installed — load a checkpoint on the Generate tab first.")
+        raise _SharpenSkip("no model", _sharpen_err("no model is loaded and this picture's own checkpoint isn't installed — load a checkpoint on the Generate tab first."))
     else:
+        fallback = True
         which = Path(str(sd.current_model)).stem
         why = "the picture's checkpoint isn't installed" if plan.get("prompt") else "the picture has no generation record"
         notes.append(f'<span style="color:#f9e2af;">⚠ {why} — used the loaded model ({html.escape(which)}); eyes may look a little different</span>')
     if _eye_pass_skipped(sd):
-        return None, _sharpen_err("the eye pass is skipped on Pony-family checkpoints (it blurs them) — nothing to do with this model.")
+        raise _SharpenSkip("Pony-family model", _sharpen_err("the eye pass is skipped on Pony-family checkpoints (it blurs them) — nothing to do with this model."))
     if not eye_detector_available():
-        return None, _sharpen_err("the eye detector couldn't be loaded (it is retried in 5 minutes).")
+        raise _SharpenSkip("eye detector missing", _sharpen_err("the eye detector couldn't be loaded (it is retried in 5 minutes)."))
     prompt = plan.get("prompt") or "1girl, solo, detailed eyes"
     neg = plan.get("negative_prompt") or ""
     seed = int(_num(plan.get("seed"), 0)) % 2**32
@@ -972,7 +1056,7 @@ def _sharpen_eyes(image, progress=None):
         out, found = eye_detail(sd, big, prompt, neg, denoise=den, steps=detail_schedule_steps("eye", steps, den), cfg=cfg, seed=seed,
                                 scheduler=sched, clip_skip=clip_skip, step_callback=cb)
     except _GenerationAborted:
-        return None, '<p style="color:#fab387;font-size:13px;">⏹ Stopped — nothing was saved.</p>'
+        raise _SharpenSkip("stopped", '<p style="color:#fab387;font-size:13px;">⏹ Stopped — nothing was saved.</p>')
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -984,21 +1068,22 @@ def _sharpen_eyes(image, progress=None):
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-            return None, _sharpen_err("out of GPU memory — try a smaller picture.")
-        return None, _sharpen_err(f"sharpening failed: {html.escape(str(e).splitlines()[0][:200] if str(e) else type(e).__name__)}")
+            raise _SharpenSkip("out of GPU memory", _sharpen_err("out of GPU memory — try a smaller picture."))
+        raise _SharpenSkip("failed", _sharpen_err(f"sharpening failed: {html.escape(str(e).splitlines()[0][:200] if str(e) else type(e).__name__)}"))
     finally:
         EYE_STYLE["mode"] = old_style
     if not found:
-        return None, _sharpen_err("the eye detector found no eyes on the 2× picture — nothing was saved.")
+        raise _SharpenSkip("no eyes found", _sharpen_err("the eye detector found no eyes on the 2× picture — nothing was saved."))
     rec_up = {"max_detail": {"scale": 2, "method": "Real-ESRGAN (ONNX)"}, "eye_detail": {"denoise": den, **({"style": "natural"} if style == "natural" else {})}}
     meta_out = _sharpen_params(image, rec_up, f"Max detail: 2× Real-ESRGAN, Eye detail: denoise {den:g}" + (", Eye style: natural" if style == "natural" else ""))
     src = (getattr(image, "info", None) or {}).get("saved_path")
-    path = _unique_output(f"{Path(src).stem}_md" if src else f"sharpen_{int(time.time())}")
+    base = f"{stem}_md" if stem else (f"{Path(src).stem}_md" if src else f"sharpen_{int(time.time())}")
+    path = _unique_output(base, dest) if dest is not None else _unique_output(base)
     out.save(path, pnginfo=meta_out)
     out.info["saved_path"] = str(path)
     msg = (f'<p style="color:#a6adc8;font-size:13px;">🔬 Sharpened: {w}×{h} → {out.width}×{out.height} · {found} eye(s) re-drawn (denoise {den:g}'
-           f'{", natural style" if style == "natural" else ""}) · {time.time() - t0:.0f}s<br>{" · ".join(notes)}<br>Saved: outputs/{path.name}</p>')
-    return out, msg
+           f'{", natural style" if style == "natural" else ""}) · {time.time() - t0:.0f}s<br>{" · ".join(notes)}<br>Saved: outputs/{(Path(dest).name + "/") if dest is not None else ""}{path.name}</p>')
+    return out, msg, fallback
 
 
 def _thermal_wait(progress=None) -> float:
@@ -1411,6 +1496,10 @@ def _build_generate_tab():
                                                     info="AYS: 10–12 · Karras / Euler: 20–30")
                             cfg_sl      = gr.Slider(1, 30,  value=_ls.get("cfg_scale", DEFAULT_CFG), step=0.5, label="CFG Scale",
                                                     info="Pony / IL: 5–7 · SD 1.5: 7–9")
+                        with gr.Row():
+                            recipe_btn = gr.Button("⚡ Use the measured recipe for this checkpoint", size="sm", scale=2,
+                                                   elem_id="recipe-btn")
+                            recipe_note = gr.HTML("")
 
                         with gr.Row():
                             size_preset_dd = gr.Dropdown(
@@ -3190,177 +3279,8 @@ def _build_generate_tab():
         return (shown, msg, status, _active_loras_html(), shown,
                 [cell_seeds[0] if cell_seeds else seed] + cell_seeds)
 
-    def do_inpaint_ui(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, prompt, neg_prompt, scheduler,
-                      steps, cfg, seed, clip_skip, editor, denoise, padding, progress=gr.Progress()):
-        from backend.detail_tools import inpaint_region
-        _generation_abort.clear()
-        image, mask = _editor_parts(editor)
-        if image is None:
-            return [], '<p style="color:#f38ba8;">❌ Upload an image in the Inpaint box first.</p>', \
-                gr.update(), gr.update(), gr.update()
-        if mask is None:
-            return [], '<p style="color:#f38ba8;">❌ Paint over the part you want redrawn.</p>', \
-                gr.update(), gr.update(), gr.update()
-        image, fixed = _fit_init_image(image, max_side=2048)
-        if fixed:
-            mask = mask.resize(image.size, Image.NEAREST)
-        steps, cfg, _w, _h, _b, seed, denoise, fixes = _clean_gen_args(steps, cfg, 512, 512, 1, seed, denoise,
-                                                                      img2img=True)
-        ok, status = _ensure_model(model_path, vae_path, progress)
-        if not ok:
-            return [], (status if isinstance(status, str) else ""), status, gr.update(), gr.update()
-        err = _sync_loras([(lora1, _num(w1, 0.8)), (lora2, _num(w2, 0.7)), (lora3, _num(w3, 0.7))], progress)
-        if err:
-            return [], f'<p style="color:#f38ba8;">❌ LoRA problem: {err}</p>', status, gr.update(), gr.update()
-        cs = 2 if int(_num(clip_skip, 1)) >= 2 else 1
-
-        def cb(step, total):
-            if _generation_abort.is_set():
-                raise _GenerationAborted()
-            progress(step / total, desc=f"Inpainting: step {step}/{total}")
-        t0 = time.time()
-        try:
-            out, used = inpaint_region(sd, image, mask, prompt or "", neg_prompt or "", steps=_inpaint_steps(steps, denoise), cfg=cfg,
-                                       denoise=denoise, seed=seed, scheduler=scheduler, clip_skip=cs,
-                                       padding=int(_num(padding, 48)), step_callback=cb)
-        except _GenerationAborted:
-            return [], '<p style="color:#fab387;">⏹ Inpaint stopped.</p>', status, gr.update(), gr.update()
-        except Exception as e:
-            return [], f'<p style="color:#f38ba8;">❌ Inpaint failed: {html.escape(str(e)[:300])}</p>', \
-                status, gr.update(), gr.update()
-        saved = _save_outputs([out], dict(mode="inpaint", prompt=prompt or "", negative_prompt=neg_prompt or "",
-                                          steps=steps, cfg_scale=cfg, seeds=[used], scheduler=scheduler,
-                                          width=out.width, height=out.height, strength=denoise,
-                                          inpaint_padding=int(_num(padding, 48)),
-                                          clip_skip=cs if cs > 1 else None), pipe=sd)
-        msg = (f'<p style="color:#a6adc8;font-size:13px;">🖌 Inpainted (denoise {denoise:g}, seed {used}) in '
-               f'{time.time() - t0:.1f}s · Saved: {saved[0].name if saved else "-"}'
-               + (f'<br><span style="color:#f9e2af;">Adjusted: {"; ".join(fixes)}</span>' if fixes else "")
-               + "</p>")
-        return [out], msg, status, [out], [used]
-
-    @gpu_job
-    def do_swap_ui(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, prompt, neg_prompt, scheduler,
-                   steps, cfg, seed, clip_skip, editor, padding, item, progress=gr.Progress()):
-        """🦋 Swap a hair accessory: paint over the old one, name the new one — one inpaint at denoise 1.0 with a hair-only
-        prompt (detail_tools.swap_item). At 0.9–0.95 the old shape still shows through as lace."""
-        from backend.detail_tools import SWAP_MIN_PADDING, swap_item, swap_prompt_from
-        _generation_abort.clear()
-        item = (item or "").strip()
-        image, mask = _editor_parts(editor)
-        if image is None:
-            return [], '<p style="color:#f38ba8;">❌ Upload an image in the Inpaint box first.</p>', \
-                gr.update(), gr.update(), gr.update()
-        if mask is None:
-            return [], '<p style="color:#f38ba8;">❌ Paint over the accessory you want to replace.</p>', \
-                gr.update(), gr.update(), gr.update()
-        if not item:
-            return [], '<p style="color:#f38ba8;">❌ Type what should be there instead (e.g. black butterfly hair ornament).</p>', \
-                gr.update(), gr.update(), gr.update()
-        image, fixed = _fit_init_image(image, max_side=2048)
-        if fixed:
-            mask = mask.resize(image.size, Image.NEAREST)
-        steps, cfg, _w, _h, _b, seed, _d, fixes = _clean_gen_args(steps, cfg, 512, 512, 1, seed, 1.0, img2img=True)
-        ok, status = _ensure_model(model_path, vae_path, progress)
-        if not ok:
-            return [], (status if isinstance(status, str) else ""), status, gr.update(), gr.update()
-        err = _sync_loras([(lora1, _num(w1, 0.8)), (lora2, _num(w2, 0.7)), (lora3, _num(w3, 0.7))], progress)
-        if err:
-            return [], f'<p style="color:#f38ba8;">❌ LoRA problem: {err}</p>', status, gr.update(), gr.update()
-        cs = 2 if int(_num(clip_skip, 1)) >= 2 else 1
-        pad = max(int(_num(padding, 48)), SWAP_MIN_PADDING)
-
-        def cb(step, total):
-            if _generation_abort.is_set():
-                raise _GenerationAborted()
-            progress(step / total, desc=f"Swapping: step {step}/{total}")
-        t0 = time.time()
-        try:
-            out, used = swap_item(sd, image, mask, item, prompt or "", neg_prompt or "", steps=steps, cfg=cfg, seed=seed,
-                                  scheduler=scheduler, clip_skip=cs, padding=pad, step_callback=cb)
-        except _GenerationAborted:
-            return [], '<p style="color:#fab387;">⏹ Swap stopped.</p>', status, gr.update(), gr.update()
-        except Exception as e:
-            return [], f'<p style="color:#f38ba8;">❌ Swap failed: {html.escape(str(e)[:300])}</p>', \
-                status, gr.update(), gr.update()
-        saved = _save_outputs([out], dict(mode="inpaint", prompt=swap_prompt_from(prompt or "", item), negative_prompt=neg_prompt or "",
-                                          steps=steps, cfg_scale=cfg, seeds=[used], scheduler=scheduler,
-                                          width=out.width, height=out.height, strength=1.0, inpaint_padding=pad,
-                                          inpaint_swap=item, clip_skip=cs if cs > 1 else None), pipe=sd)
-        msg = (f'<p style="color:#a6adc8;font-size:13px;">🦋 Swapped for “{html.escape(item)}” (seed {used}) in '
-               f'{time.time() - t0:.1f}s · Saved: {saved[0].name if saved else "-"}'
-               + (f'<br><span style="color:#f9e2af;">Adjusted: {"; ".join(fixes)}</span>' if fixes else "")
-               + "</p>")
-        return [out], msg, status, [out], [used]
-
-    @gpu_job
-    def do_hand_redraw_ui(model_path, vae_path, lora1, w1, lora2, w2, lora3, w3, prompt, neg_prompt, scheduler,
-                          steps, cfg, seed, clip_skip, editor, tries, progress=gr.Progress()):
-        """🖐 Re-draw a hand: several re-draws (seed, seed + 1, …) of the painted or the biggest detected hand at 0.7 with a
-        hand-only prompt (detail_tools.redraw_hand); the gallery shows the original first, then every try, each saved."""
-        from backend.detail_tools import HAND_REDRAW_DENOISE, detect_hands, hand_mask, hand_prompt_from, redraw_hand
-        _generation_abort.clear()
-        image, mask = _editor_parts(editor)
-        if image is None:
-            return [], '<p style="color:#f38ba8;">❌ Upload an image in the Inpaint box first.</p>',                 gr.update(), gr.update(), gr.update()
-        image, fixed = _fit_init_image(image, max_side=2048)
-        if mask is not None and fixed:
-            mask = mask.resize(image.size, Image.NEAREST)
-        found = ""
-        if mask is None:
-            hands = detect_hands(image, 6)
-            if not hands:
-                return [], ('<p style="color:#f38ba8;">❌ No hand found — paint over the hand you want re-drawn.</p>'),                     gr.update(), gr.update(), gr.update()
-            mask = hand_mask(image.size, hands[0])
-            found = f" (the biggest of {len(hands)} detected hand(s))" if len(hands) > 1 else " (the detected hand)"
-        steps, cfg, _w, _h, _b, seed, _d, fixes = _clean_gen_args(steps, cfg, 512, 512, 1, seed, HAND_REDRAW_DENOISE, img2img=True)
-        n = int(min(8, max(1, _num(tries, 4))))
-        ok, status = _ensure_model(model_path, vae_path, progress)
-        if not ok:
-            return [], (status if isinstance(status, str) else ""), status, gr.update(), gr.update()
-        err = _sync_loras([(lora1, _num(w1, 0.8)), (lora2, _num(w2, 0.7)), (lora3, _num(w3, 0.7))], progress)
-        if err:
-            return [], f'<p style="color:#f38ba8;">❌ LoRA problem: {err}</p>', status, gr.update(), gr.update()
-        cs = 2 if int(_num(clip_skip, 1)) >= 2 else 1
-        cur = [0]
-
-        def on_try(k):
-            cur[0] = k
-            _thermal_wait(progress)
-            if _generation_abort.is_set():
-                raise _GenerationAborted()
-
-        def cb(step, total):
-            if _generation_abort.is_set():
-                raise _GenerationAborted()
-            progress(step / total, desc=f"Hand try {cur[0] + 1}/{n}: step {step}/{total}")
-        t0 = time.time()
-        done, results = [], []            # redraw_hand appends every try to `done` as it finishes: a Stop or an error at try k keeps the k − 1 finished tries
-        try:
-            results = redraw_hand(sd, image, mask, prompt or "", neg_prompt or "", tries=n, steps=steps, cfg=cfg, seed=seed,
-                                  scheduler=scheduler, clip_skip=cs, step_callback=cb, on_try=on_try, out=done)
-            stopped = ""
-        except _GenerationAborted:
-            results, stopped = done, f" · ⏹ stopped after {len(done)} of {n} tries"
-        except Exception as e:
-            if not done:
-                return [], f'<p style="color:#f38ba8;">❌ Hand re-draw failed: {html.escape(str(e)[:300])}</p>',                 status, gr.update(), gr.update()
-            results, stopped = done, f" · ⚠ stopped at try {len(done) + 1} of {n}: {html.escape(str(e)[:120])}"
-        if not results:
-            return [], '<p style="color:#fab387;">⏹ Hand re-draw stopped.</p>', status, gr.update(), gr.update()
-        imgs = [r[0] for r in results]
-        used = [r[1] for r in results]
-        saved = _save_outputs(imgs, dict(mode="inpaint", prompt=hand_prompt_from(prompt or ""), negative_prompt=neg_prompt or "",
-                                         steps=steps, cfg_scale=cfg, seeds=used, scheduler=scheduler,
-                                         width=imgs[0].width, height=imgs[0].height, strength=HAND_REDRAW_DENOISE, inpaint_hand_redraw=True,
-                                         clip_skip=cs if cs > 1 else None), pipe=sd)
-        shown = [image] + imgs
-        msg = (f'<p style="color:#a6adc8;font-size:13px;">🖐 {len(imgs)} re-draw(s) of the hand{found} in {time.time() - t0:.1f}s '
-               f'(seeds {used[0]}–{used[-1]}){stopped} — the first picture is the original; keep the try you like '
-               f'(all saved: {html.escape(", ".join(p.name for p in saved[:2]))}{" …" if len(saved) > 2 else ""})'
-               + (f'<br><span style="color:#f9e2af;">Adjusted: {"; ".join(fixes)}</span>' if fixes else "")
-               + "</p>")
-        return shown, msg, status, shown, [used[0]] + used
+    from backend.ui_inpaint import build_handlers as _build_inpaint_handlers      # the 🖌 / 🦋 / 🖐 handlers live in backend/ui_inpaint.py (round 16)
+    do_inpaint_ui, do_swap_ui, do_hand_redraw_ui = _build_inpaint_handlers(sys.modules[__name__])
 
     inp_hand_btn.click(
         lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
@@ -3451,6 +3371,32 @@ def _build_generate_tab():
                 + [f'<p style="color:#a6e3a1;font-size:13px;">✨ {html.escape(name)}: {html.escape(_pl.summary(name))} '
                    f'— about {_pl.time_factor(name):g}× the time of the plain picture.</p>'])
     polish_dd.input(on_polish, [polish_dd, prompt_txt], _polish_outs + [polish_note])
+
+    # ⚡ Use the measured recipe: Sampler / Steps / CFG / PAG for the checkpoint's family, only where a recipe was measured (backend/recipes.py); nothing else is touched
+    def on_measured_recipe(model_path):
+        from backend import recipes as _rc
+        family = None
+        try:
+            if model_path and str(model_path) not in ("None", ""):
+                from backend.sd_pipeline import _model_family
+                family = _model_family(str(model_path))
+        except Exception:
+            family = None
+        if not family and getattr(sd, "pipe", None) is not None:
+            family = getattr(sd, "model_family", None)
+        keep = [gr.update()] * 4
+        if not family:
+            return keep + ['<p style="color:#f9e2af;font-size:13px;">⚡ No checkpoint is selected or loaded, so there is no family to look up; current settings kept.</p>']
+        r = _rc.recipe_for(family)
+        if r is None:
+            return keep + [f'<p style="color:#f9e2af;font-size:13px;">⚡ No measured recipe for {html.escape(_rc.family_label(family))} yet; current settings kept.</p>']
+        from backend import prompt_syntax as _ps
+        weights = ("" if _ps.EMPHASIS.get("mode", "a1111") == "a1111" else
+                   ' <span style="color:#f9e2af;">⚠ Settings → Prompt weights is “Compel”; the recipe was measured with A1111 weights.</span>')
+        return ([gr.update(value=r["scheduler"]), gr.update(value=r["steps"]), gr.update(value=r["cfg"]), gr.update(value=r["pag"])]
+                + [f'<p style="color:#a6e3a1;font-size:13px;">⚡ {html.escape(_rc.family_label(family))}: {html.escape(_rc.summary(r))} — {html.escape(r["basis"])}. '
+                   f'Prompt, size, LoRAs and seed untouched.{weights}</p>'])
+    recipe_btn.click(on_measured_recipe, [model_dd], [scheduler_dd, steps_sl, cfg_sl, pag_sl, recipe_note])
 
     # ── Dropping an image into img2img brings back how it was made ───────────
     _restore_outputs = [prompt_txt, neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl, width_sl, height_sl,
@@ -4534,8 +4480,12 @@ def _build_upscale_tab():
                     up_folder = gr.Textbox(label="Folder with images",
                                            placeholder=r"e.g. D:\pictures\to_upscale  (PNG / JPG / WebP)",
                                            info="Uses the scale and method above. Results go to "
-                                                "outputs/upscaled_<folder>/ with the originals' settings kept.")
+                                                "outputs/upscaled_<folder>/ with the originals' settings kept. "
+                                                "🔬 Sharpen eyes writes to outputs/sharpened_<folder>/ (2× pictures, skips what has no face).")
                     up_batch_btn = gr.Button("📁 Upscale folder", variant="secondary")
+                    with gr.Row():
+                        sharpen_folder_btn = gr.Button("🔬 Sharpen eyes for every picture in this folder", variant="secondary", scale=3)
+                        sharpen_stop_btn = gr.Button("⏹ Stop after this picture", size="sm", scale=1)
                     up_batch_info = gr.HTML("")
 
             with gr.Column():
@@ -4659,6 +4609,14 @@ def _build_upscale_tab():
         return msg
 
     up_batch_btn.click(do_upscale_folder, [up_folder, up_scale, up_method], [up_batch_info])
+
+    @gpu_job
+    def do_sharpen_folder(folder, progress=gr.Progress()):
+        """🔬 Sharpen eyes for every picture of the folder (round 16; see _sharpen_folder)."""
+        return _sharpen_folder(folder, progress)
+
+    sharpen_folder_btn.click(do_sharpen_folder, [up_folder], [up_batch_info])
+    sharpen_stop_btn.click(lambda: _generation_abort.set(), None, None, api_name=False)
 
     def _update_up_vram(image, scale, method):
         w, h = (image.size if image is not None else (512, 512))
@@ -6829,12 +6787,13 @@ def _hf_disk_problem(model_path) -> str:
             f"{cache.anchor}. Free up space or pick a local checkpoint.")
 
 
-def _unique_output(base: str) -> Path:
-    """outputs/<base>.png, or <base>_1.png, _2… — never overwrites an earlier result."""
-    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    path, n = OUTPUTS_DIR / f"{base}.png", 1
+def _unique_output(base: str, folder: Path | None = None) -> Path:
+    """outputs/<base>.png (or in `folder`), or <base>_1.png, _2… — never overwrites an earlier result."""
+    folder = Path(folder) if folder is not None else OUTPUTS_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    path, n = folder / f"{base}.png", 1
     while path.exists():
-        path, n = OUTPUTS_DIR / f"{base}_{n}.png", n + 1
+        path, n = folder / f"{base}_{n}.png", n + 1
     return path
 
 
