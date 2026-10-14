@@ -28,8 +28,8 @@ def set_limit(v) -> float:
 
 
 # Power profiles (Settings → 🌡 Power profile, round 11): a named pair of the two sliders, so the user doesn't have to know the numbers.
-# "full" = the shipped default on a full-power charger (Turbo / Manual): cool 1.5 + pause above 88. "limited" = a power-limited charger (Windows scheme
-# "Performance" / USB-C): cool 0 + pause above 88 (round 10 on USB-C: a Polish Full-body picture 202 s instead of 388 s, no hotter; round 11 re-measured it on the full-power charger).
+# "full" = the cautious default: cool 1.5 + pause above 88. "limited" = cool 0 + pause above 88: measured with no reading >= 94 on a USB-C charger (round 10: a Polish Full-body picture 202 s instead of 388 s)
+# and, after the laptop's service (round 17), on Manual with a 25 W CPU limit (111 s instead of 156 s per picture, max 91.9); on Turbo with an unlimited CPU before the service (round 11) it was not safe.
 PROFILES = {"full": (1.5, 88.0), "limited": (0.0, 88.0)}
 
 

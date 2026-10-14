@@ -9,11 +9,11 @@ import html
 
 import gradio as gr
 
-POWER_LABELS = {"full": "Full power (Turbo / Manual): cool 1.5 + pause above 88 °C",
-                "limited": "Power-limited (Windows \"Performance\" scheme / USB-C charger): cool 0 + pause above 88 °C",
+POWER_LABELS = {"full": "Full power (Turbo, unlimited CPU): cool 1.5 + pause above 88 °C",
+                "limited": "Power-limited (USB-C charger, or Manual with a CPU limit): cool 0 + pause above 88 °C",
                 "custom": "Custom (the two sliders below)"}
-POWER_INFO = ("Full power = the shipped default (cool 1.5 + pause above 88 °C). Power-limited = cool 0 + pause 88, for a SLOW charger only (Windows \"Performance\" scheme on a USB-C charger); "
-              "on the full-power charger keep Full power. Custom = the two sliders below. The measurements are in Help → Cool mode. Saved for the next start.")
+POWER_INFO = ("Full power = cool 1.5 + pause above 88 °C, the cautious default. Power-limited = cool 0 + pause 88: stayed under 94 °C on USB-C and, after the service, "
+              "on Manual with a 25 W CPU limit (29 % faster); not safe on Turbo with an unlimited CPU, before the service. Numbers: Help → Cool mode.")
 
 
 def power_choice():
