@@ -3819,6 +3819,118 @@ def _():
     kw = lora_keywords(str(out))
     assert kw is not None and kw.n_images == 2 and dict(kw.tags).get("grey hair") == 0.5, kw
 
+@test("LoRA trainer heat protection (round 20): cool mode pauses after each step and the pause-while-hot brake waits in the loop, both only timing (identical weights), off = no pause, Stop ends a wait")
+def _():
+    import torch
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from backend import lora_trainer as LT, sampling, thermal
+    out = Path(_tf.mkdtemp())
+
+    class U(torch.nn.Module):
+        def __init__(s):
+            super().__init__()
+            s.lin = torch.nn.Linear(4, 4)
+
+        def forward(s, x, t, h, added_cond_kwargs=None):
+            return SimpleNamespace(sample=s.lin(x))
+
+    def make():
+        torch.manual_seed(0)
+        cfg = LT.TrainingConfig(base_model="x.safetensors", model_type="sd15", epochs=2, output_dir=str(out), output_name="t",
+                                device="cpu", gradient_checkpointing=False, seed=1)
+        tr = LT.LoRATrainer(cfg)
+        tr.unet = U()
+        tr.noise_scheduler = SimpleNamespace(config=SimpleNamespace(prediction_type="epsilon", num_train_timesteps=10), add_noise=lambda l, n, t: l + n)
+        tr.items = [LT._TrainItem(f"{i}.png", "1girl", 64, 64) for i in range(4)]
+        tr.latent_cache = [torch.randn(4) for _ in range(4)]
+        tr.embed_cache = [{"encoder_hidden_states": torch.zeros(3, 4)} for _ in range(4)]
+        return tr
+
+    def run(sleeps, limit=0.0, factor=0.0, temp=None, abort_after=None):
+        tr = make()
+        steps = []
+        old = (sampling.COOL["factor"], thermal.GUARD["limit"])
+        sampling.COOL["factor"], thermal.GUARD["limit"] = factor, limit
+
+        def cb(pct, msg):
+            steps.append(msg)
+            if abort_after and len(steps) >= abort_after:
+                tr.abort()
+        try:
+            with patch.object(LT.time, "sleep", lambda s: sleeps.append(s)), patch.object(LT, "save_lora", lambda *a, **k: None), \
+                    patch.object(LT, "_THERM_EVERY", 0.0), patch.object(thermal, "read_temp", temp or (lambda: 60.0)):
+                msg = tr.train(callback=cb)
+        finally:
+            sampling.COOL["factor"], thermal.GUARD["limit"] = old
+        return tr, msg, steps
+
+    # off: no pause at all, and the reference weights
+    s_off = []
+    tr_off, msg_off, steps_off = run(s_off)
+    assert not s_off and "Training complete" in msg_off and len(steps_off) == 8, (s_off, msg_off, len(steps_off))
+    # cool mode: a pause after every step (factor × the step time), the weights are bit-identical
+    s_cool = []
+    tr_cool, msg_cool, steps_cool = run(s_cool, factor=4.0)
+    assert any(x > 0 for x in s_cool) and all(0 <= x <= 0.25 for x in s_cool), s_cool[:5]
+    assert all(torch.equal(a, b) for a, b in zip(tr_off.unet.state_dict().values(), tr_cool.unet.state_dict().values()))
+    # pause while hot: a hot zone makes the in-loop brake wait (acts at limit + 6), a cool one never does
+    hot = {"n": 0}
+
+    def read_hot():
+        hot["n"] += 1                                    # read 1 = the start check (cool), then 96 for a while (88 + 6 = 94 < 96: the brake), then cooled
+        return 60.0 if hot["n"] == 1 else (96.0 if hot["n"] < 8 else 70.0)
+    s_hot = []
+    tr_hot, msg_hot, steps_hot = run(s_hot, limit=88.0, temp=read_hot)
+    assert s_hot.count(2.0) >= 5 and hot["n"] >= 8, (s_hot[:8], hot)                   # wait_cool polls every 2 s
+    assert all(torch.equal(a, b) for a, b in zip(tr_off.unet.state_dict().values(), tr_hot.unet.state_dict().values()))
+    assert any("Cooling down" in m for m in steps_hot), steps_hot[:3]                  # the wait reports through the callback
+    s_cold = []
+    run(s_cold, limit=88.0, temp=lambda: 80.0)                                          # under limit + 6: nothing waits
+    assert not [x for x in s_cold if x == 2.0], s_cold
+    # Stop ends a wait (and the run says so)
+    n = {"r": 0}
+
+    def read_then_hot():
+        n["r"] += 1
+        return 60.0 if n["r"] == 1 else 99.0             # cool at the start check, hot after the first step
+    tr_stop, msg_stop, steps_stop = run([], limit=88.0, temp=read_then_hot, abort_after=1)
+    assert "Aborted" in msg_stop and len(steps_stop) == 1, (msg_stop, steps_stop)
+
+
+@test("LoRA trainer: the text-encoder LoRA gets gradients under gradient checkpointing (round 20: with the default reentrant checkpointing it stayed at zero for the whole training)")
+def _():
+    import torch
+    from transformers import CLIPTextModel, CLIPTextConfig
+    from peft import LoraConfig, get_peft_model
+    from backend import lora_trainer as LT
+
+    def grads(enable):
+        torch.manual_seed(0)
+        te = CLIPTextModel(CLIPTextConfig(vocab_size=100, hidden_size=16, intermediate_size=32, num_hidden_layers=3, num_attention_heads=2, max_position_embeddings=16))
+        te.requires_grad_(False)
+        te = get_peft_model(te, LoraConfig(r=4, lora_alpha=4, target_modules=["q_proj", "k_proj", "v_proj", "out_proj"]))
+        te.train()
+        enable(te)
+        ids = torch.randint(0, 100, (1, 16))
+        te(ids, output_hidden_states=True).hidden_states[-2].sum().backward()
+        return sum(1 for n, p in te.named_parameters() if p.requires_grad and "lora_B" in n and p.grad is not None and float(p.grad.abs().sum()) > 0)
+    assert grads(LT._enable_te_checkpointing) >= 6                         # the fixed helper: the LoRA's B matrices get gradient
+    try:
+        old = grads(lambda te: te.gradient_checkpointing_enable())           # the old call: nothing reaches the LoRA (the loss doesn't even require grad here)
+    except RuntimeError:
+        old = 0
+    assert old == 0, old
+
+
+@test("LoRA trainer: an SDXL LoRA on a GPU under 20 GB gets a warning in the Prepare log (round 20: 3 steps in 14 minutes on 12 GB), SD 1.5 / CPU / big cards don't")
+def _():
+    from backend import lora_trainer as LT
+    w = LT.sdxl_train_warning("sdxl", 12.0)
+    assert "does not fit" in w and "12 GB" in w and "SD 1.5" in w
+    assert LT.sdxl_train_warning("sd15", 12.0) == "" and LT.sdxl_train_warning("sdxl", None) == "" and LT.sdxl_train_warning("sdxl", 24.0) == ""
+
+
 class _BatchEnv:
     """The built UI's 🎴 outfit batch and X/Y grid with a fake pipeline that can press Stop after N images."""
     def __enter__(self):

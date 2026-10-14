@@ -495,6 +495,72 @@ def _cache_text_embeds(
 # Main trainer
 # ═════════════════════════════════════════════════════════════════════════════
 
+SDXL_TRAIN_MIN_VRAM_GB = 20.0     # the trainer loads the base model in fp32: an SDXL UNet alone is 10.3 GB, with the text encoders + activations ~19 GB
+
+
+def sdxl_train_warning(model_type: str, vram_gb: float | None) -> str:
+    """A warning for the Prepare log when an SDXL LoRA is about to be trained on a GPU that cannot hold it (round 20, measured on a 12 GB RX 6800M: Prepare 230 s, then 3 training
+    steps in 14.2 minutes — 12.2 GB dedicated + 6.7 GB spilled into shared memory — against 1.4 s per step for SD 1.5). '' when it fits / on CPU / not SDXL."""
+    if model_type != "sdxl" or vram_gb is None or vram_gb >= SDXL_TRAIN_MIN_VRAM_GB:
+        return ""
+    return (f"⚠ An SDXL LoRA does not fit on this GPU ({vram_gb:.0f} GB): the trainer holds the base model in fp32 (~{SDXL_TRAIN_MIN_VRAM_GB:.0f} GB needed), so it spills into shared "
+            "memory — measured on a 12 GB card: about 5 minutes per step. Train an SD 1.5 LoRA instead, or use a card with 24 GB.")
+
+
+def _enable_te_checkpointing(te) -> None:
+    """Gradient checkpointing for a text encoder that carries a LoRA. The default (reentrant) checkpointing cut the gradient to the LoRA inside the checkpointed layers
+    whenever the layer inputs don't require grad (the token embeddings are frozen): the text-encoder LoRA stayed at its initial zeros for the whole training
+    (found in round 20: every lora_up weight 0.000 after 320 steps with 'Train text encoder' on). use_reentrant=False passes the gradient through."""
+    if hasattr(te, "gradient_checkpointing_enable"):
+        te.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
+
+_THERM_EVERY = 10.0     # seconds between thermal-zone reads inside the loop (a PDH read takes ~1 s)
+
+
+class _HeatGuard:
+    """Cool mode + pause-while-hot for the training loop (round 20): training is the longest sustained GPU load the app has and never went through
+    sampling.run_pipe, so neither Settings → Cool mode nor Pause while hot applied to it. After each forward / backward step (`raw` = its real time):
+    wait sampling.COOL["factor"] × raw (in ≤ 0.25 s slices, Stop ends it), and with the pause-while-hot limit on check the thermal zone every ~10 s and
+    wait there with the in-pass brake rule (act at limit + 6, resume at the limit), like a sampling pass. Only timing changes, never the maths.
+    `say(text)` reports a wait; `waited` is the total seconds paused."""
+
+    def __init__(self, stop: Callable[[], bool], say: Callable[[str], None] | None = None,
+                 sleep: Callable[[float], None] | None = None, clock: Callable[[], float] | None = None):
+        self.stop, self.say = stop, say
+        self.sleep, self.clock = sleep or time.sleep, clock or time.perf_counter
+        self.waited = 0.0
+        self._checked = self.clock()
+
+    def start(self) -> float:
+        """Before the first step: the between-pieces rule of the pause-while-hot setting (wait until the laptop is under the limit)."""
+        from backend import thermal
+        if not thermal.GUARD["limit"]:
+            return 0.0
+        w = thermal.wait_cool(self.stop, self.say, read=thermal.read_temp, sleep=self.sleep, clock=self.clock)
+        self.waited += w
+        self._checked = self.clock()
+        return w
+
+    def after_step(self, raw: float) -> float:
+        from backend import sampling, thermal
+        t0 = self.clock()
+        pause = sampling.COOL["factor"] * max(0.0, raw)
+        while pause > 0 and self.clock() - t0 < pause:
+            if self.stop():
+                break
+            self.sleep(min(0.25, max(0.0, pause - (self.clock() - t0))))
+        try:
+            if thermal.GUARD["limit"] and self.clock() - self._checked >= _THERM_EVERY:
+                thermal.wait_cool(self.stop, self.say, read=thermal.read_temp, sleep=self.sleep, clock=self.clock, in_pass=True)
+                self._checked = self.clock()
+        except Exception:
+            pass
+        w = self.clock() - t0
+        self.waited += w
+        return w
+
+
 class LoRATrainer:
     """Train a LoRA adapter and save as safetensors."""
 
@@ -574,8 +640,7 @@ class LoRATrainer:
             try:
                 self.unet.enable_gradient_checkpointing()
                 for te in self._trained_te_list:
-                    if hasattr(te, "gradient_checkpointing_enable"):
-                        te.gradient_checkpointing_enable()
+                    _enable_te_checkpointing(te)
             except Exception as e:
                 print(f"[Train] ⚠ Gradient checkpointing failed ({e}), continuing without it")
 
@@ -627,6 +692,17 @@ class LoRATrainer:
         if not use_cached_embeds:
             print("[Train] TE forward: LIVE (training text encoder)")
 
+        # Heat protection (Settings → Cool mode / Pause while hot): timing only, the maths is unchanged
+        last_pct = [0.0]
+
+        def _say(text):
+            if callback:
+                callback(last_pct[0], text)
+        heat = _HeatGuard(lambda: self._abort, _say)
+        heat.start()
+        t_start = time.time()
+        t_mb = time.perf_counter()
+
         for epoch in range(cfg.epochs):
             if self._abort:
                 break
@@ -638,6 +714,7 @@ class LoRATrainer:
             for idx_in_epoch, data_idx in enumerate(indices):
                 if self._abort:
                     break
+                t_mb = time.perf_counter()
 
                 # --- Latents ---
                 if use_cached_latents:
@@ -713,6 +790,7 @@ class LoRATrainer:
 
                     if callback:
                         pct = global_step / max(total_steps, 1)
+                        last_pct[0] = pct
                         elapsed = time.time() - t_start
                         eta = elapsed / max(global_step, 1) * (total_steps - global_step)
                         avg = log_loss / max(forward_count, 1)
@@ -721,6 +799,8 @@ class LoRATrainer:
                                  f"Step {global_step}/{total_steps} | "
                                  f"Loss {step_loss:.4f} (avg {avg:.4f}) | "
                                  f"ETA {eta/60:.0f}m")
+
+                heat.after_step(time.perf_counter() - t_mb)      # cool mode / pause while hot (timing only)
 
             # Flush any trailing accumulated gradients at epoch boundary
             if len(indices) % cfg.gradient_accumulation != 0:
@@ -765,7 +845,8 @@ class LoRATrainer:
         # Never overwrite an existing LoRA (the default name is "my_lora"): add _2, _3 …
         out_path = _unique_path(Path(cfg.output_dir) / f"{cfg.output_name}.safetensors")
         save_lora(self.unet, self._trained_te_list, out_path, cfg, self._captions())
-        return (f"✅ Training complete — {global_step} steps in {elapsed/60:.1f}m — "
+        paused = f" (🌡 {heat.waited/60:.1f}m of it paused to keep the laptop cool)" if heat.waited >= 30 else ""
+        return (f"✅ Training complete — {global_step} steps in {elapsed/60:.1f}m{paused} — "
                 f"best loss {best_loss:.4f} — saved → {out_path.name}")
 
     def _forward_te(self, data_idx: int, device: torch.device, is_sdxl: bool):

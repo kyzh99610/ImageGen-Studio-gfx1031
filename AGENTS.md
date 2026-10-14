@@ -28,7 +28,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 166-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 169-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -70,7 +70,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 161 pass + 5 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 164 pass + 5 skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -660,6 +660,21 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   reason; Stop and the heat pause between pictures; originals untouched.
 - On a USB-C charger after the cooling service: a Polish Full-body picture in 165 s with the Power-limited profile, max
   90.9 °C, no reading at or above 94 °C (3 pictures).
+
+### LoRA training: heat protection, a text-encoder bug, measured guidance (2026-10-14)
+- **LoRA training honours cool mode and pause-while-hot** (it never went through the generation pipelines, so neither
+  applied — the longest sustained GPU load in the app had no protection): a start wait, the cool-mode pause after every
+  step, the in-loop emergency brake every ~10 s; Stop ends a wait. Timing only: the trained weights are bit-identical.
+- **Bug fixed: the text-encoder half of a LoRA never trained** — every text-encoder `lora_up` stayed exactly 0 because
+  reentrant gradient checkpointing blocked its gradient; `use_reentrant=False` fixes it (a test checks the gradient).
+- Measured on a laptop RX 6800M (SD 1.5, a 16-picture character set): 1.4 s per step once ZLUDA has compiled the backward
+  kernels (the first training on a PC spends ~6 more minutes on that), peak 6.8 GB. A trigger word alone did not bring the
+  character back (WD14 captions tie the traits to their own tags): use the trigger + the character's core tags; the LoRA
+  weight mattered more than the step count (weight 1.0 at 800 steps matched the reference identity). Help and the Train
+  tab say so.
+- **SDXL LoRA training does not fit in 12 GB** (the frozen base is loaded in fp32: it spilled ~6.7 GB into shared memory and
+  took minutes per step); Prepare now warns below 20 GB of VRAM.
+- The SD → SDXL Bridge driven again end to end: ~55 s warm, both stages' records right.
 
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the

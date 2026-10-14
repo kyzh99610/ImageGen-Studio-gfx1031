@@ -5675,7 +5675,7 @@ def _build_train_tab(gen_lora_dds=()):
             gr.HTML(
                 '<div class="tr-note">'
                 '<b>Quick-start recommendations</b> (character LoRA on SDXL):<br>'
-                'Rank 16 · Alpha 16 · LR 1e-4 · 10–20 epochs · Train text encoder ON · Cosine scheduler.<br>'
+                'Rank 16 · Alpha 16 · LR 1e-4 · 300–800 steps (images × epochs: 16 images → 20–50 epochs) · Train text encoder ON · Cosine scheduler.<br>'
                 'For SD 1.5: same settings but resolution 512.'
                 '</div>'
             )
@@ -5720,8 +5720,8 @@ def _build_train_tab(gen_lora_dds=()):
                 epochs_sl = gr.Slider(
                     1, 100, value=10, step=1,
                     label="Epochs",
-                    info="How many times the trainer sees every image. "
-                         "10–20 for character LoRAs. More images → fewer epochs needed.")
+                    info="Judge by steps = images × epochs. A 16-image character gave her look from 320 steps (20 epochs) "
+                         "at weight 0.8–1.0 (prompt = trigger + her core tags).")
                 train_te_cb = gr.Checkbox(
                     value=True, label="Train text encoder",
                     info="Recommended for character LoRAs — teaches the model what "
@@ -5730,7 +5730,7 @@ def _build_train_tab(gen_lora_dds=()):
             gr.HTML(
                 '<div class="tr-tip">'
                 '<b>Understanding epochs vs. steps:</b><br>'
-                'If you have 30 images and set 10 epochs, the trainer runs 30 × 10 = 300 steps. '
+                'If you have 30 images and set 10 epochs, the trainer runs 30 × 10 = 300 steps. Character LoRAs usually need several hundred to ~1000 steps. '
                 'Each step processes one image. More images with fewer epochs often generalises better '
                 'than few images with many epochs (which risks <em>overfitting</em> — the LoRA memorises '
                 'your images pixel-for-pixel instead of learning the concept).'
@@ -5811,8 +5811,8 @@ def _build_train_tab(gen_lora_dds=()):
                 '<b>⚠ Memory & time estimates (CPU training):</b><br>'
                 '• <b>SD 1.5 LoRA</b> — ~4 GB RAM, ~2–5 sec/step → 30 images × 10 epochs ≈ 15–25 min<br>'
                 '• <b>SDXL LoRA</b> — ~12 GB RAM, ~10–30 sec/step → 30 images × 10 epochs ≈ 50–150 min<br>'
-                'You have 128 GB RAM so memory is not a concern. '
-                'DirectML on the RX 6800 XT should be 3–10× faster if the backward pass works.'
+                'GPU training (ZLUDA, SD 1.5) runs ~1.4 s per step on an RX 6800M; the first run on a PC compiles kernels for ~6 minutes. '
+                'An SDXL LoRA does not fit in 12 GB of VRAM (the base model is trained in fp32).'
                 '</div>'
             )
 
@@ -6041,7 +6041,7 @@ def _build_train_tab(gen_lora_dds=()):
             if not folder or not Path(folder).is_dir():
                 return "❌ Set dataset folder.", ""
 
-            from backend.lora_trainer import TrainingConfig, LoRATrainer, safe_output_name
+            from backend.lora_trainer import TrainingConfig, LoRATrainer, safe_output_name, sdxl_train_warning
             from config import LORAS_DIR
 
             # Training loads its own copy of the base model; a generation model left in
@@ -6102,6 +6102,15 @@ def _build_train_tab(gen_lora_dds=()):
                       f'{", ".join(Path(str(m)).stem for m in freed)} — they reload '
                       f'automatically on your next Generate.' if freed else '') + '</p>')
             color = "#a6e3a1" if "✅" in msg else "#f38ba8"
+            try:
+                import torch as _t
+                _vram = (_t.cuda.get_device_properties(_t.device(cfg.device if cfg.device.startswith("cuda") else "cuda:0")).total_memory / 2**30
+                         if cfg.device in ("auto", "cuda") and _t.cuda.is_available() else None)
+            except Exception:
+                _vram = None
+            _warn = sdxl_train_warning(cfg.model_type, _vram)
+            if _warn:
+                log += f'<p style="color:#f9e2af;font-size:13px;">{html.escape(_warn)}</p>'
             return f'<p style="color:{color}">{msg}</p>', log
 
         def do_train_start(progress=gr.Progress()):
