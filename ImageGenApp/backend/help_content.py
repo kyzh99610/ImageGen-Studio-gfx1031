@@ -433,6 +433,16 @@ def parameters_html() -> str:
              "After upscaling, re-draws the image in native-size tiles at low denoise (0.25–0.35) with the loaded "
              "model — real detail beyond hires fix's 1536 / 2048 px limit. Higher denoise can put faces into tiles.",
              _cn("放大后用已加载模型分块低降噪重绘，超越高清修复的尺寸上限；降噪过高可能在分块里画出多余的脸。")],
+            ["⚡ Use the measured recipe",
+             "The button under Steps / CFG fills Sampler, Steps, CFG and PAG scale with the settings that were measured for the family of the checkpoint selected in the Generate tab "
+             "(the loaded one when none is selected). Only Illustrious / NoobAI has one so far: DPM++ 2M AYS, 12 steps, CFG 6, PAG 2 — measured on five Illustrious / NoobAI checkpoints with one "
+             "character LoRA: the recipe sits on a plateau (CFG 5, a stronger LoRA, Euler a at 20 steps, a bigger size, CFG rescale, PAG 3 were each no better), while 10-step bases, no PAG and Compel prompt weights cost something. "
+             "For any other family (Pony, SDXL base, SD 1.5) it says there is no measured recipe yet and changes nothing. It never touches the prompt, size, LoRAs, seed or any default — a fresh install still starts at "
+             "Steps 20 / CFG 7.5 / DPM++ 2M Karras until you press it. The recipe was measured with A1111 prompt weights (Settings → Prompt weights, the default); the note warns when it is set to Compel.",
+             _cn("“Steps / CFG”下方的按钮，按 Generate 页所选底模的系列填入采样器、步数、CFG 和 PAG（未选择时用已加载的模型）。目前只有 Illustrious / NoobAI 有实测方案：DPM++ 2M AYS、12 步、CFG 6、PAG 2——"
+                 "在五个 Illustrious / NoobAI 模型上配合一个角色 LoRA 测得：该方案处在平台期（CFG 5、更强的 LoRA、Euler a 20 步、更大尺寸、CFG rescale、PAG 3 都没有更好），"
+                 "而 10 步底图、关闭 PAG、Compel 提示词权重都会有代价。其他系列（Pony、SDXL 基础版、SD 1.5）会提示“暂无实测方案”并保持不变。它不会改动提示词、尺寸、LoRA、种子或任何默认值——"
+                 "新装时仍从 步数 20 / CFG 7.5 / DPM++ 2M Karras 开始，直到你按下按钮。该方案是在 A1111 提示词权重下测得的（设置 → 提示词权重，默认值）；设为 Compel 时提示条会提醒。")],
             ["🔬 Sharpen eyes (Upscale tab)",
              "For a picture that already exists — made here (any time, also before round 14) or anywhere else: Real-ESRGAN 2× of the picture, then the eye pass on the 2× picture, "
              "using the picture's own settings: its prompt, seed, sampler and eye style / denoise from the saved record, and — when they are installed — the checkpoint and LoRAs it was made with "
@@ -441,13 +451,20 @@ def parameters_html() -> str:
              "It lives on the Upscale tab rather than PNG Info because the result is an upscaled picture and that tab already carries the picture's record forward; PNG Info stays a viewer. "
              "Measured on six full-body pictures of one character (hassakuXL ×5, waiIllustrious ×1; 4 from before the Max detail option): eye detail ×6.2 at the same display size, face sharpness ×1.9, "
              "identity unchanged (CCIP +0.007), 1–2.5 min per picture on the full-power laptop (a checkpoint switch adds ~1 min). The result is saved next to the others with the record updated "
-             "(Max detail + Eye detail), so PNG Info → Send to Generate shows it.",
+             "(Max detail + Eye detail), so PNG Info → Send to Generate shows it. "
+             "<b>For a whole folder:</b> under “Batch — upscale a whole folder” the button 🔬 Sharpen eyes for every picture in this folder does the same for each PNG / JPG / WebP "
+             "and writes outputs/sharpened_<folder>/ (the originals stay). It pauses while the laptop is hot before each picture, groups pictures made with the same checkpoint to save model switches, "
+             "and skips with a reason what it cannot do: no face, a 2× result over 64 MP, a picture that already is max detail, a Pony-family model; a picture without a record uses the loaded model and the summary says so. "
+             "⏹ Stop after this picture ends it between pictures — the finished ones are kept. Measured on 4 existing full-body pictures: eye detail ×6.1, identity unchanged, about 2 minutes per picture (full-power laptop).",
              _cn("对已有图片（本应用生成的任何时候的图，或其他来源的图）：先用 Real-ESRGAN 放大 2×，再在放大后的图上做眼部重绘，使用图片自己的设置——保存的记录里的提示词、种子、采样器、眼部风格/降噪，"
                  "以及（已安装时）生成它的底模与 LoRA（任务期间加载，之后保持加载）。底模未安装或图片没有记录时用当前已加载的模型并在结果里提示（眼睛可能略有不同）。"
                  "以下情况会给出提示且不保存：没有找到人脸、2× 结果超过 64 MP、图片已是最大细节、Pony 系模型（眼部重绘会让它变软）。"
                  "放在“放大”页而不是 PNG Info，因为结果是一张放大后的图，而该页本来就会沿用图片的记录；PNG Info 只负责查看。"
                  "实测 6 张同一角色的全身图（hassakuXL ×5、waiIllustrious ×1；4 张来自最大细节选项之前）：眼部细节 ×6.2（相同显示尺寸），脸部清晰度 ×1.9，相似度不变（CCIP +0.007），"
-                 "满功率笔记本上每张 1–2.5 分钟（切换底模约多 1 分钟）。结果与其他图一起保存，记录已更新（最大细节 + 眼部重绘），可在 PNG Info → 发送到 Generate 里看到。")],
+                 "满功率笔记本上每张 1–2.5 分钟（切换底模约多 1 分钟）。结果与其他图一起保存，记录已更新（最大细节 + 眼部重绘），可在 PNG Info → 发送到 Generate 里看到。"
+                 "整个文件夹：在“批量——放大整个文件夹”下的按钮“🔬 对此文件夹的每张图修复眼睛”对每张 PNG / JPG / WebP 做同样的事，结果写入 outputs/sharpened_<文件夹>/（原图不动）。"
+                 "每张图之前过热会先暂停；同一底模的图会放在一起处理以减少切换；做不了的会带原因跳过：没有人脸、2× 结果超过 64 MP、已是最大细节、Pony 系模型；没有记录的图用已加载的模型并在摘要里说明。"
+                 "“⏹ 本张之后停止”会在两张图之间结束，已完成的保留。实测 4 张已有的全身图：眼部细节 ×6.1，相似度不变，每张约 2 分钟（满功率笔记本）。")],
             ["🖌 Inpaint",
              "Paint over any area and describe what should be there; only that area is redrawn, at native "
              "resolution, with your model, LoRAs and seed. Good for small things — measured: to swap a hair "
