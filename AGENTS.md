@@ -643,6 +643,15 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
 - Earlier thermal percentages in this file's history came from a helper that mixed earlier nights into each time window
   (the log keeps clock times only); they were recomputed per logging session.
 
+### Long-session check of the Power-limited profile; a faster ×2 upscaler measured (2026-10-14)
+- A 58-minute mixed session on the Power-limited profile (cool 0 + pause above 88; laptop RX 6800M after a cooling
+  service, Manual mode with the CPU limited to 25 W): Polish Full body and Full body — max detail, an outfit batch with ⭐,
+  Sharpen eyes for a folder, Auto-Loop and a checkpoint switch — max 92.9 °C, no reading at or above 94 °C, memory flat,
+  every record right.
+- A native ×2 Real-ESRGAN model (facefusion-assets models-3.0.0) makes the Max-detail upscale stage ×5.3 faster than the
+  ×4 model + downscale, but the finished eyes come out softer (eye detail ×0.74): not used. The ×4 model with 384 px
+  DirectML tiles crashes the GPU driver; 256 px tiles stay.
+
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
 auto-quality tags: each tag once (key = lower-case, `_`→space, weight syntax removed), strongest weight wins,
