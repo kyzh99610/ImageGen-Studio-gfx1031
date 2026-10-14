@@ -375,8 +375,8 @@ def power_hint_html() -> str:
     if COOL["factor"] <= 0 or s is None or s < POWER["limit"]:
         return ""
     return ('<p style="color:#f9e2af;font-size:13px;margin:2px 0;">💡 This laptop looks power-limited (a sampling step took '
-            f'{s:.1f} s per megapixel; ~2 s on a full-power charger). Settings → Power profile → "Power-limited" measured safe '
-            'and about 1.9× faster on a USB-C charger — on a full-power charger keep Full power. Nothing was changed.</p>')
+            f'{s:.1f} s per megapixel; ~2 s at full power). Settings → Power profile → "Power-limited" measured safe '
+            'and about 1.9× faster on a USB-C charger and 1.4× on a CPU-limited Manual mode; on Turbo with an unlimited CPU (before the service) it was not safe. Nothing was changed.</p>')
 
 
 _THERM_EVERY = 10.0     # seconds between thermal-zone reads inside a pass (a PDH read takes ~1 s)

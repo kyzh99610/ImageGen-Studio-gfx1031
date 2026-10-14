@@ -632,6 +632,17 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
 - The Inpaint accordion's handlers (inpaint / 🦋 swap / 🖐 re-draw) moved to `backend/ui_inpaint.py`; tests that read
   app.py's source text became behaviour checks.
 
+### Power profile after a cooling service; corrected thermal figures (2026-10-14)
+- After a cooling service (fresh paste, VRAM / VRM putty redone, heatsinks cleaned, new fans) the laptop RX 6800M in a
+  Manual mode with the CPU limited to 25 W: idle 63–73 °C (before: 77–91), cool 1.5 + pause 88 never paused (157 s per
+  Polish Full-body picture), **cool 0 + pause 88: 111 s per picture (−29 %), max 91.9 °C, no reading at or above 94 °C
+  over 8 pictures back to back.** A full-power Turbo mode with an unlimited CPU failed the same test before the service
+  and was not re-measured: keep Full power there.
+- Settings → Power profile now reads "Full power (Turbo, unlimited CPU)" / "Power-limited (USB-C charger, or Manual with a
+  CPU limit)"; Help and README carry the labelled numbers.
+- Earlier thermal percentages in this file's history came from a helper that mixed earlier nights into each time window
+  (the log keeps clock times only); they were recomputed per logging session.
+
 ### Prompts: merge, chunks, keywords
 `prompt_tools.merge_prompts()` is used by presets, quick tags, img2img enhancer tags, keyword chips and the
 auto-quality tags: each tag once (key = lower-case, `_`→space, weight syntax removed), strongest weight wins,
