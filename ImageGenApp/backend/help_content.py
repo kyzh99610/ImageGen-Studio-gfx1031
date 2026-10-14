@@ -358,6 +358,7 @@ def parameters_html() -> str:
              "<b>after the laptop's service (new paste, clean fans), Manual mode with a 25 W CPU limit</b>: cool 1.5 156 s per picture with no pause at all and the zone under 89 °C, "
              "cool 0 + pause 88 111 s (−29 %, the pause waiting 34 % of the time), zone median 86 °C, max 91.9, no reading at 94 °C or more over 8 pictures; "
              "<b>Turbo with an unlimited CPU, before the service</b>: cool 0 + pause 88 was not safe (8 % of the readings over 42 minutes at 94 °C or more, a 30 s run) — keep Full power there. "
+             "<b>LoRA training honours both settings too</b> (Train tab): the same pause after every training step, and with Pause while hot on, a check every ~10 s that waits when the zone is 6 °C over the limit and goes on at the limit (it also waits for a cool laptop before the first step); Stop ends a wait. Only timing changes — the saved LoRA is the same. A long training is the most sustained load the app has, so keep these on for a laptop that has switched off before. "
              "Moving a slider switches the profile to Custom. When cool mode is on and a sampling pass is that slow, the result line adds a hint (it never changes a setting).",
              _cn("笔记本长时间满载会自动关机时使用。冷却模式在每个采样步之后暂停（1.5 = GPU 约 40% 时间工作，画面不变，速度变慢）；"
                  "过热暂停会在每张图、每个高清修复/脸/眼重绘以及套装批量的 ⭐ 评分（CPU 运算，同样会升温，评分期间每 10 秒再检查一次）之前等待，"
@@ -367,6 +368,7 @@ def parameters_html() -> str:
                  "<b>USB-C 充电器 + Windows “Performance” 方案</b>（每百万像素一个采样步约 4 秒，正常约 2 秒）：202 秒（冷却 1.5 为 388 秒），连续 8 张没有读数 ≥ 94 °C；"
                  "<b>笔记本检修后（换了导热材料、清了风扇），Manual 模式 + CPU 限制 25 W</b>：冷却 1.5 每张 156 秒且完全不需要暂停、温度低于 89 °C，冷却 0 + 88 °C 暂停每张 111 秒（快 29%，暂停占 34% 的时间），温度中位数 86 °C、最高 91.9，8 张没有读数 ≥ 94 °C；"
                  "<b>检修前的 Turbo + CPU 不限功率</b>：冷却 0 + 88 °C 暂停不安全（42 分钟内 8% 的读数 ≥ 94 °C，出现过 30 秒连续高温），请保持 Full power。拖动任一滑块会切换为 Custom。"
+                 "LoRA 训练同样遵守这两项设置（训练页）：每个训练步之后同样暂停；开启过热暂停时每约 10 秒检查一次，高于设定值 6 °C 时等待、降到设定值时继续（开始训练前也会等到笔记本凉下来），停止按钮可结束等待。只改变速度，保存的 LoRA 不变。长时间训练是本应用最持久的负载，曾经自动关机的笔记本请保持开启。"
                  "冷却模式开启且采样明显偏慢时，结果栏会给出提示（不会自动更改任何设置）。")],
             ["✨ Polish (Generate tab)",
              "The dropdown above Hires fix — Portrait / Cowboy shot / Full body / Wide shot, or Auto (reads the framing tags in the prompt) — "
@@ -711,9 +713,14 @@ def lora_training_html() -> str:
              _cn("每张图片photo.png需要旁边有一个photo.txt文件。")],
         ]
     )
-    h += _tip("For character LoRAs, include trait tags like hair/eye color in <em>every</em> caption. "
-              "This teaches the model to always reproduce those features when the trigger is used."
-              "<br>" + _cn("角色LoRA中，每个标注都要包含发色、眼色等特征标签，这样模型才能学会用触发词时始终还原这些特征。"))
+    h += _tip("<b>Trait tags in the captions stay tied to those tags, not to the trigger.</b> The WD14 auto-tagger writes the trigger first and then every tag it sees — hair colour, eye colour, "
+              "the ornament — so after training the trigger word alone does <em>not</em> bring them back. Measured (16 pictures of one character, 800 steps): a prompt with only the trigger drew "
+              "black-haired girls like the model without the LoRA; trigger + her core tags (grey hair, red eyes, long hair, the hair ornament) at LoRA weight 1.0 drew her (face similarity 0.94 against 0.77 for the same prompt without the LoRA), "
+              "with her black ornament instead of the model's coloured butterflies. So either put the core tags in the prompt (the 🗝 keyword chips under the LoRA slot do it: ✨ Add character tags), or <em>delete</em> the tags that "
+              "describe her from every caption so the trigger has to carry them."
+              "<br>" + _cn("标注里的特征标签（发色、眼色、饰品）会和这些标签本身绑定，而不是和触发词绑定：WD14 自动打标会把它们都写进标注，所以训练后只写触发词不会还原这些特征。"
+                          "实测（同一角色 16 张图、800 步）：只写触发词时画出的是黑发女孩，和不加 LoRA 一样；触发词 + 核心标签（灰发、红眼、长发、发饰）、LoRA 权重 1.0 时画出了她本人。"
+                          "做法：在提示词里加上核心标签（LoRA 栏下的 🗝 关键词按钮“✨ 添加角色标签”可一键添加），或者从每条标注里删掉描述她外貌的标签，让触发词来承担。"))
 
     # ── Training parameters ────────────────────────────────────────────────
     h += '<div class="hg-h3">Training Parameters &nbsp;<span class="cn">训练参数</span></div>'
@@ -734,9 +741,13 @@ def lora_training_html() -> str:
              "Too high → overfitting (memorises images). Too low → no effect. "
              + _cn("太高→过拟合（记住图片）。太低→没有效果。1e-4是安全默认值。")],
             ["Epochs / 训练轮次",
-             "10–20 (character)<br>5–10 (style)",
-             "How many times the trainer sees every image. More images → fewer epochs. "
-             + _cn("训练器看每张图片的次数。图片越多需要的轮次越少。")],
+             "Judge by <b>steps</b> = images × epochs: 300–800 for a 16-image character<br>(20–50 epochs)",
+             "How many times the trainer sees every image. Measured on 16 pictures of one character (SD 1.5, rank 16, LR 1e-4, prompt = trigger + her core tags; face similarity to her references, CCIP, 1.0 = her): no LoRA 0.77, "
+             "the 320-step file (20 epochs) at weight 0.8 0.89, the 800-step file (50 epochs) at 0.8 0.87 and at <b>1.0 0.94</b> — the weight mattered more than the steps. "
+             "Speed: 1.4 s per step on the RX 6800M laptop once ZLUDA has compiled the backward kernels (the first training on a PC spends ~6 more minutes on that): 800 steps = 18.5 min. "
+             "Set 'Save checkpoint every N epochs' to 10 to keep the in-between files and compare them. "
+             + _cn("训练器看每张图片的次数。请按“步数 = 图片数 × 轮次”判断：实测 16 张同一角色的图（SD 1.5，rank 16，LR 1e-4，提示词 = 触发词 + 她的核心标签；用 CCIP 衡量脸部与她参考图的相似度，1.0 = 她）：不加 LoRA 0.77，320 步（20 轮）权重 0.8 为 0.89，800 步（50 轮）权重 0.8 为 0.87、权重 1.0 为 0.94——权重比步数更重要。"
+                   "速度：RX 6800M 笔记本在 ZLUDA 编译完反向核后每步 1.4 秒（电脑上第一次训练还要多花约 6 分钟编译），800 步 = 18.5 分钟。把“每 N 轮保存”设为 10 可保留中间文件对比。")],
             ["Train text encoder / 训练文本编码器",
              "✅ ON for characters<br>❌ OFF for styles",
              "Teaches the trigger word meaning. Essential for character LoRAs. "
