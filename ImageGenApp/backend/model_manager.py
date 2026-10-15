@@ -88,9 +88,10 @@ def avail_commit_gb() -> float | None:
         return None
 
 
-def commit_problem(model_path) -> str | None:
+def commit_problem(model_path, scale: float = 1.0) -> str | None:
     """A plain-English refusal when the free commit is clearly too small to load this checkpoint (call it after the
-    previous model has been unloaded); None when it should fit or can't be judged (not a local file, not Windows)."""
+    previous model has been unloaded); None when it should fit or can't be judged (not a local file, not Windows).
+    `scale` multiplies the need (the LoRA trainer loads its base model in fp32: x1.5, round 21)."""
     p = Path(str(model_path))
     if not p.is_file():
         return None
@@ -98,7 +99,7 @@ def commit_problem(model_path) -> str | None:
     if free is None:
         return None
     size = p.stat().st_size / 2**30
-    need = (LOAD_COMMIT_FACTOR_FIRST if _first_load[0] else LOAD_COMMIT_FACTOR) * size
+    need = (LOAD_COMMIT_FACTOR_FIRST if _first_load[0] else LOAD_COMMIT_FACTOR) * size * scale
     if free >= need:
         _first_load[0] = False
         return None

@@ -3923,12 +3923,189 @@ def _():
     assert old == 0, old
 
 
+@test("LoRA trainer Prepare (round 21): the caching loops call a hook per image — Stop ends Prepare ('⏹ Prepare stopped'), the pause-while-hot wait runs on the first image and then every ~10 s only")
+def _():
+    import torch
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from backend import lora_trainer as LT, thermal
+    tr = LT.LoRATrainer(LT.TrainingConfig(base_model="x.safetensors", model_type="sd15", dataset_dir="d", device="cpu"))
+    sleeps, temps = [], {"n": 0}
+
+    def read():
+        temps["n"] += 1
+        return 95.0 if temps["n"] <= 3 else 60.0          # hot for the first reads, then cool
+    old = thermal.GUARD["limit"]
+    thermal.GUARD["limit"] = 88.0
+    try:
+        with patch.object(LT.time, "sleep", lambda s: sleeps.append(s)), patch.object(thermal, "read_temp", read):
+            msgs = []
+            hook = tr._prepare_hook(lambda c, t, m: msgs.append((c, t, m)))
+            hook(0, 4)                                                   # the first image reads the zone and waits (3 hot reads)
+            assert sleeps.count(2.0) >= 2 and any("Cooling down" in m[2] for m in msgs), (sleeps, msgs[:2])
+            n_reads = temps["n"]
+            hook(1, 4); hook(2, 4)                                       # within 10 s: no new read
+            assert temps["n"] == n_reads
+            tr._abort = True
+            try:
+                hook(3, 4)
+                raise AssertionError("Stop did not end Prepare")
+            except LT._TrainStopped:
+                pass
+    finally:
+        thermal.GUARD["limit"] = old
+    # a Prepare whose caching raises _TrainStopped says so and frees the model
+    tr2 = LT.LoRATrainer(LT.TrainingConfig(base_model="x.safetensors", model_type="sd15", dataset_dir="d", device="cpu"))
+    tr2._load_base_model = lambda cb: None
+    tr2._build_items = lambda cb: None
+    tr2._inject_lora = lambda: None
+    tr2._cache = lambda cb: (_ for _ in ()).throw(LT._TrainStopped())
+    assert tr2.prepare() == "⏹ Prepare stopped"
+    # the caching loops call the hook once per image
+    from PIL import Image
+    d = Path(_tf.mkdtemp())
+    for i in range(3):
+        Image.new("RGB", (64, 64), (i * 50, 10, 10)).save(d / f"{i}.png")
+    items = [LT._TrainItem(str(d / f"{i}.png"), "c", 64, 64) for i in range(3)]
+
+    class VAE:
+        dtype, device = torch.float32, "cpu"
+        config = SimpleNamespace(scaling_factor=0.18)
+        eval = lambda self: None
+        encode = lambda self, t: SimpleNamespace(latent_dist=SimpleNamespace(mode=lambda: torch.zeros(1, 4, 8, 8)))
+    seen = []
+    LT._cache_latents_for_items(items, VAE(), False, None, hook=lambda i, n: seen.append((i, n)))
+    assert seen == [(0, 3), (1, 3), (2, 3)], seen
+
+
+@test("LoRA trainer load (round 21): the trainer's own fp32 model load goes through the commit preflight — a load that cannot fit is refused with the pipelines' message before anything is loaded")
+def _():
+    from unittest.mock import patch
+    from backend import lora_trainer as LT, model_manager as MM
+    p = Path(_tf.mkdtemp()) / "m.safetensors"
+    p.write_bytes(b"\0" * (1 << 20))                                         # 1 MiB stand-in: need = factor x 0.00098 GB
+    with patch.object(MM, "avail_commit_gb", lambda: 0.0035):
+        MM._first_load[0] = False
+        assert MM.commit_problem(p, scale=1.0) is None                       # 2.05 x 0.00098 = 0.0020 <= 0.0035: fits
+        assert MM.commit_problem(p, scale=LT._TRAIN_LOAD_SCALE) is None        # x 1.5 = 0.0030 <= 0.0035: still fits
+    with patch.object(MM, "avail_commit_gb", lambda: 0.0025):
+        assert MM.commit_problem(p, scale=1.0) is None and "Not enough free memory" in MM.commit_problem(p, scale=LT._TRAIN_LOAD_SCALE)
+    tr = LT.LoRATrainer(LT.TrainingConfig(base_model=str(p), model_type="sd15", dataset_dir="d", device="cpu"))
+    with patch.object(MM, "avail_commit_gb", lambda: 0.0025), patch("backend.sd_pipeline._is_sdxl", lambda path: False):
+        r = tr.prepare()
+    assert r.startswith("❌ Prepare failed: Not enough free memory to load m.safetensors"), r
+    assert tr.pipe is None                                                    # nothing was loaded
+
+
+@test("LoRA trainer (round 21): 'Let the trigger carry the character' — tags in >= N % of the captions are left out (trigger kept, case-insensitive, < 3 captions nothing), the Prepare handler passes the two new trailing inputs and shows what was left out")
+def _():
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    from backend import lora_trainer as LT
+    o, d = LT.drop_shared_tags(["a, b, x", "a, b, y", "a, c, z"], 100)
+    assert o == ["b, x", "b, y", "c, z"] and d == [("a", 3)], (o, d)
+    o, d = LT.drop_shared_tags(["a, b, x", "a, b, y", "a, c, z"], 60, keep="b")
+    assert o == ["b, x", "b, y", "c, z"] and d == [("a", 3)], (o, d)         # b is in 2 of 3 (67 %) but is the 'trigger': kept
+    o, d = LT.drop_shared_tags(["a, B, x", "A, b, y", "a, b, z"], 100)
+    assert o == ["x", "y", "z"] and [k for k, _ in d] == ["a", "b"]          # case-insensitive
+    assert LT.drop_shared_tags(["a, b", "a, c"], 50) == (["a, b", "a, c"], [])   # < 3 captions: nothing
+    assert LT.drop_shared_tags(["a, b", "a, c", "a, d"], 0)[1] == []            # 0 = off
+    # the trainer applies it to its items; off = captions untouched
+    items = lambda: [LT._TrainItem(f"{i}.png", c, 64, 64) for i, c in enumerate(["dkq, 1girl, grey hair, x", "dkq, 1girl, grey hair, y", "dkq, 1girl, grey hair, z"])]
+    for pct, want in ((80, ["dkq, x", "dkq, y", "dkq, z"]), (0, ["dkq, 1girl, grey hair, x", "dkq, 1girl, grey hair, y", "dkq, 1girl, grey hair, z"])):
+        tr = LT.LoRATrainer(LT.TrainingConfig(base_model="x.safetensors", trigger_word="dkq", dataset_dir="d", device="cpu", drop_shared_pct=pct))
+        with patch.object(LT, "_build_items", lambda cfg: items()):
+            tr._build_items(None)
+        got = [it.caption for it in tr.items]
+        assert got == want, (pct, got)
+        assert bool(tr.dropped_tags) == bool(pct)
+    # the Prepare handler: two new trailing inputs, the config gets the percentage only when the box is ticked, the log lists what was left out
+    import app as _app
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    assert len(by["do_train_prepare"].inputs) == 23
+    h = getattr(by["do_train_prepare"].fn, "__wrapped__", by["do_train_prepare"].fn)
+    seen = []
+
+    class FakeTrainer:
+        def __init__(self, cfg):
+            seen.append(cfg); self.items = [1, 2, 3]; self.mode_note = "base model in fp16"; self.dropped_tags = [("grey hair", 3)] if cfg.drop_shared_pct else []
+
+        def prepare(self, callback=None):
+            return "✅ Ready"
+        cleanup = lambda self: None
+    folder = Path(_tf.mkdtemp())
+    base = (str(folder), "dkq", "512 (SD 1.5)", "m.safetensors", 16, 16, 1e-4, 5e-5, 1, True, "attn", "cosine", 1, 0.05, True, False, 0, 42, "cpu", "t", 2)
+    with patch("backend.lora_trainer.LoRATrainer", FakeTrainer):
+        _app._trainer = None
+        r_on = h(*base, True, 70)
+        r_off = h(*base, False, 70)
+    assert seen[0].drop_shared_pct == 70 and seen[1].drop_shared_pct == 0, [c.drop_shared_pct for c in seen]
+    assert "grey hair (3)" in r_on[1] and "base model in fp16" in r_on[1] and "grey hair" not in r_off[1], (r_on[1], r_off[1])
+
+
+@test("LoRA trainer (round 21): Start Training releases the trainer afterwards (finished, stopped or failed) so the next Generate can load its checkpoint")
+def _():
+    from unittest.mock import patch
+    import app as _app
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    h = getattr(by["do_train_start"].fn, "__wrapped__", by["do_train_start"].fn)
+    cleaned = []
+
+    class FT:
+        def __init__(self, result):
+            self.result = result
+        def train(self, callback=None):
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+        def cleanup(self):
+            cleaned.append(1)
+    for res, mark in (("✅ Training complete", "released"), ("⏹ Aborted at step 3/16", "released"), (RuntimeError("boom"), "boom")):
+        _app._trainer = FT(res)
+        out = h()
+        assert _app._trainer is None and len(cleaned) >= 1, (res, _app._trainer)
+        assert mark in out[0], out[0]
+        cleaned.clear()
+    assert "Prepare first" in h()[0]                                            # nothing prepared: still the old message
+
+
+@test("LoRA trainer (round 21): fp16 base for SDXL on a GPU under 20 GB (auto), the dynamic loss scaler (halves and skips on a non-finite gradient, grows after a run of good steps, off = a no-op)")
+def _():
+    import torch
+    from unittest.mock import patch
+    from backend import lora_trainer as LT
+    cfg = lambda **k: LT.TrainingConfig(base_model="x.safetensors", model_type=k.pop("mt", "sdxl"), device=k.pop("dev", "auto"), **k)
+    props = lambda gb: type("P", (), {"total_memory": int(gb * 2**30)})()
+    with patch.object(torch.cuda, "is_available", lambda: True), patch.object(torch.cuda, "get_device_properties", lambda i: props(12)), patch.object(LT, "_best_cuda_device", lambda: 0):
+        assert LT.use_fp16_base(cfg()) is True and LT.use_fp16_base(cfg(mt="sd15")) is False
+        assert LT.use_fp16_base(cfg(dev="cpu")) is False and LT.use_fp16_base(cfg(base_dtype="fp32")) is False and LT.use_fp16_base(cfg(mt="sd15", base_dtype="fp16")) is True
+    with patch.object(torch.cuda, "is_available", lambda: True), patch.object(torch.cuda, "get_device_properties", lambda i: props(24)), patch.object(LT, "_best_cuda_device", lambda: 0):
+        assert LT.use_fp16_base(cfg()) is False                                   # a 24 GB card keeps the fp32 path
+    with patch.object(torch.cuda, "is_available", lambda: False):
+        assert LT.use_fp16_base(cfg()) is False                                   # no CUDA: fp32 on the CPU
+    # the scaler
+    off = LT._LossScaler(False)
+    p = torch.nn.Parameter(torch.ones(2)); p.grad = torch.tensor([float("inf"), 1.0])
+    assert off.scale(torch.tensor(2.0)).item() == 2.0 and off.unscale_and_check([p]) is True and off.skipped == 0
+    sc = LT._LossScaler(True, init=1024.0, growth_interval=3)
+    assert sc.scale(torch.tensor(1.0)).item() == 1024.0
+    p.grad = torch.tensor([2048.0, 1024.0])
+    assert sc.unscale_and_check([p]) and p.grad.tolist() == [2.0, 1.0]
+    sc.update(True); sc.update(True); assert sc.scale_value == 1024.0
+    sc.update(True); assert sc.scale_value == 2048.0                              # 3 good steps double it
+    p.grad = torch.tensor([float("nan"), 1.0])
+    assert sc.unscale_and_check([p]) is False
+    sc.update(False)
+    assert sc.scale_value == 1024.0 and sc.skipped == 1
+
+
 @test("LoRA trainer: an SDXL LoRA on a GPU under 20 GB gets a warning in the Prepare log (round 20: 3 steps in 14 minutes on 12 GB), SD 1.5 / CPU / big cards don't")
 def _():
     from backend import lora_trainer as LT
-    w = LT.sdxl_train_warning("sdxl", 12.0)
-    assert "does not fit" in w and "12 GB" in w and "SD 1.5" in w
-    assert LT.sdxl_train_warning("sd15", 12.0) == "" and LT.sdxl_train_warning("sdxl", None) == "" and LT.sdxl_train_warning("sdxl", 24.0) == ""
+    w = LT.sdxl_train_warning("sdxl", 8.0)
+    assert "10 GB" in w and "8 GB" in w and "SD 1.5" in w
+    assert LT.sdxl_train_warning("sd15", 8.0) == "" and LT.sdxl_train_warning("sdxl", None) == "" and LT.sdxl_train_warning("sdxl", 24.0) == ""
+    assert LT.sdxl_train_warning("sdxl", 12.0) == ""                          # a 12 GB card trains an SDXL LoRA with the fp16 base (round 21)
 
 
 class _BatchEnv:
