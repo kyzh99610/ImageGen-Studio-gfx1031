@@ -6139,6 +6139,11 @@ def _build_train_tab(gen_lora_dds=()):
                 return ('<p style="color:#f38ba8">❌ Click 📦 Prepare first.</p>', "", *no_upd)
             def cb(pct, msg):
                 progress(pct, desc=msg)
+                if str(msg).startswith("💾"):                    # a checkpoint was saved: a toast (the progress text is replaced a second later)
+                    try:
+                        gr.Info(str(msg))
+                    except Exception:
+                        pass
 
             try:
                 result = _trainer.train(callback=cb)

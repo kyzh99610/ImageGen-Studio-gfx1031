@@ -4069,6 +4069,60 @@ def _():
     assert "Prepare first" in h()[0]                                            # nothing prepared: still the old message
 
 
+@test("LoRA trainer (round 23): a checkpoint saved during a training is announced (progress text + a toast) and is found by the Generate tab's 🔄 Refresh, which lists the LoRA folder afresh each time")
+def _():
+    import torch
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from backend import lora_trainer as LT
+    import app as _app
+    # the trainer announces each periodic save through its callback
+    cfg = LT.TrainingConfig(base_model="x.safetensors", model_type="sd15", epochs=3, output_dir=str(Path(_tf.mkdtemp())), output_name="t", device="cpu",
+                            gradient_checkpointing=False, save_every_n_epochs=1, seed=1)
+    tr = LT.LoRATrainer(cfg)
+
+    class U(torch.nn.Module):
+        def __init__(s):
+            super().__init__(); s.lin = torch.nn.Linear(4, 4)
+
+        def forward(s, x, t, h, added_cond_kwargs=None):
+            return SimpleNamespace(sample=s.lin(x))
+    tr.unet = U()
+    tr.noise_scheduler = SimpleNamespace(config=SimpleNamespace(prediction_type="epsilon", num_train_timesteps=10), add_noise=lambda l, n, t: l + n)
+    tr.items = [LT._TrainItem(f"{i}.png", "c", 64, 64) for i in range(2)]
+    tr.latent_cache = [torch.randn(4) for _ in range(2)]
+    tr.embed_cache = [{"encoder_hidden_states": torch.zeros(3, 4)} for _ in range(2)]
+    msgs = []
+    with patch.object(LT, "save_lora", lambda *a, **k: None):
+        tr.train(callback=lambda p, m: msgs.append(m))
+    saved = [m for m in msgs if m.startswith("💾")]
+    assert len(saved) == 2 and "t_ep1.safetensors" in saved[0] and "t_ep2.safetensors" in saved[1] and "Refresh" in saved[0], saved     # epochs 1 and 2 of 3 (the last is the final file)
+    # the Start Training handler turns it into a toast
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    h = getattr(by["do_train_start"].fn, "__wrapped__", by["do_train_start"].fn)
+    toasts = []
+
+    class FT:
+        def train(self, callback=None):
+            callback(0.4, "💾 Saved checkpoint x_ep7.safetensors — the Generate tab's 🔄 Refresh lists it now")
+            callback(0.5, "Epoch 8/27 | Step 1/999")
+            return "✅ Training complete"
+        cleanup = lambda self: None
+    _app._trainer = FT()
+    with patch("gradio.Info", lambda m: toasts.append(m)):
+        h()
+    assert len(toasts) == 1 and "x_ep7.safetensors" in toasts[0], toasts
+    # 🔄 Refresh lists the LoRA folder afresh: a file saved meanwhile shows up
+    folder = {"files": ["a.safetensors"]}
+    do_refresh = getattr(by["do_refresh"].fn, "__wrapped__", by["do_refresh"].fn)
+    with patch.object(_app, "list_loras", lambda: [(Path(n).stem, "x/" + n) for n in folder["files"]]), patch("backend.model_manager.lora_arch", lambda p: "sd1"):
+        first = do_refresh(None)
+        folder["files"].append("my_lora_ep7.safetensors")
+        second = do_refresh(None)
+    flat = lambda r: str(r)
+    assert "my_lora_ep7" not in flat(first) and "my_lora_ep7" in flat(second), (flat(first)[:200], flat(second)[:300])
+
+
 @test("LoRA trainer (round 21): fp16 base for SDXL on a GPU under 20 GB (auto), the dynamic loss scaler (halves and skips on a non-finite gradient, grows after a run of good steps, off = a no-op)")
 def _():
     import torch

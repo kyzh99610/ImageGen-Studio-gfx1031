@@ -748,9 +748,9 @@ def lora_training_html() -> str:
              "How many times the trainer sees every image. Measured on 16 pictures of one character (SD 1.5, rank 16, LR 1e-4, prompt = trigger + her core tags; face similarity to her references, CCIP, 1.0 = her): no LoRA 0.77, "
              "the 320-step file (20 epochs) at weight 0.8 0.89, the 800-step file (50 epochs) at 0.8 0.87 and at <b>1.0 0.94</b> — the weight mattered more than the steps. "
              "Speed: 1.4 s per step on the RX 6800M laptop once ZLUDA has compiled the backward kernels (the first training on a PC spends ~6 more minutes on that): 800 steps = 18.5 min. "
-             "Set 'Save checkpoint every N epochs' to 10 to keep the in-between files and compare them. "
+             "Set 'Save checkpoint every N epochs' to 10 to keep the in-between files and compare them: each save shows a message, and the Generate tab's 🔄 Refresh lists the new file while the training still runs. "
              + _cn("训练器看每张图片的次数。请按“步数 = 图片数 × 轮次”判断：实测 16 张同一角色的图（SD 1.5，rank 16，LR 1e-4，提示词 = 触发词 + 她的核心标签；用 CCIP 衡量脸部与她参考图的相似度，1.0 = 她）：不加 LoRA 0.77，320 步（20 轮）权重 0.8 为 0.89，800 步（50 轮）权重 0.8 为 0.87、权重 1.0 为 0.94——权重比步数更重要。"
-                   "速度：RX 6800M 笔记本在 ZLUDA 编译完反向核后每步 1.4 秒（电脑上第一次训练还要多花约 6 分钟编译），800 步 = 18.5 分钟。把“每 N 轮保存”设为 10 可保留中间文件对比。")],
+                   "速度：RX 6800M 笔记本在 ZLUDA 编译完反向核后每步 1.4 秒（电脑上第一次训练还要多花约 6 分钟编译），800 步 = 18.5 分钟。把“每 N 轮保存”设为 10 可保留中间文件对比：每次保存都会弹出提示，训练还在进行时就可以在“生成”页点 🔄 刷新看到新文件。")],
             ["Train text encoder / 训练文本编码器",
              "✅ ON for characters<br>❌ OFF for styles",
              "Teaches the trigger word meaning. Essential for character LoRAs. "
