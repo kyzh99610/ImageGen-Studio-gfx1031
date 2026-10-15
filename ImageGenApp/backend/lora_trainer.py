@@ -960,6 +960,9 @@ class LoRATrainer:
                     and epoch + 1 < cfg.epochs):
                 ep_path = _unique_path(Path(cfg.output_dir) / f"{cfg.output_name}_ep{epoch+1}.safetensors")
                 save_lora(self.unet, self._trained_te_list, ep_path, cfg, self._captions())
+                if callback:
+                    callback(global_step / max(total_steps, 1),
+                             f"💾 Saved checkpoint {ep_path.name} — the Generate tab's 🔄 Refresh lists it now")
 
         # ── Cleanup ────────────────────────────────────────────────────────
         self.unet.cpu()
