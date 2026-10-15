@@ -77,7 +77,15 @@ class TrainingConfig:
     # ── Memory ─────────────────────────────────────────────────────────────
     gradient_checkpointing: bool = True
     cache_latents: bool = True
-    mixed_precision: bool = False  # fp16 mixed precision (DML only)
+    mixed_precision: bool = False  # (unused)
+    # Base-model precision: "auto" = fp16 for an SDXL model on a CUDA GPU under 20 GB (the frozen UNet / text encoders / VAE in fp16, the LoRA parameters in fp32, autocast + a dynamic loss
+    # scale; an fp32 SDXL does not fit in 12 GB), fp32 otherwise (SD 1.5 trains in fp32 as before); "fp16" / "fp32" force it.
+    base_dtype: str = "auto"
+
+    # ── Captions ───────────────────────────────────────────────────────────
+    # 0 = off. N > 0: the tags present in at least N % of the captions (hair / eye colour, the ornament ...) are left out of every caption at Prepare, so the trigger word has to carry them
+    # (round 21). Measured round 20: with the tagger's captions the trigger alone did not bring the character back, her traits were tied to their own tags.
+    drop_shared_pct: int = 0
 
     # ── Output ─────────────────────────────────────────────────────────────
     output_dir: str = ""
@@ -351,6 +359,21 @@ def save_lora(
 # Dataset
 # ═════════════════════════════════════════════════════════════════════════════
 
+def drop_shared_tags(captions: list[str], pct: float, keep: str = "") -> tuple[list[str], list[tuple[str, int]]]:
+    """Remove from every caption the comma-separated tags that are present (once per caption, case-insensitive) in at least `pct` % of the captions, except `keep` (the trigger word).
+    Returns (the new captions, [(tag, number of captions)] of what was dropped, most common first). Fewer than 3 captions: nothing is dropped (a share of 2 pictures means nothing)."""
+    from collections import Counter
+    n = len(captions)
+    if pct <= 0 or n < 3:
+        return list(captions), []
+    keep_key = (keep or "").strip().lower()
+    tags = [[t.strip() for t in c.split(",") if t.strip()] for c in captions]
+    count = Counter(k for ts in tags for k in {t.lower() for t in ts})
+    drop = {k for k, v in count.items() if v * 100 >= pct * n and k != keep_key}
+    out = [", ".join(t for t in ts if t.lower() not in drop) for ts in tags]
+    return out, sorted(((k, count[k]) for k in drop), key=lambda kv: (-kv[1], kv[0]))
+
+
 class _TrainItem:
     __slots__ = ("image_path", "caption", "bucket_w", "bucket_h")
 
@@ -393,6 +416,7 @@ def _cache_latents_for_items(
     vae,
     flip_augment: bool = False,
     callback: Callable | None = None,
+    hook: Callable[[int, int], None] | None = None,
 ) -> list[torch.Tensor]:
     """Encode every image with the VAE once.  Returns list of latent tensors."""
     from torchvision import transforms as T
@@ -406,6 +430,8 @@ def _cache_latents_for_items(
     latents: list[torch.Tensor] = []
 
     for i, item in enumerate(items):
+        if hook:
+            hook(i, len(items))                      # Stop / pause while hot between images (round 21)
         if callback:
             callback(i, len(items), f"Caching latent {i+1}/{len(items)}")
 
@@ -442,6 +468,7 @@ def _cache_text_embeds(
     trigger_word: str = "",
     callback: Callable | None = None,
     clip_skip: int = 1,
+    hook: Callable[[int, int], None] | None = None,
 ) -> list[dict[str, torch.Tensor]]:
     """Pre-compute text embeddings for every caption."""
 
@@ -453,6 +480,8 @@ def _cache_text_embeds(
     max_len = tokenizer.model_max_length
 
     for i, item in enumerate(items):
+        if hook:
+            hook(i, len(items))
         if callback:
             callback(i, len(items), f"Encoding caption {i+1}/{len(items)}")
 
@@ -495,16 +524,18 @@ def _cache_text_embeds(
 # Main trainer
 # ═════════════════════════════════════════════════════════════════════════════
 
-SDXL_TRAIN_MIN_VRAM_GB = 20.0     # the trainer loads the base model in fp32: an SDXL UNet alone is 10.3 GB, with the text encoders + activations ~19 GB
+_TRAIN_LOAD_SCALE = 1.5           # commit_problem() scale for the trainer's fp32 load
+SDXL_TRAIN_MIN_VRAM_GB = 20.0     # an fp32 SDXL base needs ~19 GB (the UNet alone is 10.3 GB): below it the trainer uses the fp16 base (use_fp16_base)
+SDXL_FP16_MIN_VRAM_GB = 11.0      # the fp16 base + fp32 LoRA + autocast peaked at 10.0 GB dedicated on a 12 GB RX 6800M (round 21)
 
 
 def sdxl_train_warning(model_type: str, vram_gb: float | None) -> str:
-    """A warning for the Prepare log when an SDXL LoRA is about to be trained on a GPU that cannot hold it (round 20, measured on a 12 GB RX 6800M: Prepare 230 s, then 3 training
-    steps in 14.2 minutes — 12.2 GB dedicated + 6.7 GB spilled into shared memory — against 1.4 s per step for SD 1.5). '' when it fits / on CPU / not SDXL."""
-    if model_type != "sdxl" or vram_gb is None or vram_gb >= SDXL_TRAIN_MIN_VRAM_GB:
+    """A warning for the Prepare log when an SDXL LoRA is about to be trained on a GPU that cannot hold it. Round 20: the fp32 base spilled on a 12 GB RX 6800M (3 steps in 14.2 minutes);
+    since round 21 an SDXL base on a GPU under 20 GB is held in fp16 (peak 10.0 GB there), so only a GPU under 11 GB is warned. '' when it fits / on CPU / not SDXL."""
+    if model_type != "sdxl" or vram_gb is None or vram_gb >= SDXL_FP16_MIN_VRAM_GB:
         return ""
-    return (f"⚠ An SDXL LoRA does not fit on this GPU ({vram_gb:.0f} GB): the trainer holds the base model in fp32 (~{SDXL_TRAIN_MIN_VRAM_GB:.0f} GB needed), so it spills into shared "
-            "memory — measured on a 12 GB card: about 5 minutes per step. Train an SD 1.5 LoRA instead, or use a card with 24 GB.")
+    return (f"⚠ An SDXL LoRA needs about 10 GB of VRAM even with the fp16 base model, and this GPU has {vram_gb:.0f} GB: it would spill into shared memory "
+            "(measured with an fp32 base on a 12 GB card: about 5 minutes per step). Train an SD 1.5 LoRA instead.")
 
 
 def _enable_te_checkpointing(te) -> None:
@@ -513,6 +544,62 @@ def _enable_te_checkpointing(te) -> None:
     (found in round 20: every lora_up weight 0.000 after 320 steps with 'Train text encoder' on). use_reentrant=False passes the gradient through."""
     if hasattr(te, "gradient_checkpointing_enable"):
         te.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
+
+def use_fp16_base(cfg: "TrainingConfig") -> bool:
+    """Whether the trainer loads the base model in fp16 (see TrainingConfig.base_dtype)."""
+    if cfg.base_dtype == "fp16":
+        return True
+    if cfg.base_dtype == "fp32":
+        return False
+    if cfg.model_type != "sdxl" or cfg.device not in ("auto", "cuda") or not torch.cuda.is_available():
+        return False
+    try:
+        vram = torch.cuda.get_device_properties(_best_cuda_device()).total_memory / 2**30
+    except Exception:
+        return False
+    return vram < SDXL_TRAIN_MIN_VRAM_GB
+
+
+class _LossScaler:
+    """A small dynamic loss scaler for fp16 autocast training (no torch.cuda.amp.GradScaler: its fused kernels are untested under ZLUDA): the loss is multiplied by `scale` before backward,
+    the gradients are divided by it and checked for inf / NaN before the optimizer step; a non-finite step is skipped and the scale halved, `growth_interval` finite steps double it.
+    Disabled = a no-op (the fp32 path's behaviour is unchanged)."""
+
+    def __init__(self, enabled: bool, init: float = 1024.0, growth_interval: int = 200):
+        self.enabled, self.scale_value, self.growth_interval = enabled, float(init), growth_interval
+        self._good = 0
+        self.skipped = 0
+
+    def scale(self, loss):
+        return loss * self.scale_value if self.enabled else loss
+
+    def unscale_and_check(self, params) -> bool:
+        """Divide the gradients by the scale; False when any is non-finite (the caller skips the step)."""
+        if not self.enabled:
+            return True
+        inv = 1.0 / self.scale_value
+        finite = True
+        for p in params:
+            if p.grad is None:
+                continue
+            p.grad.mul_(inv)
+            if finite and not bool(torch.isfinite(p.grad).all()):
+                finite = False
+        return finite
+
+    def update(self, ok: bool) -> None:
+        if not self.enabled:
+            return
+        if ok:
+            self._good += 1
+            if self._good >= self.growth_interval:
+                self.scale_value = min(self.scale_value * 2.0, 65536.0)
+                self._good = 0
+        else:
+            self.skipped += 1
+            self._good = 0
+            self.scale_value = max(self.scale_value / 2.0, 1.0)
 
 
 _THERM_EVERY = 10.0     # seconds between thermal-zone reads inside the loop (a PDH read takes ~1 s)
@@ -542,6 +629,13 @@ class _HeatGuard:
         self._checked = self.clock()
         return w
 
+    def between(self, first: bool = False) -> float:
+        """Between images of Prepare (latent / caption caching, CPU-bound, 1-4 min): the pause-while-hot wait, read at most every ~10 s (a zone read costs ~1 s); `first` always reads."""
+        from backend import thermal
+        if not thermal.GUARD["limit"] or (not first and self.clock() - self._checked < _THERM_EVERY):
+            return 0.0
+        return self.start()
+
     def after_step(self, raw: float) -> float:
         from backend import sampling, thermal
         t0 = self.clock()
@@ -561,12 +655,19 @@ class _HeatGuard:
         return w
 
 
+class _TrainStopped(Exception):
+    """Stop was pressed during Prepare."""
+
+
 class LoRATrainer:
     """Train a LoRA adapter and save as safetensors."""
 
     def __init__(self, cfg: TrainingConfig):
         self.cfg = cfg
         self._abort = False
+        self._fp16 = False
+        self.mode_note = ""
+        self.dropped_tags: list[tuple[str, int]] = []
 
         # Populated by prepare()
         self.pipe: Any = None
@@ -587,6 +688,24 @@ class LoRATrainer:
     def abort(self):
         self._abort = True
 
+    def _prepare_hook(self, callback: Callable | None):
+        """The per-image hook of Prepare's caching loops: Stop ends it, the pause-while-hot setting waits between images (like a sampling job between pictures)."""
+        pos = [0, 1]
+
+        def say(text):
+            if callback:
+                callback(pos[0], pos[1], text)
+        heat = _HeatGuard(lambda: self._abort, say)
+
+        def hook(i, n):
+            pos[0], pos[1] = i, n
+            if self._abort:
+                raise _TrainStopped()
+            heat.between(first=(i == 0))
+            if self._abort:
+                raise _TrainStopped()
+        return hook
+
     def prepare(self, callback: Callable | None = None) -> str:
         """Load base model, inject LoRA, cache latents + embeddings."""
         self._abort = False
@@ -603,6 +722,9 @@ class LoRATrainer:
                                 if p.requires_grad)
             return (f"✅ Ready — {len(self.items)} images, "
                     f"{n_params/1e6:.1f}M UNet + {te_params/1e6:.1f}M TE trainable params")
+        except _TrainStopped:
+            self.cleanup()
+            return "⏹ Prepare stopped"
         except Exception as e:
             self.cleanup()
             return f"❌ Prepare failed: {e}"
@@ -700,6 +822,25 @@ class LoRATrainer:
                 callback(last_pct[0], text)
         heat = _HeatGuard(lambda: self._abort, _say)
         heat.start()
+
+        # fp16 base (SDXL on a small GPU): autocast around the forwards + a dynamic loss scale; fp32 path = no-ops
+        import contextlib
+        scaler = _LossScaler(self._fp16 and device.type == "cuda")
+        ac = (lambda: torch.autocast("cuda", dtype=torch.float16)) if scaler.enabled else contextlib.nullcontext
+        all_params = [p for g in param_groups for p in g["params"]]
+        if scaler.enabled:
+            print("[Train] fp16 autocast + loss scale (start 1024); a non-finite gradient skips the step and halves the scale")
+
+        def do_step():
+            """clip + optimizer step (skipped with a non-finite gradient under the loss scaler) + scheduler + zero_grad."""
+            ok = scaler.unscale_and_check(all_params)
+            if ok:
+                if cfg.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(all_params, cfg.max_grad_norm)
+                optimizer.step()
+            scaler.update(ok)
+            scheduler.step()
+            optimizer.zero_grad()
         t_start = time.time()
         t_mb = time.perf_counter()
 
@@ -739,7 +880,8 @@ class LoRATrainer:
                     enc_hidden = embed_dict["encoder_hidden_states"].unsqueeze(0).to(device)
                 else:
                     # Live TE forward (so TE LoRA gets gradients)
-                    embed_dict, enc_hidden = self._forward_te(data_idx, device, is_sdxl)
+                    with ac():
+                        embed_dict, enc_hidden = self._forward_te(data_idx, device, is_sdxl)
 
                 # Noise + timestep
                 noise = torch.randn_like(latents)
@@ -757,10 +899,12 @@ class LoRATrainer:
                         "text_embeds": pooled,
                         "time_ids": add_time_ids,
                     }
-                    pred = self.unet(noisy, t, enc_hidden,
-                                     added_cond_kwargs=added_cond).sample
+                    with ac():
+                        pred = self.unet(noisy, t, enc_hidden,
+                                         added_cond_kwargs=added_cond).sample
                 else:
-                    pred = self.unet(noisy, t, enc_hidden).sample
+                    with ac():
+                        pred = self.unet(noisy, t, enc_hidden).sample
 
                 # Target
                 if prediction_type == "v_prediction":
@@ -770,7 +914,7 @@ class LoRATrainer:
 
                 loss = F.mse_loss(pred.float(), target.float())
                 loss = loss / cfg.gradient_accumulation
-                loss.backward()
+                scaler.scale(loss).backward()
 
                 step_loss = loss.item() * cfg.gradient_accumulation
                 epoch_loss += step_loss
@@ -779,13 +923,7 @@ class LoRATrainer:
 
                 # Optimizer step
                 if (idx_in_epoch + 1) % cfg.gradient_accumulation == 0:
-                    if cfg.max_grad_norm > 0:
-                        torch.nn.utils.clip_grad_norm_(
-                            [p for g in param_groups for p in g["params"]],
-                            cfg.max_grad_norm)
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
+                    do_step()
                     global_step += 1
 
                     if callback:
@@ -798,19 +936,13 @@ class LoRATrainer:
                                  f"Epoch {epoch+1}/{cfg.epochs} | "
                                  f"Step {global_step}/{total_steps} | "
                                  f"Loss {step_loss:.4f} (avg {avg:.4f}) | "
-                                 f"ETA {eta/60:.0f}m")
+                                 f"ETA {eta/60:.0f}m" + (f" | skipped {scaler.skipped}" if scaler.skipped else ""))
 
                 heat.after_step(time.perf_counter() - t_mb)      # cool mode / pause while hot (timing only)
 
             # Flush any trailing accumulated gradients at epoch boundary
             if len(indices) % cfg.gradient_accumulation != 0:
-                if cfg.max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        [p for g in param_groups for p in g["params"]],
-                        cfg.max_grad_norm)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
+                do_step()
                 global_step += 1
 
             # End of epoch
@@ -912,6 +1044,14 @@ class LoRATrainer:
         cfg.model_type = "sdxl" if is_xl else "sd15"
         cfg.resolution = 1024 if is_xl else 512
 
+        # The trainer's own fp32 load used to bypass the commit preflight of the pipelines: an SDXL Prepare took the free commit from 19 to 3.7 GB (round 20),
+        # the crash zone of round 3. Refuse a load that cannot fit, with the pipelines' message (the fp32 copy needs ~1.5x the pipelines' share).
+        from backend.model_manager import commit_problem
+        self._fp16 = use_fp16_base(cfg)
+        why = commit_problem(path, scale=1.0 if self._fp16 else _TRAIN_LOAD_SCALE)
+        if why:
+            raise RuntimeError(why)
+
         if is_xl:
             from diffusers import StableDiffusionXLPipeline
             PipeCls = StableDiffusionXLPipeline
@@ -919,7 +1059,7 @@ class LoRATrainer:
             from diffusers import StableDiffusionPipeline
             PipeCls = StableDiffusionPipeline
 
-        load_kw: dict[str, Any] = {"torch_dtype": torch.float32}
+        load_kw: dict[str, Any] = {"torch_dtype": torch.float16 if self._fp16 else torch.float32}
         if path.is_file():
             self.pipe = PipeCls.from_single_file(str(path), **load_kw)
         else:
@@ -946,12 +1086,29 @@ class LoRATrainer:
 
         print(f"[Train] Loaded {path.name} as {cfg.model_type.upper()} "
               f"(UNet {sum(p.numel() for p in self.unet.parameters())/1e6:.0f}M params)")
+        if self._fp16:
+            self.mode_note = "base model in fp16 (frozen), LoRA in fp32, autocast + loss scale"
+            print("[Train] " + self.mode_note)
 
     def _build_items(self, callback: Callable | None):
         if callback:
             callback(1, 5, "Scanning dataset …")
         self.items = _build_items(self.cfg)
         print(f"[Train] {len(self.items)} training images")
+        self.dropped_tags = []
+        if self.cfg.drop_shared_pct > 0:
+            caps, self.dropped_tags = drop_shared_tags([it.caption or "" for it in self.items], self.cfg.drop_shared_pct, self.cfg.trigger_word)
+            for it, c in zip(self.items, caps):
+                it.caption = c
+            print(f"[Train] Let the trigger carry the character: {len(self.dropped_tags)} tags present in >= {self.cfg.drop_shared_pct} % of the captions left out: "
+                  + ", ".join(f"{t} ({k})" for t, k in self.dropped_tags))
+
+    @staticmethod
+    def _adapters_fp32(model) -> None:
+        """The trainable LoRA parameters in fp32 on top of a frozen fp16 base (the optimizer updates fp32 master weights; the layers cast on the fly)."""
+        for p in model.parameters():
+            if p.requires_grad and p.dtype != torch.float32:
+                p.data = p.data.float()
 
     def _inject_lora(self):
         from peft import LoraConfig, get_peft_model
@@ -969,6 +1126,8 @@ class LoRATrainer:
         )
         self.unet = get_peft_model(self.unet, lora_cfg)
         self.unet.print_trainable_parameters()
+        if self._fp16:
+            self._adapters_fp32(self.unet)
 
         self._trained_te_list = []
         if cfg.train_te:
@@ -984,6 +1143,9 @@ class LoRATrainer:
             if self.text_encoder_2 is not None:
                 self.text_encoder_2 = get_peft_model(self.text_encoder_2, te_cfg)
                 self._trained_te_list.append(self.text_encoder_2)
+            if self._fp16:
+                for te in self._trained_te_list:
+                    self._adapters_fp32(te)
 
     def _cache(self, callback: Callable | None):
         cfg = self.cfg
@@ -994,7 +1156,7 @@ class LoRATrainer:
         if cfg.cache_latents:
             self.latent_cache = _cache_latents_for_items(
                 self.items, self.vae, cfg.flip_augment,
-                callback=callback)
+                callback=callback, hook=self._prepare_hook(callback))
         else:
             # Placeholder — on-the-fly encoding in train loop
             self.latent_cache = []
@@ -1017,6 +1179,7 @@ class LoRATrainer:
                 trigger_word=cfg.trigger_word,
                 callback=callback,
                 clip_skip=cfg.clip_skip,
+                hook=self._prepare_hook(callback),
             )
 
         # Free VAE — not needed during training when latents are cached

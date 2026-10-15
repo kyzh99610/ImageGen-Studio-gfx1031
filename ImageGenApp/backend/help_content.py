@@ -358,7 +358,7 @@ def parameters_html() -> str:
              "<b>after the laptop's service (new paste, clean fans), Manual mode with a 25 W CPU limit</b>: cool 1.5 156 s per picture with no pause at all and the zone under 89 °C, "
              "cool 0 + pause 88 111 s (−29 %, the pause waiting 34 % of the time), zone median 86 °C, max 91.9, no reading at 94 °C or more over 8 pictures; "
              "<b>Turbo with an unlimited CPU, before the service</b>: cool 0 + pause 88 was not safe (8 % of the readings over 42 minutes at 94 °C or more, a 30 s run) — keep Full power there. "
-             "<b>LoRA training honours both settings too</b> (Train tab): the same pause after every training step, and with Pause while hot on, a check every ~10 s that waits when the zone is 6 °C over the limit and goes on at the limit (it also waits for a cool laptop before the first step); Stop ends a wait. Only timing changes — the saved LoRA is the same. A long training is the most sustained load the app has, so keep these on for a laptop that has switched off before. "
+             "<b>LoRA training honours both settings too</b> (Train tab): the same pause after every training step, and with Pause while hot on, a check every ~10 s that waits when the zone is 6 °C over the limit and goes on at the limit (it also waits for a cool laptop before the first step); Stop ends a wait. Prepare (loading the model and caching the latents / captions, 1–7 min of CPU work) waits between images the same way, and Stop ends it. Only timing changes — the saved LoRA is the same. A long training is the most sustained load the app has, so keep these on for a laptop that has switched off before. "
              "Moving a slider switches the profile to Custom. When cool mode is on and a sampling pass is that slow, the result line adds a hint (it never changes a setting).",
              _cn("笔记本长时间满载会自动关机时使用。冷却模式在每个采样步之后暂停（1.5 = GPU 约 40% 时间工作，画面不变，速度变慢）；"
                  "过热暂停会在每张图、每个高清修复/脸/眼重绘以及套装批量的 ⭐ 评分（CPU 运算，同样会升温，评分期间每 10 秒再检查一次）之前等待，"
@@ -368,7 +368,7 @@ def parameters_html() -> str:
                  "<b>USB-C 充电器 + Windows “Performance” 方案</b>（每百万像素一个采样步约 4 秒，正常约 2 秒）：202 秒（冷却 1.5 为 388 秒），连续 8 张没有读数 ≥ 94 °C；"
                  "<b>笔记本检修后（换了导热材料、清了风扇），Manual 模式 + CPU 限制 25 W</b>：冷却 1.5 每张 156 秒且完全不需要暂停、温度低于 89 °C，冷却 0 + 88 °C 暂停每张 111 秒（快 29%，暂停占 34% 的时间），温度中位数 86 °C、最高 91.9，8 张没有读数 ≥ 94 °C；"
                  "<b>检修前的 Turbo + CPU 不限功率</b>：冷却 0 + 88 °C 暂停不安全（42 分钟内 8% 的读数 ≥ 94 °C，出现过 30 秒连续高温），请保持 Full power。拖动任一滑块会切换为 Custom。"
-                 "LoRA 训练同样遵守这两项设置（训练页）：每个训练步之后同样暂停；开启过热暂停时每约 10 秒检查一次，高于设定值 6 °C 时等待、降到设定值时继续（开始训练前也会等到笔记本凉下来），停止按钮可结束等待。只改变速度，保存的 LoRA 不变。长时间训练是本应用最持久的负载，曾经自动关机的笔记本请保持开启。"
+                 "LoRA 训练同样遵守这两项设置（训练页）：准备阶段（加载模型、缓存潜变量/标注，CPU 运算 1–7 分钟）在每张图之间同样等待，停止按钮可结束；每个训练步之后同样暂停；开启过热暂停时每约 10 秒检查一次，高于设定值 6 °C 时等待、降到设定值时继续（开始训练前也会等到笔记本凉下来），停止按钮可结束等待。只改变速度，保存的 LoRA 不变。长时间训练是本应用最持久的负载，曾经自动关机的笔记本请保持开启。"
                  "冷却模式开启且采样明显偏慢时，结果栏会给出提示（不会自动更改任何设置）。")],
             ["✨ Polish (Generate tab)",
              "The dropdown above Hires fix — Portrait / Cowboy shot / Full body / Wide shot, or Auto (reads the framing tags in the prompt) — "
@@ -717,10 +717,13 @@ def lora_training_html() -> str:
               "the ornament — so after training the trigger word alone does <em>not</em> bring them back. Measured (16 pictures of one character, 800 steps): a prompt with only the trigger drew "
               "black-haired girls like the model without the LoRA; trigger + her core tags (grey hair, red eyes, long hair, the hair ornament) at LoRA weight 1.0 drew her (face similarity 0.94 against 0.77 for the same prompt without the LoRA), "
               "with her black ornament instead of the model's coloured butterflies. So either put the core tags in the prompt (the 🗝 keyword chips under the LoRA slot do it: ✨ Add character tags), or <em>delete</em> the tags that "
-              "describe her from every caption so the trigger has to carry them."
+              "describe her from every caption so the trigger has to carry them — Train tab → Step 3, <b>Let the trigger carry the character</b> (off by default) does the second for you at Prepare: it leaves out of every caption the tags present in at least N % of the captions (the caption files are not changed). "
+              "Measured on the same 16 pictures and 800 steps (SD 1.5, 4 seeds, face similarity to her references, CCIP): trigger-only prompt 0.41 without the option, <b>0.67–0.73 with it at N = 80</b> (grey hair in 3 of 4 pictures instead of 0 of 4; the eyes still unreliable, her ornament drawn as a plain ribbon, one picture still black-haired); "
+              "trigger + her core tags 0.87–0.94 without the option, 0.86 with it. The option also leaves out scene tags the pictures share (standing, smile, full body: 17 of ~40 tags at N = 80), so the LoRA draws those by default. Lower N leaves out more. "
               "<br>" + _cn("标注里的特征标签（发色、眼色、饰品）会和这些标签本身绑定，而不是和触发词绑定：WD14 自动打标会把它们都写进标注，所以训练后只写触发词不会还原这些特征。"
                           "实测（同一角色 16 张图、800 步）：只写触发词时画出的是黑发女孩，和不加 LoRA 一样；触发词 + 核心标签（灰发、红眼、长发、发饰）、LoRA 权重 1.0 时画出了她本人。"
-                          "做法：在提示词里加上核心标签（LoRA 栏下的 🗝 关键词按钮“✨ 添加角色标签”可一键添加），或者从每条标注里删掉描述她外貌的标签，让触发词来承担。"))
+                          "做法：在提示词里加上核心标签（LoRA 栏下的 🗝 关键词按钮“✨ 添加角色标签”可一键添加），或者从每条标注里删掉描述她外貌的标签，让触发词来承担——训练页第 3 步的“Let the trigger carry the character”（默认关闭）会在“准备”时替你做后者：把出现在至少 N% 标注中的标签从每条标注里去掉（标注文件本身不变）。"
+                          "同样的 16 张图、800 步（SD 1.5，4 个种子，用 CCIP 衡量与她参考图的相似度）实测：只写触发词，不开此选项 0.41，<b>N = 80 时 0.67–0.73</b>（4 张里 3 张是灰发，原来 0 张；眼睛仍不稳定，发饰只画成普通丝带，仍有 1 张黑发）；触发词 + 核心标签：不开 0.87–0.94，开启 0.86。该选项也会去掉图片共有的场景标签（站姿、微笑、全身：N = 80 时约 40 个标签中的 17 个），因此 LoRA 默认会画出这些。N 越低，去掉的越多。"))
 
     # ── Training parameters ────────────────────────────────────────────────
     h += '<div class="hg-h3">Training Parameters &nbsp;<span class="cn">训练参数</span></div>'
@@ -752,6 +755,16 @@ def lora_training_html() -> str:
              "✅ ON for characters<br>❌ OFF for styles",
              "Teaches the trigger word meaning. Essential for character LoRAs. "
              + _cn("教会模型触发词的含义。角色LoRA必须开启。风格LoRA可以关闭。")],
+            ["SDXL / Pony / Illustrious on a 12 GB card / SDXL 在 12 GB 显卡上",
+             "automatic: base model in fp16, LoRA in fp32",
+             "The trainer used to hold the base model in fp32 (an SDXL UNet alone is 10.3 GB): on a 12 GB RX 6800M it spilled into shared memory, 3 steps in 14 minutes. For an SDXL model on a GPU under 20 GB it now keeps the frozen base "
+             "(UNet, text encoders) in fp16, the LoRA parameters in fp32, runs the forward passes under fp16 autocast and scales the loss (a step with a non-finite gradient is skipped and the scale halved). Measured on the 12 GB card "
+             "(waiIllustrious, 16 pictures, rank 16, 640 steps): peak 10.0 GB of VRAM with nothing in shared memory, about 6 s per step (63 min including the pauses of Power-limited mode), Prepare ~7 min, the loss finite throughout. "
+             "The result carries the character at weight 1.0: face similarity to her references (CCIP) 0.95 against 0.80 for the same prompt without the LoRA and 0.87 for a downloaded character LoRA; by eye her own ornament instead of the model's coloured butterflies. "
+             "A GPU under 11 GB is warned (SD 1.5 trains in ~7 GB). Prepare also refuses a model load that would not fit into free memory (RAM + page file) instead of crashing, and the base model is released from memory when a training ends. "
+             + _cn("训练器以前用 fp32 加载底模（SDXL 的 UNet 单独就 10.3 GB）：在 12 GB 的 RX 6800M 上会溢出到共享内存，14 分钟只能训练 3 步。现在对显存小于 20 GB 的显卡上的 SDXL 模型，冻结的底模（UNet、文本编码器）使用 fp16，LoRA 参数使用 fp32，前向在 fp16 autocast 下运行并对损失做缩放（梯度含非有限值的步会被跳过并将缩放减半）。"
+                   "在 12 GB 显卡上实测（waiIllustrious，16 张图，rank 16，640 步）：显存峰值 10.0 GB，共享内存无占用，每步约 6 秒（含“Power-limited”模式的暂停共 63 分钟），准备阶段约 7 分钟，损失始终有限。权重 1.0 时能还原角色：脸部与参考图的相似度（CCIP）0.95，不加 LoRA 为 0.80，下载的角色 LoRA 为 0.87；肉眼可见她自己的发饰而不是模型的彩色蝴蝶。"
+                   "显存低于 11 GB 会给出警告（SD 1.5 约需 7 GB）。准备阶段若可用内存（内存 + 页面文件）装不下模型会拒绝加载而不是崩溃；训练结束后底模会从内存中释放。")],
             ["Target layers / 目标层",
              "attn (fast)<br>full (thorough)",
              "'attn' = Q/K/V/Out attention. 'full' = + conv layers for spatial detail. "

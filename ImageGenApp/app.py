@@ -5806,13 +5806,25 @@ def _build_train_tab(gen_lora_dds=()):
                     info="Saved to models/loras/{name}.safetensors",
                     scale=2)
 
+            with gr.Row():
+                drop_shared_cb = gr.Checkbox(
+                    value=False, label="Let the trigger carry the character (leave out the tags shared by most captions)",
+                    info="The auto-tagger writes her hair / eye colour and ornament into every caption, so the model ties them to those tags and the trigger word alone "
+                         "does not bring them back. On: tags present in at least N % of the captions are left out when you press Prepare (the caption files are not changed), "
+                         "so the trigger has to carry them. Off (default): captions are used as they are.",
+                    scale=3)
+                drop_pct_sl = gr.Slider(
+                    50, 100, value=80, step=5, label="N % of the captions",
+                    info="Lower = more tags left out (also scene tags the pictures share: 'standing', 'smile' ...).",
+                    scale=1)
+
             gr.HTML(
                 '<div class="tr-warn">'
                 '<b>⚠ Memory & time estimates (CPU training):</b><br>'
                 '• <b>SD 1.5 LoRA</b> — ~4 GB RAM, ~2–5 sec/step → 30 images × 10 epochs ≈ 15–25 min<br>'
                 '• <b>SDXL LoRA</b> — ~12 GB RAM, ~10–30 sec/step → 30 images × 10 epochs ≈ 50–150 min<br>'
-                'GPU training (ZLUDA, SD 1.5) runs ~1.4 s per step on an RX 6800M; the first run on a PC compiles kernels for ~6 minutes. '
-                'An SDXL LoRA does not fit in 12 GB of VRAM (the base model is trained in fp32).'
+                'GPU training (ZLUDA) on an RX 6800M: SD 1.5 ~1.4 s per step (≈ 7 GB VRAM); SDXL ~6 s per step with the base model held in fp16 (≈ 10 GB VRAM, Prepare ~7 min); '
+                'the first run on a PC compiles kernels for ~6 minutes. SDXL training needs a GPU with at least 11 GB.'
                 '</div>'
             )
 
@@ -6033,6 +6045,7 @@ def _build_train_tab(gen_lora_dds=()):
             rank, alpha, lr, te_lr, epochs, train_te,
             target, sched, grad_accum, warmup, grad_ckpt, flip,
             save_every, seed, device_choice, output_name, train_clip_skip=2,
+            drop_shared=False, drop_pct=80,
             progress=gr.Progress(),
         ):
             global _trainer
@@ -6082,6 +6095,7 @@ def _build_train_tab(gen_lora_dds=()):
                 output_dir=str(LORAS_DIR),
                 output_name=output_name,
                 clip_skip=2 if str(train_clip_skip) == "2" else 1,
+                drop_shared_pct=(int(drop_pct or 80) if drop_shared else 0),
             )
 
             if _trainer is not None:
@@ -6111,6 +6125,11 @@ def _build_train_tab(gen_lora_dds=()):
             _warn = sdxl_train_warning(cfg.model_type, _vram)
             if _warn:
                 log += f'<p style="color:#f9e2af;font-size:13px;">{html.escape(_warn)}</p>'
+            if getattr(_trainer, "mode_note", ""):
+                log += f'<p style="font-size:13px;color:#a6adc8;">{html.escape(_trainer.mode_note)}</p>'
+            if getattr(_trainer, "dropped_tags", None):
+                log += ('<p style="font-size:13px;color:#a6adc8;">Let the trigger carry the character: left out of every caption (tag, captions): '
+                        + html.escape(", ".join(f"{t} ({k})" for t, k in _trainer.dropped_tags)) + '</p>')
             return f'<p style="color:{color}">{msg}</p>', log
 
         def do_train_start(progress=gr.Progress()):
@@ -6127,11 +6146,20 @@ def _build_train_tab(gen_lora_dds=()):
                 import traceback
                 traceback.print_exc()
                 return (f'<p style="color:#f38ba8">❌ Training failed: {e}</p>', "", *no_upd)
+            finally:
+                # The trainer keeps its base model in RAM (6-14 GB of commit): release it, or the next Generate's checkpoint load is refused / crashes
+                # (round 21: a 6.5 GB SDXL load was refused right after an SDXL training). Prepare again to train another LoRA.
+                try:
+                    _trainer.cleanup()
+                except Exception:
+                    pass
+                _trainer = None
             color = "#a6e3a1" if "✅" in result else ("#fab387" if "⏹" in result else "#f38ba8")
             # New LoRA shows up in the Generate tab's slots right away
             lora_upd = gr.update(choices=_lora_choices())
             extra = ('<p class="tr-dim">It is now listed in the LoRA slots of the 🎨 Generate tab '
-                     '— remember to add your trigger word to the prompt.</p>' if "✅" in result else "")
+                     '— remember to add your trigger word to the prompt. The training model was released from memory (Prepare again to train another LoRA).</p>' if "✅" in result else
+                     '<p class="tr-dim">The training model was released from memory — Prepare again to train.</p>')
             return (f'<p style="color:{color}">{result}</p>{extra}', "", *[lora_upd] * len(gen_lora_dds))
 
         def do_train_stop():
@@ -6180,6 +6208,7 @@ def _build_train_tab(gen_lora_dds=()):
             target_dd, sched_dd, grad_accum_sl, warmup_sl,
             grad_ckpt_cb, flip_cb, save_every_sl, seed_num,
             train_device_dd, output_name_txt, train_clip_skip_rb,
+            drop_shared_cb, drop_pct_sl,
         ]
         train_prepare_btn.click(do_train_prepare, _train_config_inputs,
                                 [train_progress, train_log])
