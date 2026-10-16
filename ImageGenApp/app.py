@@ -3727,7 +3727,7 @@ def _build_generate_tab():
     def do_card_load(name, outfit, scene, neg, cur_model=None):
         from backend.character_cards import load_card, card_prompt, card_for_checkpoint
         from backend.model_manager import list_checkpoints, list_loras, list_vaes
-        n_out = 25
+        n_out = 26
         card = load_card(name) if name and name != "(none)" else None
         if not card:
             return (*[gr.update()] * n_out, '<p style="color:#f9e2af;font-size:13px;">⚠ Pick a card first.</p>')
@@ -3774,7 +3774,7 @@ def _build_generate_tab():
                   if notes else ""))
         return (model, vae, *lora_vals, prompt, negative, g("width"), g("height"), g("cfg"), g("steps"),
                 g("scheduler") if card.get("scheduler") in SCHEDULER_MAP else gr.update(),
-                g("clip_skip") if card.get("clip_skip") in (1, 2) else gr.update(), *boost, msg)
+                g("clip_skip") if card.get("clip_skip") in (1, 2) else gr.update(), *boost, g("colour"), msg)
 
     def _card_choices(value):
         from backend.character_cards import list_cards
@@ -3792,7 +3792,7 @@ def _build_generate_tab():
                           if l and l != "none"],
                 "tags": prompt or "", "outfits": old.get("outfits") or {}, "negative": neg or "",
                 "width": w, "height": h, "cfg": cfg, "steps": steps, "scheduler": sched, "clip_skip": cs,
-                "profiles": old.get("profiles") or {}, "identity": old.get("identity"), "notes": old.get("notes")}
+                "profiles": old.get("profiles") or {}, "identity": old.get("identity"), "notes": old.get("notes"), "colour": old.get("colour")}
         try:
             save_card(card)
         except (OSError, ValueError) as e:
@@ -3807,7 +3807,7 @@ def _build_generate_tab():
         return EYE_STYLE["mode"]
 
     def do_card_profile(name, model, vae, l1, w1, l2, w2, l3, w3, neg, w, h, cfg, steps, sched, cs,
-                        pag, freeu, rescale, fd_on, fd_den, hd_on, hd_den, ed_on=False, ed_den=0.4):
+                        pag, freeu, rescale, fd_on, fd_den, hd_on, hd_den, ed_on=False, ed_den=0.4, colour=1.0):
         """Remember the current LoRA weights, settings and boosters as the card's profile for the selected
         checkpoint (🎴 Load applies it whenever that checkpoint is selected)."""
         from backend.character_cards import load_card, save_card
@@ -3823,7 +3823,7 @@ def _build_generate_tab():
             "negative": neg or "", "width": w, "height": h, "cfg": cfg, "steps": steps, "scheduler": sched,
             "clip_skip": cs, "pag": pag or 0.0, "freeu": bool(freeu), "cfg_rescale": rescale or 0.0,
             "face_detail": (fd_den or 0.0) if fd_on else 0.0, "hand_detail": (hd_den or 0.0) if hd_on else 0.0,
-            "eye_detail": (ed_den or 0.0) if ed_on else 0.0, "eye_style": _eye_style_now()}}
+            "eye_detail": (ed_den or 0.0) if ed_on else 0.0, "eye_style": _eye_style_now(), "colour": _colour.clamp_strength(colour)}}
         try:
             save_card(card)
         except (OSError, ValueError) as e:
@@ -3900,13 +3900,13 @@ def _build_generate_tab():
         [card_dd, outfit_dd, card_scene_txt, neg_prompt_txt, model_dd],
         [model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3,
          prompt_txt, neg_prompt_txt, width_sl, height_sl, cfg_sl, steps_sl, scheduler_dd, clip_skip_rb,
-         pag_sl, cfg_rescale_sl, freeu_cb, fd_cb, fd_denoise_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl,
+         pag_sl, cfg_rescale_sl, freeu_cb, fd_cb, fd_denoise_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, cs_sl,
          card_status])
     card_profile_btn.click(
         do_card_profile,
         [card_dd, model_dd, vae_dd, lora_dd, lora_weight, lora_dd2, lora_weight2, lora_dd3, lora_weight3,
          neg_prompt_txt, width_sl, height_sl, cfg_sl, steps_sl, scheduler_dd, clip_skip_rb,
-         pag_sl, freeu_cb, cfg_rescale_sl, fd_cb, fd_denoise_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl],
+         pag_sl, freeu_cb, cfg_rescale_sl, fd_cb, fd_denoise_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, cs_sl],
         [card_status])
     card_save_btn.click(
         do_card_save,

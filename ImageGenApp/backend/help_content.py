@@ -519,9 +519,11 @@ def parameters_html() -> str:
              "turns a character LoRA's trigger words and Civitai example prompts into a card with outfits. "
              "“📌 Save as this checkpoint's profile” remembers the LoRA weights, CFG, sampler and boosters (PAG, face "
              "detail …) that suit the selected checkpoint; 🎴 Load applies the profile of whichever checkpoint is "
-             "selected, and the card's defaults for the others.",
+             "selected, and the card's defaults for the others. A card or a profile may also carry a 🎨 Colour strength (a \"colour\" value of 0.5-1 in its file): 🎴 Load sets the slider to it "
+             "(a card without one leaves the slider as it is), 📌 saves the slider's current value, 💾 Save keeps it.",
              _cn("一键载入角色的模型、LoRA、角色标签与服装。可由 LoRA 自动生成。“📌 保存为当前模型的配置”记住该模型适用的 LoRA 权重、"
-                 "CFG、采样器与画质增强；载入时按当前所选模型套用对应配置。")],
+                 "CFG、采样器与画质增强；载入时按当前所选模型套用对应配置。角色卡或配置还可带“颜色强度”（文件里 0.5–1 的 colour 值）："
+                 "载入时把滑块设为该值（没有则保持滑块不变），📌 保存滑块当前值，💾 保存会保留它。")],
             ["🏷 Interrogate (WD14)",
              "Reads an image's Danbooru tags into the prompt (img2img, PNG Info); in Train LoRA it tags a whole "
              "dataset. ~1 s per image on the CPU.",
