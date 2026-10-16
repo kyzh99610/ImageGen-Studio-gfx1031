@@ -609,7 +609,7 @@ class _HeatGuard:
     """Cool mode + pause-while-hot for the training loop (round 20): training is the longest sustained GPU load the app has and never went through
     sampling.run_pipe, so neither Settings → Cool mode nor Pause while hot applied to it. After each forward / backward step (`raw` = its real time):
     wait sampling.COOL["factor"] × raw (in ≤ 0.25 s slices, Stop ends it), and with the pause-while-hot limit on check the thermal zone every ~10 s and
-    wait there with the in-pass brake rule (act at limit + 6, resume at the limit), like a sampling pass. Only timing changes, never the maths.
+    wait there with the in-pass brake rule (resume at the limit; act at limit + 3 — `thermal.TRAIN_IN_PASS_MARGIN` — where a sampling pass acts at limit + 6: round 24's training rode 93–95 °C for an hour with the + 6 brake). Only timing changes, never the maths.
     `say(text)` reports a wait; `waited` is the total seconds paused."""
 
     def __init__(self, stop: Callable[[], bool], say: Callable[[str], None] | None = None,
@@ -646,7 +646,8 @@ class _HeatGuard:
             self.sleep(min(0.25, max(0.0, pause - (self.clock() - t0))))
         try:
             if thermal.GUARD["limit"] and self.clock() - self._checked >= _THERM_EVERY:
-                thermal.wait_cool(self.stop, self.say, read=thermal.read_temp, sleep=self.sleep, clock=self.clock, in_pass=True)
+                thermal.wait_cool(self.stop, self.say, read=thermal.read_temp, sleep=self.sleep, clock=self.clock, in_pass=True,
+                                  margin=thermal.TRAIN_IN_PASS_MARGIN)
                 self._checked = self.clock()
         except Exception:
             pass

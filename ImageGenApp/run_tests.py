@@ -2441,9 +2441,9 @@ def _():
         meta = read_image_metadata(f)
     assert meta["hand_detail"] == {"denoise": 0.45}, meta.get("hand_detail")
     ups = _app._plan_extra_updates(_app._restore_plan(meta))
-    assert ups[-5:-3] == [True, 0.45] and ups[8] is True, ups
+    assert ups[-6:-4] == [True, 0.45] and ups[8] is True, ups           # the colour strength is the last value since round 25
     ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
-    assert ups0[-5] is False
+    assert ups0[-6] is False
 
 
 @test("Inpaint: NaN latents from an fp16 VAE encode (a NoobAI checkpoint's bf16-origin VAE) are retried once in fp32 and the need is remembered; NaN is never pasted")
@@ -2636,7 +2636,7 @@ def _():
         meta = read_image_metadata(f)
     assert meta["eye_detail"] == {"denoise": 0.3}, meta.get("eye_detail")
     ups = _app._plan_extra_updates(_app._restore_plan(meta))
-    assert ups[-3:-1] == [True, 0.3] and ups[-5:-3] == [True, 0.45] and ups[-1] is False, ups
+    assert ups[-4:-2] == [True, 0.3] and ups[-6:-4] == [True, 0.45] and ups[-2] is False and ups[-1] == 1.0, ups
     assert "eye detail" in _app._plan_summary(_app._restore_plan(meta))
 
 
@@ -4193,6 +4193,7 @@ class _BatchEnv:
 
             def img2img(self, img, prompt, neg, strength, steps, cfg, seed, sched, step_callback=None, clip_skip=1):
                 env.i2i_calls += 1
+                env.i2i_inputs.append(img.getpixel((0, 0)))
                 if env.abort_hires_at and env.i2i_calls >= env.abort_hires_at:
                     _app._generation_abort.set()             # Stop pressed during the hires pass
                     raise _app._GenerationAborted()
@@ -4204,23 +4205,23 @@ class _BatchEnv:
                 if env.stop_after is not None and len(env.calls) >= env.stop_after:
                     _app._generation_abort.set()           # Stop pressed while this image finishes (post pass)
                 return [Image.new("RGB", (w, h), (seed % 255, 40, 90)) for _ in range(batch)], "info"
-        self.calls, self.stop_after, self.i2i_calls, self.abort_hires_at = [], None, 0, None
+        self.calls, self.stop_after, self.i2i_calls, self.abort_hires_at, self.i2i_inputs = [], None, 0, None, []
         _app.sd = FakeSD()
         return self
 
     def __exit__(self, *exc):
         self._app.sd, self._app.OUTPUTS_DIR, self._CC.CARDS_DIR = self._old
 
-    def run_batch(self, seed, steps=4, seeds_per=2, resume=True, hires=False):
+    def run_batch(self, seed, steps=4, seeds_per=2, resume=True, hires=False, **extra):
         args = ["TestGirl", "", seeds_per, resume, "x.safetensors", "none", "none", 0.7, "none", 0.7, "none", 0.7, False,
                 "", "bad hands", "Euler a", steps, 6.0, 64, 64, 1, seed, None, 0.5, False, 1, -1, 0.0, hires, 1.5, 0.45,
                 14, "Lanczos", False, 0.35, "auto", "", 0.0, False, 0.0, False, 0.35]
-        return list(self.cb(*args, progress=lambda *a, **k: None))
+        return list(self.cb(*args, progress=lambda *a, **k: None, **extra))
 
     def run_xy(self, x_axis, x_vals):
         args = ["x.safetensors", "none", "none", 0.7, "none", 0.7, "none", 0.7, False, "1girl", "bad", "Euler a", 4, 6.0,
                 64, 64, 1, 5, None, 0.5, False, 1, -1, 0.0, False, 1.5, 0.45, 14, "Lanczos", False, 0.35, "auto", "",
-                0.0, False, 0.0, False, 0.35, False, 0.35, False, x_axis, x_vals, "none", ""]
+                0.0, False, 0.0, False, 0.35, False, 0.35, False, 1.0, x_axis, x_vals, "none", ""]
         return self.xy(*args, progress=lambda *a, **k: None)
 
 
@@ -4647,8 +4648,8 @@ def _():
     assert "Max detail: 2× Real-ESRGAN" in txt and "Eye detail: denoise 0.4" in txt, txt
     m_rec = meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1")                       # the record (exact restore)
     plan = _app._restore_plan(m_rec)
-    assert plan["max_detail"] and _app._plan_extra_updates(plan)[-1] is True and "max detail" in _app._plan_summary(plan), plan
-    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-1] is False
+    assert plan["max_detail"] and _app._plan_extra_updates(plan)[-2] is True and "max detail" in _app._plan_summary(plan), plan
+    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-2] is False and _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-1] == 1.0
     m_txt = meta_of(parameters="1girl\nSteps: 12, Seed: 1, Max detail: 2× Real-ESRGAN, Eye detail: denoise 0.4")   # the A1111 text alone
     assert m_txt.get("max_detail") == {"scale": 2, "method": "Real-ESRGAN (ONNX)"}, m_txt
     # the pass: twice the size per picture (the Real-ESRGAN call is replaced by a resize), the session is released, > 64 MP refused
@@ -4667,6 +4668,123 @@ def _():
             assert "64 MP" in str(e)
     finally:
         _app._upscale_to, _app.upscaler.release = old
+
+
+@test("🎨 Colour strength (round 25): LAB chroma scale (lightness kept, grey / off untouched), clean_extra, record + A1111 text + restore, after every pass in a real Generate run (no pass reads a scaled picture), default off")
+def _():
+    import json as _j, tempfile
+    from pathlib import Path
+    import numpy as np, cv2
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    import app as _app
+    from backend import colour as C
+    from backend.png_info import read_png_info
+
+    def chroma(im):
+        lab = cv2.cvtColor(np.asarray(im.convert("RGB"), np.float32) / 255.0, cv2.COLOR_RGB2LAB)
+        return float(np.hypot(lab[..., 1], lab[..., 2]).mean()), float(lab[..., 0].mean())
+    src = Image.new("RGB", (32, 32), (210, 80, 60)); src.paste(Image.new("RGB", (16, 32), (60, 120, 200)), (0, 0))
+    assert C.scale_colour(src, 1.0) is src and C.scale_colour(src, 5) is src and C.scale_colour(src, "x") is src          # off / above 1 / junk = the picture itself
+    c0, l0 = chroma(src)
+    for s in (0.9, 0.8, 0.6):
+        out = C.scale_colour(src, s)
+        c1, l1 = chroma(out)
+        assert abs(c1 / c0 - s) < 0.02 and abs(l1 - l0) < 0.6 and out.size == src.size, (s, c1 / c0, l1 - l0)          # chroma x s, lightness unchanged
+    grey = Image.new("RGB", (8, 8), (120, 120, 120))
+    assert np.abs(np.asarray(C.scale_colour(grey, 0.5), np.int16) - 120).max() <= 1                                     # a grey picture stays grey
+    rgba = Image.new("RGBA", (8, 8), (200, 60, 60, 77))
+    assert C.scale_colour(rgba, 0.7).mode == "RGBA" and C.scale_colour(rgba, 0.7).getpixel((0, 0))[3] == 77             # alpha kept
+    assert C.clamp_strength(float("nan")) == 1.0 and C.clamp_strength("x") == 1.0 and C.clamp_strength(None) == 1.0 and C.clamp_strength(0.1) == 0.5 and C.clamp_strength(2) == 1.0 and C.clamp_strength(0.8) == 0.8
+    # clean_extra: default off, junk safe, clamped
+    assert _app._clean_extra({})["cs"] == 1.0 and _app._clean_extra({"cs": "x"})["cs"] == 1.0 and _app._clean_extra({"cs": 0.3})["cs"] == 0.5 and _app._clean_extra({"cs": 0.8})["cs"] == 0.8
+    # record -> A1111 text -> PNG Info -> restore plan -> control value (a record without it resets the slider to 1)
+    rec = {"app": "ImageGen Studio", "format": 2, "mode": "txt2img", "prompt": "1girl", "steps": 12, "cfg_scale": 6.0, "seeds": [1], "scheduler": "DPM++ 2M AYS",
+           "width": 64, "height": 64, "colour": {"strength": 0.8, "method": "lab-chroma"}}
+    assert "Colour strength: 0.8" in _app._params_text(rec) and "Colour strength" not in _app._params_text(dict(rec, colour=None))
+
+    def meta_of(**texts):
+        pi = PngInfo()
+        for k, v in texts.items():
+            pi.add_text(k, v)
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "m.png"
+            Image.new("RGB", (8, 8)).save(f, pnginfo=pi)
+            with Image.open(f) as im:
+                return read_png_info(im)
+    m_rec = meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1")
+    plan = _app._restore_plan(m_rec)
+    assert plan["colour"] == {"strength": 0.8, "method": "lab-chroma"} and _app._plan_extra_updates(plan)[-1] == 0.8 and "colour strength 0.8" in _app._plan_summary(plan), plan
+    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-1] == 1.0
+    m_txt = meta_of(parameters="1girl\nSteps: 12, Seed: 1, Colour strength: 0.7")                                       # the A1111 text alone
+    assert m_txt.get("colour") == {"strength": 0.7, "method": "lab-chroma"}, m_txt
+    from backend.png_info import format_png_info_html
+    assert "Colour strength" in format_png_info_html(m_txt)
+    # a real Generate run (outfit batch) with a fake pipeline: the hires pass reads the UNSCALED picture, the saved one is scaled, record + text say so; default off saves the picture as drawn
+    with _BatchEnv() as E:
+        E.run_batch(seed=11, seeds_per=1, hires=True, cs=0.6)
+        files = sorted(p for p in E._app.OUTPUTS_DIR.glob("*.png") if not p.name.startswith("outfits_"))
+        assert files and E.i2i_inputs, (files, E.i2i_inputs)
+        im = Image.open(files[0]); im.load()
+        r = _j.loads(im.info["imagegen"])
+        assert r["colour"] == {"strength": 0.6, "method": "lab-chroma"} and "Colour strength: 0.6" in im.info["parameters"] and r.get("hires"), r
+        seed = r["seed"]
+        drawn = Image.new("RGB", im.size, (seed % 255, 40, 90))
+        assert E.i2i_inputs[0] == (seed % 255, 40, 90), (E.i2i_inputs, seed)                                           # the hires pass read the picture as drawn
+        want = C.scale_colour(drawn, 0.6)
+        assert np.abs(np.asarray(im.convert("RGB"), np.int16) - np.asarray(want, np.int16)).max() <= 2                 # the saved picture = the scaled one
+        for f in files:
+            f.unlink()
+        E.run_batch(seed=11, seeds_per=1, resume=False)                                                                # default: off
+        files = sorted(p for p in E._app.OUTPUTS_DIR.glob("*.png") if not p.name.startswith("outfits_"))
+        im2 = Image.open(files[0]); im2.load()
+        assert "colour" not in _j.loads(im2.info["imagegen"]) and "Colour strength" not in im2.info["parameters"] and im2.convert("RGB").getpixel((0, 0)) == (_j.loads(im2.info["imagegen"])["seed"] % 255, 40, 90)
+
+
+@test("LoRA trainer brake (round 25): a training brakes at limit + 3 (a sampling pass still at limit + 6), resumes at the limit; only timing")
+def _():
+    from backend import lora_trainer as LT, sampling, thermal
+    from unittest.mock import patch
+    assert thermal.IN_PASS_MARGIN == 6.0 and thermal.TRAIN_IN_PASS_MARGIN == 3.0
+    old = thermal.GUARD["limit"]
+    thermal.GUARD["limit"] = 88.0
+    try:
+        def zone(seq):
+            it = iter(seq)
+            last = [seq[-1]]
+            return lambda: next(it, last[0])
+
+        def run(margin, seq):
+            slept, t = [], [0.0]
+
+            def sl(x):
+                slept.append(x); t[0] += x
+            w = thermal.wait_cool(read=zone(seq), sleep=sl, clock=lambda: t[0], in_pass=True, margin=margin)
+            return w, slept
+        w, s = run(None, [92.0, 90.0, 87.0])                                    # limit + 4: a sampling pass (margin 6) does not brake ...
+        assert w == 0 and not s, (w, s)
+        w, s = run(thermal.TRAIN_IN_PASS_MARGIN, [92.0, 92.0, 90.0, 87.0])      # ... a training does, until the zone is at the limit (88)
+        assert w > 0 and len(s) == 3 and all(x == 2.0 for x in s), (w, s)
+        w, s = run(thermal.TRAIN_IN_PASS_MARGIN, [90.0])                        # limit + 2: neither brakes
+        assert w == 0 and not s
+        # the trainer's guard uses the training margin: a 92 °C zone makes it wait after a step, a 90 °C one does not
+        for temp, waits in ((92.0, True), (90.0, False)):
+            slept, t = [], [0.0]
+
+            def sl(x):
+                slept.append(x); t[0] += x
+            reads = iter([temp, temp, 80.0])
+            with patch.object(LT, "_THERM_EVERY", 0.0), patch.object(thermal, "read_temp", lambda: next(reads, 80.0)):
+                g = LT._HeatGuard(lambda: False, None, sleep=sl, clock=lambda: t[0])
+                sampling_factor = sampling.COOL["factor"]
+                sampling.COOL["factor"] = 0.0
+                try:
+                    g.after_step(0.1)
+                finally:
+                    sampling.COOL["factor"] = sampling_factor
+            assert bool([x for x in slept if x == 2.0]) is waits, (temp, slept)
+    finally:
+        thermal.GUARD["limit"] = old
 
 
 @test("🔬 Sharpen eyes (round 15): the picture's own record drives the 2× + eye pass; refuses no face / over 64 MP / already max detail / Pony / no model; Stop and 'no eyes' save nothing; the eye style is restored")
