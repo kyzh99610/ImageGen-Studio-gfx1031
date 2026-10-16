@@ -313,7 +313,12 @@ def parameters_html() -> str:
              "difference between the settings, not the percentages. A face that reaches into the hand's crop is left out of the mask, so a hand at her cheek or chin no longer repaints part of her face (mean change inside the face box "
              "4.7–7.4 / 255 before, 0.5–0.7 now; the hands are as good). The pass may touch up hand-shaped things (a ship's turret) — at low denoise they stay what they were. Face and "
              "hand passes use the evenly spaced version of your sampler (Karras / AYS at the same denoise "
-             "changed almost nothing).",
+             "changed almost nothing). Round 29 (an SDXL Illustrious checkpoint with a character LoRA, 24 hand-heavy cowboy shots: peace sign, reaching toward the viewer, looking back, arms up; 9 broken hands by eye, "
+             "rated blind): the hand pass now redraws with the same hand-only prompt as 🖐 (it used the whole scene before: from 0.5 up it drew stray objects into the hand's box — a hair-ornament butterfly, drops, once a tiny girl — "
+             "in 6 of 44 crops, with the hand-only prompt in none) and fixed 5 of 9 broken hands at 0.35, 6 of 9 at 0.7 (the whole prompt: 4 of 9 at 0.35, 0.5 and 0.7); 13 of 13 good hands stayed good. "
+             "The usual SDXL failure is the second hand — a mitten fist or a glove blob while the gesturing hand is fine (peace sign 3 of 6 pictures, reaching 3 of 6, looking back 2 of 5) — "
+             "and 🖐 Re-draw hand does the job there: a plausible hand in 20 of 27 single tries (74 %), at least one in three tries for 8 of 9 hands; gesture words (“v, peace sign, index and middle finger raised …”) "
+             "did not help (71 % against 81 % on the same 7 hands), a hires pass first fixed 3 of 9. One rater, 9 hands: a direction, not a number.",
              _cn("对手部做同样的重绘（动漫手部检测，手套也算），在脸部之前进行：0.35 清理手指。实测 11 只真正画坏的手：0.35–0.55 约一半能把团块/连指拳变成有手形的拳头，"
                  "但从未修正手指数量或缠在一起的双手；0.8 重画 10 只中有 2 只得到正确的手（另有 4 只合理但手套/道具/姿势变了），1.0 会凭空画出物品。"
                  "手画坏了：先换种子，或用 Inpaint 框里的 🖐 重画手部（涂抹那只手，或不涂抹让它取最大的检测到的手）：用只含手部的提示词在 0.7 下重画多次，每次不同种子，原图在前、各次结果在后，挑一张喜欢的。"
@@ -321,7 +326,12 @@ def parameters_html() -> str:
                  "约十分之一更糟（半透明的手；手靠近脸时框内可能画出一张脸，所以只涂抹手；在负面提示词加“face, head, extra face”或去掉“1girl, solo”都没能阻止）。"
                  "第 10 轮用盲评对比了 0.7 与 0.8（SD 1.5，其中 7 只手，每种设置各 8 次）：另外 6 只手上 0.7 有 21/48 次正确，0.8 只有 4/48（每只手都不差；更糟的 11 对 14，0.7 更多保留原来的手套和姿势），"
                  "手放在脸颊旁的那只手，框内画出整张脸的次数从 24 次中 4 次降到 0，另外 3 只手持平；更大的裁剪范围（手的 0.9 倍）更差，所以重画默认用 0.7。评分只有一个人且标准严格（“干净、手套和姿势不变”），请看两种设置的差别，不要看百分比。"
-                 "伸进手部重绘范围的脸现在会从遮罩中扣除，手放在脸颊/下巴旁时不再重画她脸上的一部分（脸框内平均变化 4.7–7.4 / 255 → 0.5–0.7，手的效果相当）。脸/手重绘使用均匀步长版本的采样器。")],
+                 "伸进手部重绘范围的脸现在会从遮罩中扣除，手放在脸颊/下巴旁时不再重画她脸上的一部分（脸框内平均变化 4.7–7.4 / 255 → 0.5–0.7，手的效果相当）。脸/手重绘使用均匀步长版本的采样器。"
+                 "第 29 轮（SDXL，Illustrious 系检查点 + 角色 LoRA，24 张手部较多的半身图：比耶、伸向镜头、回头、举手；人工挑出 9 只画坏的手，盲评）：手部重绘现在与 🖐 使用同一个只含手部的提示词"
+                 "（之前用整个场景的提示词：0.5 以上会往手的框里画出多余的东西——发饰蝴蝶、水滴、甚至一个小人——44 张裁剪图中 6 张，改用手部提示词后为 0 张），"
+                 "9 只坏手在 0.35 下修好 5 只，0.7 下 6 只（整个提示词：0.35 / 0.5 / 0.7 都是 4 只）；13 只好手全部保持完好。SDXL 常见的问题是另一只手——手势那只没问题，另一只变成连指拳或手套团块"
+                 "（比耶 6 张中 3 张、伸手 6 张中 3 张、回头 5 张中 2 张），这时用 🖐 重画手部：27 次单次中 20 次得到合理的手（74 %），9 只手中 8 只在 3 次内至少有一次；"
+                 "加手势词（“v, peace sign, 食指和中指竖起…”）没有帮助（同样 7 只手 71 % 对 81 %），先做 hires 只修好 9 只中的 3 只。只有一个评分者、9 只手：看方向，不要看数字。")],
             ["👁 Eye detail",
              "Finds the eyes (anime eye detector, on each face) and re-draws both eyes of a face in one pass at high "
              "resolution, after the face pass, with a prompt of only the eye tags (colour, gaze, expression, glasses…) plus “detailed eyes, "

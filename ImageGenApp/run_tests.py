@@ -2727,6 +2727,47 @@ def _():
         sampling.run_pipe, sdpipe._load_scheduler, sdpipe._make_generator, dt._embeds = orig
 
 
+@test("Hand detail (round 29): the pass re-draws with the hand-only prompt (hand / held-object tags + hand words), never the whole scene (no hair-ornament butterflies or girls drawn into the box)")
+def _():
+    from PIL import Image
+    from backend import detail_tools as dt
+    seen = []
+    orig_det, orig_inp = dt.detect_hands, dt.inpaint_region
+    try:
+        dt.detect_hands = lambda image, max_hands=6, conf=0.45, min_frac=0.02: [(20, 20, 60, 60)]
+        dt.inpaint_region = lambda sdp, im, mask, prompt, *a, **k: (seen.append(prompt), (im, 0))[1]
+        full = ("masterpiece, best quality, 1girl, solo, grey hair, (black butterfly hair ornament:1.2), cowboy shot, white bikini, v, peace sign, hand up, "
+                "holding umbrella, smile, poolside, blue sky")
+        dt.hand_detail(object(), Image.new("RGB", (128, 128)), full, "lowres", denoise=0.5)
+        p = seen[0]
+        tags = [t.strip() for t in p.split(",")]
+        for want in ("masterpiece", "1girl", "peace sign", "holding umbrella", "detailed hands", "five fingers"):
+            assert want in tags, (want, p)
+        for gone in ("butterfly", "poolside", "bikini", "grey hair", "blue sky"):
+            assert gone not in p, (gone, p)
+        seen.clear()
+        dt.hand_detail(object(), Image.new("RGB", (128, 128)), full, "lowres", hand_prompt="long fingers")       # an explicit hand_prompt is added to the hand-only prompt
+        assert seen[0].endswith("long fingers") and "poolside" not in seen[0], seen[0]
+    finally:
+        dt.detect_hands, dt.inpaint_region = orig_det, orig_inp
+
+
+@test("Eye detail (round 29): the eye prompt carries the eye-state tags of an expression (closed / wink / half-closed / tears / sparkling / heart / star pupils / kaomoji eyes), so the pass keeps them instead of opening the eyes")
+def _():
+    from backend import detail_tools as dt
+    for state in ("closed eyes", "one eye closed", "wink", "half-closed eyes", "jitome", "tears", "crying", "streaming tears", "sparkling eyes",
+                  "heart-shaped pupils", "star-shaped pupils", "@_@", ">_<", "^_^", "empty eyes", "looking up", "rolling eyes", "narrowed eyes", "squinting"):
+        full = f"masterpiece, 1girl, solo, grey hair, cowboy shot, white bikini, {state}, smile, poolside"
+        p = dt.eye_prompt_from(full)
+        tags = [x.strip() for x in p.split(",")]
+        assert state in tags, (state, p)
+        assert "poolside" not in tags and "white bikini" not in tags and "grey hair" not in tags, (state, p)
+    # a pupil shape the prompt names is left alone (no 'round pupils' words, no slit negative): the survey's heart / star-pupil pictures kept their shapes
+    for shape in ("heart-shaped pupils", "star-shaped pupils", "@_@"):
+        q = f"1girl, solo, {shape}, blush"
+        assert "round pupils" not in dt.eye_prompt_from(q) and dt.eye_negative_from(q, "lowres") == "lowres", shape
+
+
 @test("Eye detail: the redraw uses an eye-only prompt (quality + subject + eye / expression / gaze tags + detail words), not the whole scene; an explicit eye_prompt is used as given")
 def _():
     from PIL import Image

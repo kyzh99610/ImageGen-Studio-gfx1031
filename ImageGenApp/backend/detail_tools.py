@@ -465,7 +465,11 @@ def hand_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, den
         mask = Image.new("L", (W, H), 0)
         ImageDraw.Draw(mask).rounded_rectangle([x1 - mx, y1 - my, x2 + mx, y2 + my],
                                                radius=max(2, min(hw, hh) // 4), fill=255)
-        p = f"{prompt}, {hand_prompt}" if hand_prompt else prompt
+        # round 29: the hand-only prompt of the 🖐 re-draw (quality + subject + hand / held-object / sleeve tags + the hand words), not the whole scene: with the whole prompt the pass drew
+        # stray objects into the hand's box from 0.5 up (a hair-ornament butterfly, drops, once a tiny girl: 6 of 44 crops at 0.5 / 0.7), with the hand-only prompt none (0 of 44) and it
+        # fixed 5 / 6 of 9 broken SDXL hands at 0.35 / 0.7 (the whole prompt: 4 of 9 at 0.35, 0.5 and 0.7); good hands came through 13 of 13 either way
+        hp = hand_prompt_from(prompt)
+        p = f"{hp}, {hand_prompt}" if hand_prompt else hp
         out, _ = inpaint_region(sdp, out, mask, p, negative, steps=steps, cfg=cfg, denoise=denoise,
                                 seed=(seed + 101 + n) % 2**32 if seed is not None and seed >= 0 else -1,
                                 scheduler=scheduler, clip_skip=clip_skip, padding=int(max(hw, hh) * 0.6),
@@ -562,7 +566,8 @@ def colour_guard(before: Image.Image, after: Image.Image, iris_boxes, region=Non
 # show. Without "sparkling eyes, eye highlights, limbal ring": those drew 4-point star sparkles into the pupils in 3 of 8 pictures (3x crops).
 _EYE_KEEP = re.compile(r"eye|pupil|iris|lash|tsurime|jitome|tareme|sanpaku|heterochromia|glasses|eyewear|goggles|monocle|tears|crying|wink|"
                        r"smile|expression|blush|looking|bangs|hair over|hair between|eyebrow|makeup|eyeshadow|eyeliner|"
-                       r"@_@|\+_\+|\^_\^|>_<|=_=|;_;|o_o|0_0|x_x", re.I)          # (the kaomoji are eyes too)
+                       r"@_@|\+_\+|\^_\^|>_<|=_=|;_;|o_o|0_0|x_x|"
+                       r"squint|glar|sleepy|drowsy|heavy-lidded", re.I)          # (the kaomoji are eyes too; round 29: so are the lid states that have no 'eye' in their name)
 EYE_DETAIL_WORDS = "detailed eyes, beautiful detailed eyes, eyelashes, detailed pupils, iris detail"
 # "detailed pupils" alone drew bold outlined slit pupils (one checkpoint 4 of 4, Pony, some hassakuXL). With "round pupils" in the prompt and
 # "slit pupils, cat eyes" in the negative the pupils stay round and the iris keeps its shading (8 pictures, 3x crops; hassakuXL's eye sharpness over
