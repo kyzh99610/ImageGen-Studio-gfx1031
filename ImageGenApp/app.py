@@ -1615,8 +1615,8 @@ def _build_generate_tab():
                                          "never fixes a finger count (use 🖐 in Inpaint) · ~5–15 s per hand")
                                 hd_denoise_sl = gr.Slider(0.1, 0.7, value=_ls.get("hd_denoise", 0.35), step=0.05,
                                                           label="Hand denoise",
-                                                          info="0.3–0.35 = touch-up · 0.45–0.55 = more hand-shaped, can invent things · "
-                                                               "a broken hand: another seed, or 🖐 Re-draw hand in Inpaint")
+                                                          info="0.35 = touch-up · 0.5–0.7 = fixes about 2 of 3 mitten / blob hands (9 hands) · "
+                                                               "a broken hand that stays: 🖐 Re-draw hand in Inpaint (several tries)")
                             with gr.Row():
                                 ed_cb = gr.Checkbox(
                                     label="👁 Also re-draw eyes", value=bool(_ls.get("ed_on", False)),

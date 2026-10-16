@@ -1,15 +1,18 @@
-# __expression__
+# __expression__  (round 29: wording measured on 14 expressions x 10 pictures; the eye pass keeps winks, closed / half-closed eyes, tears and heart / star pupils)
 smile
 light smile, closed mouth
-open mouth, :d
-blush, embarrassed
-pout
+laughing, open mouth, :d
+shy, blush, looking away
+pout, puffed cheeks, blush
 serious
-smug
-one eye closed, wink
-closed eyes, happy
-surprised, open mouth
-tears, sad
+smug face, smirk, narrowed eyes
+one eye closed, wink, smile
+closed eyes, smile, happy
+surprised, wide-eyed, open mouth
+crying, streaming tears, sad
+angry, furrowed brow, clenched teeth
+embarrassed, blush, wavy mouth, sweatdrop
+tongue out, :p
+drowsy, heavy-lidded eyes, half-closed eyes
 expressionless
 grin
-sleepy, half-closed eyes
