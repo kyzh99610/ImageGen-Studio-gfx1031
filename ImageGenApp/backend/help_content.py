@@ -179,8 +179,8 @@ def prompt_syntax_html() -> str:
     )
     h += _note("Not supported here (they are A1111 WebUI features): <b>AND</b>, <b>ADDBASE / ADDCOMM</b>, "
                "prompt scheduling <code>[a:b:0.5]</code> and alternation <code>[a|b]</code> — square brackets "
-               "only mean \"weaker\" (×0.91). "
-               + _cn("本程序不支持 AND、ADDBASE/ADDCOMM、[a:b:0.5] 调度与 [a|b] 轮换；方括号只表示降低权重（×0.91）。"))
+               "only mean \"weaker\" (×0.91); for a random pick per image use <code>{a|b}</code> (see Wildcards). "
+               + _cn("本程序不支持 AND、ADDBASE/ADDCOMM、[a:b:0.5] 调度与 [a|b] 轮换；方括号只表示降低权重（×0.91）；每张图随机选择请用 {a|b}（见“Wildcards”）。"))
 
     h += '<div class="hg-h3">LoRA Keywords &nbsp;<span class="cn">LoRA 关键词</span></div>'
     h += _tip("Pick a LoRA and its keywords appear as chips under the LoRA slots — click one to add it. "
@@ -212,14 +212,14 @@ def parameters_html() -> str:
         ["Parameter / 参数", "Recommended / 推荐值", "Effect / 效果", _cn("中文说明")],
         [
             ["<b>CFG Scale</b><br><small>提示词相关性 / 引导强度</small>",
-             "7 – 9",
+             "SD 1.5: 7 – 9<br>SDXL / Illustrious / Pony: 5 – 7 (6 = the measured recipe)",
              "How literally the model follows your prompt. Low = creative, high = rigid.",
-             _cn("数值越高越严格遵循提示词，越低模型越自由发挥。7–9 是最常用的平衡点，超过 15 通常过饱和。")],
+             _cn("数值越高越严格遵循提示词，越低模型越自由发挥。SD 1.5 常用 7–9，SDXL / Illustrious / Pony 用 5–7（实测方案 CFG 6），超过 15 通常过饱和。")],
 
             ["<b>Steps</b><br><small>采样步数</small>",
-             "20 – 30",
-             "Denoising iterations. More steps = finer details, diminishing returns past 30–40.",
-             _cn("去噪迭代次数。20步已是较好质量，超过40步收益明显递减。DPM++ 系列采样器20步即可出好图。")],
+             "20 – 30<br>DPM++ 2M AYS: 10 – 12",
+             "Denoising iterations. More steps = finer details, diminishing returns past 30–40. The AYS schedule gets about 25 regular steps' quality in 10–12.",
+             _cn("去噪迭代次数。20步已是较好质量，超过40步收益明显递减。DPM++ 系列采样器20步即可出好图；DPM++ 2M AYS 只需 10–12 步。")],
 
             ["<b>Seed</b><br><small>随机种子</small>",
              "-1 (random)",
@@ -229,9 +229,9 @@ def parameters_html() -> str:
                  "点 ♻️ 复用上次种子即可锁定，再微调提示词。")],
 
             ["<b>Width / Height</b><br><small>宽度 / 高度</small>",
-             "SD1.5: 512×512<br>SDXL: 1024×1024",
-             "Must be multiples of 64. Wrong resolution for model causes warped anatomy.",
-             _cn("必须是64的倍数。SD1.5在512分辨率训练，SDXL在1024训练。用错尺寸会导致人物变形或出现多头。")],
+             "SD1.5: 512×768<br>SDXL / Illustrious / Pony: 832×1216",
+             "Multiples of 8 (the app rounds for you). Far from the model's native size causes warped anatomy; changing the model family moves the size to the native one.",
+             _cn("必须是8的倍数（程序会自动取整）。SD1.5 在 512 附近训练，SDXL 在约 1024²（832×1216 是常用竖图）。离原生尺寸太远会导致人物变形或出现多头；切换模型系列时尺寸会自动换成原生尺寸。")],
 
             ["<b>Batch Size</b><br><small>批次大小</small>",
              "1 – 4",
@@ -350,9 +350,9 @@ def parameters_html() -> str:
              "For laptops that switch themselves off under long GPU runs. Cool mode pauses after every sampling step (1.5 = the GPU "
              "works ~40 % of the time; same pictures, slower). Pause while hot waits before each picture and each hires / face / eye "
              "pass — and before the ⭐ rating of an outfit batch, which is CPU work and heats the same zone (checked again every 10 s "
-             "of rating) — until the thermal zone is 8 °C under the limit you set (90 suits the RX 6800M laptop, which switched off after "
-             "minutes at 96 °C). Stop ends any wait. Both are off by default and saved for the next start. "
-             "Settings → Power profile sets the two at once: Full power (cool 1.5 + pause above 88 °C, the cautious default: no power-off in any lab of rounds 6–17) or "
+             "of rating) — until the thermal zone is 8 °C under the limit you set — or, once it is under the limit, has stopped falling (the laptop's idle level) — (the Power profiles use 88; the RX 6800M laptop this was measured on switched off after "
+             "minutes at 96 °C). Stop ends any wait. Both start off on a fresh install and are saved for the next start. "
+             "Settings → Power profile sets the two at once: Full power (cool 1.5 + pause above 88 °C, the cautious choice for a laptop that has switched off: no power-off in any lab of rounds 6–17) or "
              "Power-limited (cool 0 + the pause above 88). Measured on a ✨ Polish Full-body picture (SDXL, 832×1216 → 1248×1824), the setup is what decides, not the charger's name: "
              "<b>USB-C charger, Windows \"Performance\" scheme</b> (a sampling step ~4 s per megapixel instead of ~2): 202 s instead of 388 s, 8 pictures back to back with no reading at 94 °C or more; "
              "<b>after the laptop's service (new paste, clean fans), Manual mode with a 25 W CPU limit</b>: cool 1.5 156 s per picture with no pause at all and the zone under 89 °C, "
@@ -362,13 +362,13 @@ def parameters_html() -> str:
              "Moving a slider switches the profile to Custom. When cool mode is on and a sampling pass is that slow, the result line adds a hint (it never changes a setting).",
              _cn("笔记本长时间满载会自动关机时使用。冷却模式在每个采样步之后暂停（1.5 = GPU 约 40% 时间工作，画面不变，速度变慢）；"
                  "过热暂停会在每张图、每个高清修复/脸/眼重绘以及套装批量的 ⭐ 评分（CPU 运算，同样会升温，评分期间每 10 秒再检查一次）之前等待，"
-                 "直到温度比设定值低 8 °C（RX 6800M 笔记本建议 90）。停止按钮可结束等待。默认关闭，设置会保存。"
-                 "设置 → Power profile 可一次设好两项：Full power（冷却 1.5 + 88 °C 以上暂停，较保守的默认值：第 6–17 轮的所有实验中都没有关机）；"
+                 "直到温度比设定值低 8 °C，或已降到设定值以下且不再下降（笔记本的待机温度；Power profile 用 88）。停止按钮可结束等待。全新安装时两项都是关闭的，设置会保存。"
+                 "设置 → Power profile 可一次设好两项：Full power（冷却 1.5 + 88 °C 以上暂停，较保守的选择（适合曾经自动关机的笔记本）：第 6–17 轮的所有实验中都没有关机）；"
                  "Power-limited（冷却 0 + 88 °C 以上暂停）。以 ✨ 精修全身图（SDXL，832×1216 → 1248×1824）实测，决定因素是整机状态而不是充电器的名字："
                  "<b>USB-C 充电器 + Windows “Performance” 方案</b>（每百万像素一个采样步约 4 秒，正常约 2 秒）：202 秒（冷却 1.5 为 388 秒），连续 8 张没有读数 ≥ 94 °C；"
                  "<b>笔记本检修后（换了导热材料、清了风扇），Manual 模式 + CPU 限制 25 W</b>：冷却 1.5 每张 156 秒且完全不需要暂停、温度低于 89 °C，冷却 0 + 88 °C 暂停每张 111 秒（快 29%，暂停占 34% 的时间），温度中位数 86 °C、最高 91.9，8 张没有读数 ≥ 94 °C；"
                  "<b>检修前的 Turbo + CPU 不限功率</b>：冷却 0 + 88 °C 暂停不安全（42 分钟内 8% 的读数 ≥ 94 °C，出现过 30 秒连续高温），请保持 Full power。拖动任一滑块会切换为 Custom。"
-                 "LoRA 训练同样遵守这两项设置（训练页）：准备阶段（加载模型、缓存潜变量/标注，CPU 运算 1–7 分钟）在每张图之间同样等待，停止按钮可结束；每个训练步之后同样暂停；开启过热暂停时每约 10 秒检查一次，高于设定值 6 °C 时等待、降到设定值时继续（开始训练前也会等到笔记本凉下来），停止按钮可结束等待。只改变速度，保存的 LoRA 不变。长时间训练是本应用最持久的负载，曾经自动关机的笔记本请保持开启。"
+                 "LoRA 训练同样遵守这两项设置（训练页）：准备阶段（加载模型、缓存潜变量/标注，CPU 运算 1–7 分钟）在每张图之间同样等待，停止按钮可结束；每个训练步之后同样暂停；开启过热暂停时每约 10 秒检查一次，高于设定值 3 °C 时等待（采样步骤是 6 °C；训练一小时的稳定负载在 6 °C 规则下曾一直停在 93–95 °C）、降到设定值时继续（开始训练前也会等到笔记本凉下来），停止按钮可结束等待。只改变速度，保存的 LoRA 不变。长时间训练是本应用最持久的负载，曾经自动关机的笔记本请保持开启。"
                  "冷却模式开启且采样明显偏慢时，结果栏会给出提示（不会自动更改任何设置）。")],
             ["✨ Polish (Generate tab)",
              "The dropdown above Hires fix — Portrait / Cowboy shot / Full body / Wide shot, or Auto (reads the framing tags in the prompt) — "
@@ -512,8 +512,8 @@ def parameters_html() -> str:
              _cn("输入时补全 Danbooru 标签，并提示拼写相近的正确标签。")],
             ["🎲 Wildcards",
              "{a|b|c} picks one option per image, {2$$a|b|c} two, {3::a|b} weights a; __outfit__ picks a line from "
-             "wildcards/outfit.txt (add your own .txt files). Picks follow each image's seed.",
-             _cn("{a|b|c} 每张图随机选一项；__outfit__ 从 wildcards/outfit.txt 随机取一行。随种子固定。")],
+             "wildcards/outfit.txt (add your own .txt files). Picks follow each image's seed; the SD→SDXL Bridge resolves them from its seed too (the same picks in both stages, the template saved in both records).",
+             _cn("{a|b|c} 每张图随机选一项，{2$$a|b|c} 选两项，{3::a|b} 让 a 的概率为三倍；__outfit__ 从 wildcards/outfit.txt（或 models/wildcards/）随机取一行。随每张图的种子固定；SD→SDXL 桥接页也会按种子解析（两个阶段用同样的选择，两张图的记录里都保存模板）。")],
             ["🎴 Character cards",
              "Checkpoint + LoRAs + character tags + outfits + size/CFG/steps in one click. “Build from LoRA slot 1” "
              "turns a character LoRA's trigger words and Civitai example prompts into a card with outfits. "
@@ -524,14 +524,29 @@ def parameters_html() -> str:
              _cn("一键载入角色的模型、LoRA、角色标签与服装。可由 LoRA 自动生成。“📌 保存为当前模型的配置”记住该模型适用的 LoRA 权重、"
                  "CFG、采样器与画质增强；载入时按当前所选模型套用对应配置。角色卡或配置还可带“颜色强度”（文件里 0.5–1 的 colour 值）："
                  "载入时把滑块设为该值（没有则保持滑块不变），📌 保存滑块当前值，💾 保存会保留它。")],
+            ["🌉 SD→SDXL Bridge",
+             "A base picture from an SD 1.5 model refined by an SDXL / Pony / Illustrious model (img2img, denoise ~0.4): the same seed in both stages, an SDXL prompt of its own (empty = the stage-1 prompt), "
+             "<code>&lt;lora:name:0.8&gt;</code> tags in the prompt go to the SD 1.5 stage, {a|b} / __name__ wildcards are resolved from the seed (the same picks in both stages; both PNGs keep the template). "
+             "On a 12 GB card the SD 1.5 model is freed before stage 2 and reloads with its LoRAs on the next run. Measured with 24 + 24 steps, 512×768 → 832×1216: ~83 s cold, ~55 s warm, no memory spill. Both stages are saved with their records (stage 1 txt2img, stage 2 img2img with the stage-1 picture as its source).",
+             _cn("用 SD 1.5 模型出底图，再用 SDXL / Pony / Illustrious 模型以图生图精修（降噪约 0.4）：两个阶段用同一个种子，SDXL 阶段可有自己的提示词（留空 = 沿用第一阶段）；提示词里的 <lora:名称:0.8> 标签用于 SD 1.5 阶段；{a|b} / __name__ 通配符按种子解析（两个阶段选择相同，两张图都保存模板）。"
+                 "12 GB 显卡上，第二阶段前会释放 SD 1.5 模型，下次运行时连同 LoRA 重新加载。24 + 24 步、512×768 → 832×1216 实测：冷启动约 83 秒，之后约 55 秒，无内存溢出。两个阶段都保存各自的记录。")],
+            ["🗑 Watermark remover",
+             "Auto-detect (EasyOCR text regions + a corner heuristic, grown over surrounding graphics) plus a red brush for what it misses; switch OCR off to paint the regions yourself and keep wanted text. "
+             "Methods: LaMa (default, ~7 s, CPU), OpenCV (instant, thin text only), SD inpainting (repaints with the loaded model, can invent objects). 📁 Batch cleans a whole folder into outputs/cleaned_<folder>/. Saved as <source>_clean.png, never over an earlier result.",
+             _cn("自动检测（EasyOCR 文字区域 + 角落启发式，并向周围图形扩展），漏掉的用红色画笔补涂；关闭 OCR 可只手动涂抹、保留需要的文字。方法：LaMa（默认，约 7 秒，CPU）、OpenCV（瞬间，只适合细字）、SD 局部重绘（用已加载模型重画，可能凭空多出物体）。📁 批量：整个文件夹清理到 outputs/cleaned_<文件夹>/。保存为 <原名>_clean.png，不会覆盖旧结果。")],
+            ["🌐 Civitai Hub",
+             "Search / filter (type, base model, rating, sort) and download models and LoRAs; files go to the right folders and show up in the Generate tab at once. Downloads are written as .part and renamed when complete, an interrupted one resumes where it stopped. "
+             "An API key (saved on this PC) is needed for adult content and some downloads; the app says so when a download was refused for lack of one.",
+             _cn("搜索/筛选（类型、底模、分级、排序）并下载模型和 LoRA；文件自动放进对应文件夹，生成页立刻可选。下载先写成 .part，完整后才改名，中断的下载会从断点继续。成人内容和部分下载需要 API 密钥（保存在本机），被拒绝时程序会提示。")],
             ["🏷 Interrogate (WD14)",
              "Reads an image's Danbooru tags into the prompt (img2img, PNG Info); in Train LoRA it tags a whole "
              "dataset. ~1 s per image on the CPU.",
              _cn("WD14 反推图片的 Danbooru 标签；训练页可批量打标。")],
             ["📊 X/Y grid",
              "Same seed, every combination of two settings (CFG, steps, sampler, seed, LoRA 1 weight, CLIP skip, "
-             "hires denoise, checkpoint, or Prompt S/R word swaps) in one labelled grid image.",
-             _cn("同一种子下对比两组参数的所有组合，生成带标签的网格图。")],
+             "hires / face / hand / eye denoise, PAG scale, CFG rescale, 🎨 colour strength, checkpoint, or Prompt S/R word swaps) in one labelled grid image. "
+             "A denoise axis switches its pass on with the cell's value.",
+             _cn("同一种子下对比两组参数的所有组合，生成带标签的网格图。可选轴：CFG、步数、采样器、种子、LoRA 1 权重、CLIP skip、高清修复/脸/手/眼降噪、PAG、CFG rescale、颜色强度、模型、提示词替换（Prompt S/R）；降噪轴会按单元格的值开启对应步骤。")],
         ]
     )
     h += _tip("All of these are saved in the image and come back when you drop it into Image-to-Image. "
@@ -563,15 +578,15 @@ def models_html() -> str:
             ["<b>Illustrious / NoobAI</b>",
              "1024 × 1024",
              "SDXL LoRA",
-             _cn("基于SDXL微调的高质量二次元模型，需要 score_9, score_8_up 等质量标签。")],
+             _cn("基于SDXL微调的高质量二次元模型，用 masterpiece, best quality, amazing quality, very aesthetic, absurdres 这类质量标签（“自动添加质量标签”默认会加）；score_9 体系是 Pony 的。")],
             ["<b>Pony Diffusion V6</b>",
              "1024 × 1024",
              "SDXL / Pony LoRA",
              _cn("以兽人/拟人/二次元为主，使用 score_9 score_8_up 质量打分标签体系。")],
-            ["<b>FLUX</b>",
+            ["<b>FLUX</b> (not supported here)",
              "1024 × 1024",
              "FLUX LoRA (专用)",
-             _cn("最新架构，图像质量极高，推理速度慢，显存需求大（~12GB+）。")],
+             _cn("最新架构，图像质量极高，推理速度慢，显存需求大（~12GB+）。本程序暂不支持 FLUX。")],
         ]
     )
 
@@ -582,7 +597,7 @@ def models_html() -> str:
                + _cn("不同架构的LoRA不能混用！SD1.5的LoRA用在SDXL模型上会崩溃或生成乱图。列表中每个模型和LoRA都标有 SD 1.5 / SDXL（从文件读取），"
                      "槽位不匹配时会立即提示。"))
 
-    h += '<div class="hg-h3">Pony / NoobAI / Illustrious Quality Tags &nbsp;<span class="cn">质量打分标签</span></div>'
+    h += '<div class="hg-h3">Pony Quality Tags &nbsp;<span class="cn">Pony 质量打分标签</span></div>'
     h += _table(
         ["Positive Tag / 正向标签", "Negative Tag / 负向标签", _cn("说明")],
         [
@@ -593,9 +608,13 @@ def models_html() -> str:
             [_code("best quality"),     "",                 _cn("最佳质量，通用正向标签。")],
         ]
     )
-    h += _tip("For Pony/NoobAI/Illustrious, <b>always start positive prompts</b> with: "
+    h += _tip("For Pony, <b>always start positive prompts</b> with: "
               + _code("score_9, score_8_up, score_7_up, masterpiece, best quality")
-              + _cn("  — 这类模型不加分数标签出图质量会明显下降。"))
+              + _cn("  — Pony 不加分数标签出图质量会明显下降。"))
+    h += _tip("Illustrious / NoobAI use the plain tags instead: <b>" + _code("masterpiece, best quality, amazing quality, very aesthetic, absurdres")
+              + "</b> (negative: " + _code("worst quality, low quality, bad quality, lowres, bad anatomy, jpeg artifacts, signature, watermark")
+              + ") — “Auto-add quality tags” puts them in for you when your prompt has none."
+              + _cn("  Illustrious / NoobAI 用的是普通质量标签（上面一组），不是 score_ 体系；“自动添加质量标签”会在提示词里没有时帮你加上。"))
     return _wrap(h)
 
 
@@ -692,6 +711,10 @@ def lora_training_html() -> str:
             ["Solo character / 单人角色",
              "For character LoRAs, use solo images. Crop out other characters.",
              _cn("角色LoRA尽量使用单人图片，裁掉其他角色。")],
+            ["Style comes from the pictures / 风格来自图片",
+             "A LoRA copies its dataset's whole look — saturation, line weight, contrast — not only the character. Measured: a set of hand-drawn pictures 25 % less saturated than a generated set gave a LoRA that made pictures ~30 % less saturated, "
+             "but it learned the drawing style instead of the face (face similarity 0.92 against 0.94 for a LoRA trained on one consistent look, and trigger-only prompts failed). Train the identity on pictures with one consistent look; for paler pictures use 🎨 Colour strength afterwards.",
+             _cn("LoRA 学到的是数据集的整体观感——饱和度、线条粗细、对比度——而不只是角色。实测：一组饱和度比生成图低 25% 的手绘图训练出的 LoRA 让出图饱和度降低约 30%，但它学到的是画风而不是脸（脸部相似度 0.92，一致风格训练的为 0.94，只写触发词的提示词失败）。身份请用观感一致的图训练；想要更淡的画面，之后用 🎨 颜色强度。")],
             ["Aspect ratios / 宽高比",
              "Mixed ratios are fine! Bucketing handles squares, portraits, landscapes, "
              "and even body pillows (16:5) without content loss.",
@@ -712,7 +735,7 @@ def lora_training_html() -> str:
              "Use the character name or an invented word. Prepended to every caption.",
              _cn("一个唯一的关键词用来激活LoRA。使用角色名或自创词。会自动添加到每个标注前面。")],
             ["Character captions / 角色标注",
-             _code("my_character, 1girl, red eyes, grey hair, long hair, dress, standing, park") +
+             _code("mychar, 1girl, red eyes, grey hair, long hair, dress, standing, park") +
              "<br>List the trigger, then visual features, then scene/pose/background.",
              _cn("先写触发词，再写视觉特征（发色、眼色、服装），最后写场景/姿势/背景。")],
             ["Style captions / 风格标注",
@@ -762,10 +785,10 @@ def lora_training_html() -> str:
              "Judge by <b>steps</b> = images × epochs: 300–800 for a 16-image character<br>(20–50 epochs)",
              "How many times the trainer sees every image. Measured on 16 pictures of one character (SD 1.5, rank 16, LR 1e-4, prompt = trigger + her core tags; face similarity to her references, CCIP, 1.0 = her): no LoRA 0.77, "
              "the 320-step file (20 epochs) at weight 0.8 0.89, the 800-step file (50 epochs) at 0.8 0.87 and at <b>1.0 0.94</b> — the weight mattered more than the steps. "
-             "Speed: 1.4 s per step on the RX 6800M laptop once ZLUDA has compiled the backward kernels (the first training on a PC spends ~6 more minutes on that): 800 steps = 18.5 min. "
+             "Speed (SD 1.5): 1.4 s per step on the RX 6800M laptop with a slow USB-C charger, 0.7 s with the full-power charger, once ZLUDA has compiled the backward kernels (the first training on a PC spends ~6 more minutes on that): 800 steps = 18.5 / 9.4 min. "
              "Set 'Save checkpoint every N epochs' to 10 to keep the in-between files and compare them: each save shows a message, and the Generate tab's 🔄 Refresh lists the new file while the training still runs. "
              + _cn("训练器看每张图片的次数。请按“步数 = 图片数 × 轮次”判断：实测 16 张同一角色的图（SD 1.5，rank 16，LR 1e-4，提示词 = 触发词 + 她的核心标签；用 CCIP 衡量脸部与她参考图的相似度，1.0 = 她）：不加 LoRA 0.77，320 步（20 轮）权重 0.8 为 0.89，800 步（50 轮）权重 0.8 为 0.87、权重 1.0 为 0.94——权重比步数更重要。"
-                   "速度：RX 6800M 笔记本在 ZLUDA 编译完反向核后每步 1.4 秒（电脑上第一次训练还要多花约 6 分钟编译），800 步 = 18.5 分钟。把“每 N 轮保存”设为 10 可保留中间文件对比：每次保存都会弹出提示，训练还在进行时就可以在“生成”页点 🔄 刷新看到新文件。")],
+                   "速度（SD 1.5）：RX 6800M 笔记本在 ZLUDA 编译完反向核后，USB-C 慢速充电器下每步 1.4 秒，满功率充电器下每步 0.7 秒（电脑上第一次训练还要多花约 6 分钟编译），800 步 = 18.5 / 9.4 分钟。把“每 N 轮保存”设为 10 可保留中间文件对比：每次保存都会弹出提示，训练还在进行时就可以在“生成”页点 🔄 刷新看到新文件。")],
             ["Train text encoder / 训练文本编码器",
              "✅ ON for characters<br>❌ OFF for styles",
              "Teaches the trigger word meaning. Essential for character LoRAs. "
@@ -777,9 +800,10 @@ def lora_training_html() -> str:
              "(waiIllustrious, 16 pictures, rank 16, 640 steps): peak 10.0 GB of VRAM with nothing in shared memory, about 6 s per step (63 min including the pauses of Power-limited mode), Prepare ~7 min, the loss finite throughout. "
              "The result carries the character at weight 1.0: face similarity to her references (CCIP) 0.95 against 0.80 for the same prompt without the LoRA and 0.87 for a downloaded character LoRA; by eye her own ornament instead of the model's coloured butterflies. "
              "A GPU under 11 GB is warned (SD 1.5 trains in ~7 GB). Prepare also refuses a model load that would not fit into free memory (RAM + page file) instead of crashing, and the base model is released from memory when a training ends. "
+             "On the full-power charger the same training runs ~3.3–3.8 s per step (1,000 steps ≈ 55–68 min, about 3–11 min of it paused for heat; 11 GB of VRAM at the tallest picture shapes). On a slow USB-C charger the battery fell ~50 % per hour of SDXL training (100 → 53 % in 58 minutes): train an SDXL LoRA at home, plugged in properly. "
              + _cn("训练器以前用 fp32 加载底模（SDXL 的 UNet 单独就 10.3 GB）：在 12 GB 的 RX 6800M 上会溢出到共享内存，14 分钟只能训练 3 步。现在对显存小于 20 GB 的显卡上的 SDXL 模型，冻结的底模（UNet、文本编码器）使用 fp16，LoRA 参数使用 fp32，前向在 fp16 autocast 下运行并对损失做缩放（梯度含非有限值的步会被跳过并将缩放减半）。"
                    "在 12 GB 显卡上实测（waiIllustrious，16 张图，rank 16，640 步）：显存峰值 10.0 GB，共享内存无占用，每步约 6 秒（含“Power-limited”模式的暂停共 63 分钟），准备阶段约 7 分钟，损失始终有限。权重 1.0 时能还原角色：脸部与参考图的相似度（CCIP）0.95，不加 LoRA 为 0.80，下载的角色 LoRA 为 0.87；肉眼可见她自己的发饰而不是模型的彩色蝴蝶。"
-                   "显存低于 11 GB 会给出警告（SD 1.5 约需 7 GB）。准备阶段若可用内存（内存 + 页面文件）装不下模型会拒绝加载而不是崩溃；训练结束后底模会从内存中释放。")],
+                   "显存低于 11 GB 会给出警告（SD 1.5 约需 7 GB）。准备阶段若可用内存（内存 + 页面文件）装不下模型会拒绝加载而不是崩溃；训练结束后底模会从内存中释放。满功率充电器下同样的训练每步约 3.3–3.8 秒（1000 步约 55–68 分钟，其中 3–11 分钟为散热暂停；最高的图片形状下显存约 11 GB）。USB-C 慢速充电器下 SDXL 训练每小时耗电约 50%（58 分钟内从 100% 降到 53%）：请在家里插好电源训练 SDXL LoRA。")],
             ["Target layers / 目标层",
              "attn (fast)<br>full (thorough)",
              "'attn' = Q/K/V/Out attention. 'full' = + conv layers for spatial detail. "
@@ -853,6 +877,8 @@ def lora_training_html() -> str:
 
 def quality_tags_html() -> str:
     h = '<div class="hg-h2">✨ Quality Tag Cheatsheet &nbsp;<span class="cn">质量标签速查表</span></div>'
+    h += _note("The two tables below are general (photo-style and SD 1.5 prompts). Anime SDXL families have their own sets: Illustrious / NoobAI use masterpiece, best quality, amazing quality, very aesthetic, absurdres; Pony uses score_9, score_8_up, score_7_up — see Model Architecture. "
+               + _cn("下面两张表是通用的（写实风格与 SD 1.5）。动漫 SDXL 系列各有自己的标签：Illustrious / NoobAI 用 masterpiece, best quality, amazing quality, very aesthetic, absurdres；Pony 用 score_9, score_8_up, score_7_up——见“模型架构”。"))
 
     h += '<div class="hg-h3">Universal Quality Boosters &nbsp;<span class="cn">通用质量正向标签</span></div>'
     h += _table(
@@ -1019,7 +1045,7 @@ def hardware_html() -> str:
 <li>Launch via <code>launch.bat</code> (ZLUDA must be active for dGPU detection).</li>
 <li>Go to <b>⚙️ Settings</b> tab → <b>SmartSplit</b> section.</li>
 <li>If it shows as <em>capable</em>, check <b>Enable SmartSplit</b>.</li>
-<li>Choose Text Encoder device (CPU / iGPU) and VAE device (CPU).</li>
+<li>Choose Text Encoder device (CPU / iGPU — or NPU when one is detected) and VAE device (CPU / iGPU).</li>
 <li>Click <b>Apply SmartSplit Config</b>.</li>
 <li>Load any <b>SD 1.5</b> model — the SmartSplit pipe auto-builds.</li>
 <li>⚠️ SmartSplit is <b>not used for SDXL</b> — SDXL uses the accelerated text encoding above instead.</li>
@@ -1038,7 +1064,7 @@ def hardware_html() -> str:
             ["SDXL, 1024×1024, no LoRA",   "~8 GB",    _cn("需要8GB+显卡。")],
             ["SDXL, 1024×1024, + LoRA",    "~10 GB",   _cn("建议12GB+显卡。")],
             ["SDXL, 1024×1024, 3× LoRA",   "~12 GB",   _cn("多LoRA叠加显存占用显著增加。")],
-            ["FLUX, 1024×1024",            "~12–16 GB", _cn("FLUX架构显存需求极高。")],
+            ["FLUX, 1024×1024",            "~12–16 GB", _cn("FLUX架构显存需求极高（本程序暂不支持 FLUX）。")],
         ]
     )
     return _wrap(h)

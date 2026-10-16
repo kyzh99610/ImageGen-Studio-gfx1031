@@ -4439,6 +4439,104 @@ def _():
             assert all(not s[o] for s in seen for o in others), (axis, seen)       # only the varied pass is on
 
 
+@test("SD→SDXL Bridge (round 27): {a|b} / __name__ in the prompts are resolved from the seed like Generate (same picks in both stages, a seed -1 gets a real one), the records keep the template, unknown wildcards are named, a plain prompt leaves no trace")
+def _():
+    import json as _j
+    from PIL import Image
+    from unittest.mock import patch
+    import app as _app
+    from backend import wildcards as WC
+    tmp = Path(_tf.mkdtemp())
+
+    def make_sd(tag):
+        class FakeSD:
+            model_family, current_model, _last_vae_path, prediction, device = tag, f"{tag}.safetensors", None, {}, "cpu"
+            _lora_adapters, boosters, last_seeds, last_var_seeds, loaded_loras = {}, {}, [], [], []
+            pipe, force_tiled_decode = object(), False
+
+            def __init__(self):
+                self.seen = []
+
+            def load_model(self, *a, **k):
+                return "ok"
+
+            def txt2img(self, prompt, neg, w, h, steps, cfg, seed, sched, batch_size=1, step_callback=None, **kw):
+                self.seen.append((prompt, neg, seed))
+                self.last_seeds = [seed]
+                return [Image.new("RGB", (w, h), (20, 40, 60))], "s1"
+
+            def img2img(self, img, prompt, neg, strength, steps, cfg, seed, sched, step_callback=None, **kw):
+                self.seen.append((prompt, neg, seed))
+                return [img], "s2"
+        return FakeSD()
+    s15, sxl = make_sd("sd15"), make_sd("sdxl")
+    old_out = _app.OUTPUTS_DIR
+    _app.OUTPUTS_DIR = tmp
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    bridge = getattr(by["do_bridge"].fn, "__wrapped__", by["do_bridge"].fn)
+
+    def run(prompt, neg, xl_prompt, seed):
+        s15.seen.clear(); sxl.seen.clear()
+        with patch.object(_app, "_sd15", s15), patch.object(_app, "_sdxl", sxl), patch.object(_app, "_LAST_BRIDGE_FILE", tmp / "_last_bridge.json"):
+            out = bridge("sd15.safetensors", prompt, neg, 4, 6.0, 256, 256, "Euler a", seed, "sdxl.safetensors", xl_prompt, 4, 6.0, 256, 256, 0.5, "Euler a", progress=lambda *a, **k: None)
+        return out
+    try:
+        P1, P2, NEG = "1girl, {red|blue|green|pink|white|black} dress, __nosuchfile_r27__", "detailed, {red|blue|green|pink|white|black} dress", "bad hands, {lowres|blurry}"
+        out = run(P1, NEG, P2, 11)
+        miss = []
+        want1, want2, wantn = WC.resolve(P1, 11, miss), WC.resolve(P2, 11), WC.resolve(NEG, 11)
+        assert s15.seen == [(want1, wantn, 11)] and sxl.seen == [(want2, wantn, 11)], (s15.seen, sxl.seen, want1, want2)
+        assert "{" not in want2 and "__nosuchfile_r27__" in want1 and ("red" in want1 or "blue" in want1 or "green" in want1 or "pink" in want1 or "white" in want1 or "black" in want1)
+        assert "Unknown wildcard" in out[3] and "nosuchfile_r27" in out[3] and "Picks for seed 11" in out[3], out[3][:400]
+        recs = sorted(((_j.loads(Image.open(f).info["imagegen"]), f) for f in tmp.glob("*.png")), key=lambda x: x[0].get("bridge_stage", 0))
+        r1, r2 = recs[0][0], recs[1][0]
+        assert r1["bridge_stage"] == 1 and r1["prompt"] == want1 and r1["prompt_template"] == P1 and r1["negative_template"] == NEG, r1
+        assert r2["bridge_stage"] == 2 and r2["prompt"] == want2 and r2["prompt_template"] == P2 and r2["negative_template"] == NEG, r2
+        # the picks follow the seed (the same seed again gives the same picture's words, other seeds reach other words)
+        run(P1, NEG, P2, 11)
+        assert s15.seen[0][0] == want1
+        picks = {WC.resolve("{red|blue|green|pink|white|black} dress", sd) for sd in range(40)}
+        assert len(picks) >= 3
+        # seed -1: a real seed is drawn, the picks are those of that seed, the record says which
+        for f in tmp.glob("*.png"):
+            f.unlink()
+        out = run(P1, NEG, "", -1)
+        seed_used = s15.seen[0][2]
+        assert seed_used >= 0 and s15.seen[0][0] == WC.resolve(P1, seed_used) and sxl.seen[0][0] == WC.resolve(P1, seed_used) and sxl.seen[0][2] == seed_used, (s15.seen, sxl.seen)
+        r2 = [_j.loads(Image.open(f).info["imagegen"]) for f in tmp.glob("*.png") if _j.loads(Image.open(f).info["imagegen"]).get("bridge_stage") == 2][0]
+        assert r2["prompt_template"] == P1 and r2["seed"] == seed_used, r2                      # no SDXL prompt: the stage-1 template
+        # a plain prompt: nothing resolved, no template in the record
+        for f in tmp.glob("*.png"):
+            f.unlink()
+        out = run("1girl, red dress", "bad hands", "", 5)
+        assert s15.seen == [("1girl, red dress", "bad hands", 5)] and "Picks for seed" not in out[3]
+        assert all("prompt_template" not in _j.loads(Image.open(f).info["imagegen"]) for f in tmp.glob("*.png"))
+    finally:
+        _app.OUTPUTS_DIR = old_out
+
+
+@test("X/Y grid (round 27): a 'Colour strength' axis — values 0.5-1 (ranges allowed, others refused), each cell runs with its own strength, the other settings stay; the axis list is a dropdown choice, not a new input")
+def _():
+    from PIL import Image
+    import app as _app
+    assert "Colour strength" in _app._XY_AXES
+    vals, err = _app._xy_values("Colour strength", "0.7-1:0.1")
+    assert not err and [round(v, 2) for v in vals] == [0.7, 0.8, 0.9, 1.0], (vals, err)
+    for bad in ("0.3, 0.8", "1.4", "x"):
+        v2, e2 = _app._xy_values("Colour strength", bad)
+        assert e2 and not v2, (bad, v2, e2)
+    with _BatchEnv() as E:
+        seen = []
+        cl = dict(zip(E.xy.__code__.co_freevars, E.xy.__closure__))
+        cl["do_generate"].cell_contents = lambda *a, **k: (seen.append(dict(k["extra"])) or [Image.new("RGB", (a[5], a[6]))], "info", [])
+        E.run_xy("Colour strength", "1.0, 0.9, 0.8, 0.7")
+        assert [s["cs"] for s in seen] == [1.0, 0.9, 0.8, 0.7], seen
+        assert all(not s["ed_on"] and not s["fd_on"] and not s["hd_on"] and not s["md_on"] for s in seen)         # the other passes stay as set
+        seen.clear()
+        E.run_xy("CFG", "5, 6")
+        assert [s["cs"] for s in seen] == [1.0, 1.0]                                                                # no colour axis: the control's own value (default 1)
+
+
 @test("Stop that lands after an image's sampler (post pass) still ends the outfit batch and the X/Y grid")
 def _():
     with _BatchEnv() as E:
