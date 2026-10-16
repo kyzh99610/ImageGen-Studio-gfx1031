@@ -749,7 +749,7 @@ _SDXL_BAD_SAMPLERS = ("PNDM", "Heun")
 _SDXL_FAMILIES = ("sdxl", "pony", "illustrious")
 
 _XY_AXES = ["none", "CFG", "Steps", "Sampler", "Seed", "LoRA 1 weight", "CLIP skip", "Hires denoise",
-            "Face denoise", "Hand denoise", "Eye denoise", "PAG scale", "CFG rescale", "Prompt S/R", "Checkpoint"]
+            "Face denoise", "Hand denoise", "Eye denoise", "PAG scale", "CFG rescale", "Colour strength", "Prompt S/R", "Checkpoint"]
 
 
 def _xy_values(axis: str, text: str) -> tuple[list, str]:
@@ -801,6 +801,8 @@ def _xy_values(axis: str, text: str) -> tuple[list, str]:
         vals = [int(round(v)) for v in vals]
     if not vals:
         return [], f"No values for {axis}."
+    if axis == "Colour strength" and any(not 0.5 <= v <= 1.0 for v in vals):
+        return [], "Colour strength must be between 0.5 and 1 (1 = as drawn)."
     return vals, ""
 
 
@@ -3262,6 +3264,7 @@ def _build_generate_tab():
                         elif axis == "Eye denoise": p["extra"].update(ed_on=True, ed_denoise=v)
                         elif axis == "PAG scale": p["extra"]["pag_scale"] = v
                         elif axis == "CFG rescale": p["extra"]["cfg_rescale"] = v
+                        elif axis == "Colour strength": p["extra"]["cs"] = v
                         elif axis == "Prompt S/R": p["prompt"] = p["prompt"].replace(vals[0], v)
                         elif axis == "Checkpoint": p["model"] = v
                     if p["model"] != model_now:           # Checkpoint axis: switch models
@@ -4262,6 +4265,16 @@ def _build_bridge_tab():
             sdxl_steps, sdxl_cfg, sdxl_w, sdxl_h, _, _, denoise, _ = _clean_gen_args(
                 sdxl_steps, sdxl_cfg, sdxl_w, sdxl_h, 1, -1, denoise, img2img=True)
             prompt, neg = prompt or "", neg or ""
+            # {a|b} / __name__ in the prompts: each run picks from its seed, like Generate (round 27) — the same picks in both stages; the records keep the template
+            from backend import wildcards as _wc
+            wc_template, wc_missing = None, []
+            if _wc.is_dynamic(prompt) or _wc.is_dynamic(neg) or _wc.is_dynamic(sdxl_prompt or ""):
+                if seed_val < 0:
+                    import random as _rnd
+                    seed_val = _rnd.randint(0, 2**32 - 1)
+                wc_template = {"prompt": prompt, "negative": neg, "sdxl_prompt": sdxl_prompt or ""}
+                prompt, neg = _wc.resolve(prompt, seed_val, wc_missing), _wc.resolve(neg, seed_val, wc_missing)
+                sdxl_prompt = _wc.resolve(sdxl_prompt or "", seed_val, wc_missing)
 
             def _vram_log(tag):
                 try:
@@ -4365,6 +4378,7 @@ def _build_bridge_tab():
                 mode="txt2img", prompt=prompt, negative_prompt=neg, steps=sd15_steps,
                 cfg_scale=sd15_cfg, seeds=[seed_val], scheduler=sd15_sched,
                 width=sd15_w, height=sd15_h, bridge_stage=1,
+                **({"prompt_template": wc_template["prompt"], "negative_template": wc_template["negative"] or None} if wc_template else {}),
             ), pipe=_sd15)
 
             # SD 1.5 + SDXL + SDXL's working memory don't fit in 12 GB: Windows would
@@ -4441,6 +4455,7 @@ def _build_bridge_tab():
                     cfg_scale=sdxl_cfg, seeds=[seed_val], scheduler=sdxl_sched,
                     width=sdxl_w, height=sdxl_h, strength=denoise, bridge_stage=2,
                     source_image=s1_saved[0].name if s1_saved else None,
+                    **({"prompt_template": wc_template["sdxl_prompt"].strip() or wc_template["prompt"], "negative_template": wc_template["negative"] or None} if wc_template else {}),
                 ), pipe=_sdxl)
 
             progress(1.0, desc="✅ Bridge complete!")
@@ -4448,6 +4463,12 @@ def _build_bridge_tab():
                 f'<p style="color:#a6e3a1;">✅ Bridge complete! '
                 f'Stage 1: {s1_info}<br>Stage 2: {s2_info}</p>'
             )
+            if wc_template:
+                status += (f'<p style="color:#cba6f7;font-size:13px;">🎲 Picks for seed {seed_val}: <code>{html.escape(prompt)}</code></p>')
+                if wc_missing:
+                    status += ('<p style="color:#f9e2af;font-size:13px;">⚠ Unknown wildcard(s): '
+                               + ", ".join(f"<code>__{html.escape(m)}__</code>" for m in dict.fromkeys(wc_missing))
+                               + " — add a .txt file to ImageGenApp/wildcards/ or models/wildcards/</p>")
             if tag_notes:
                 status += ('<p style="color:#89b4fa;font-size:13px;">🧬 LoRA tags from the prompt: '
                            + " · ".join(tag_notes) + "</p>")
