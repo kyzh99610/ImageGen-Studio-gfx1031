@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -434,6 +435,21 @@ def _ram_gb() -> int:
         return 0
 
 
+def _in_thread(fn, default):
+    """Run `fn()` in a worker thread: returns (thread, box); `box["v"]` is the result after `join()` (`default` when it raised).
+    Round 26: the two slow Windows queries (the PnP list for an NPU, the WMIC / registry GPU list: ~1.6 s together) overlap with each other and the CUDA probe."""
+    box = {"v": default}
+
+    def run():
+        try:
+            box["v"] = fn()
+        except Exception:
+            pass
+    t = threading.Thread(target=run, name=f"hw-{getattr(fn, '__name__', 'query')}", daemon=True)
+    t.start()
+    return t, box
+
+
 # ── Main detection entry point ────────────────────────────────────────────────
 def detect_hardware() -> HardwareProfile:
     """
@@ -443,7 +459,8 @@ def detect_hardware() -> HardwareProfile:
     profile = HardwareProfile()
     profile.cpu_name = _cpu_name()
     profile.ram_gb   = _ram_gb()
-    profile.npu      = _detect_npu()
+    t_npu, b_npu = _in_thread(_detect_npu, NPUInfo())          # round 26: threads, results identical
+    t_wmic, b_wmic = _in_thread(_wmic_gpus, [])
 
     # ── Step 1: Try CUDA/ZLUDA first (best performance path) ──────────────────
     cuda_devs = _cuda_gpus()
@@ -459,7 +476,8 @@ def detect_hardware() -> HardwareProfile:
         profile.gpus.append(g)
 
     # ── Step 2: Augment with WMIC data (fills in iGPUs CUDA may not expose) ───
-    wmic_devs = _wmic_gpus()
+    t_wmic.join()
+    wmic_devs = b_wmic["v"]
     # ZLUDA reports "AMD Radeon RX 6800M [ZLUDA]"; Windows says "AMD Radeon RX 6800M"
     _norm = lambda n: n.lower().replace("[zluda]", "").strip()
     seen_names = {_norm(g.name) for g in profile.gpus}
@@ -508,6 +526,9 @@ def detect_hardware() -> HardwareProfile:
             g.score -= 50  # slight penalty vs CUDA path
     profile.gpus.sort(key=lambda g: g.score, reverse=True)
     profile.best_gpu = profile.gpus[0] if profile.gpus else None
+
+    t_npu.join()
+    profile.npu = b_npu["v"]
 
     # ── Step 5: Build human-readable summary ──────────────────────────────────
     lines = [f"CPU   : {profile.cpu_name}", f"RAM   : {profile.ram_gb} GB"]

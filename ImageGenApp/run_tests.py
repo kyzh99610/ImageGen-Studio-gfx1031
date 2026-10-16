@@ -165,6 +165,41 @@ def _():
     assert isinstance(cap.dgpu_name, str)
     assert isinstance(cap.reason, str)
 
+@test("Start-up (round 26): detect_hardware runs the NPU and the GPU-list queries in threads — the same profile as before, a failing query falls back to its default, the two queries overlap in time")
+def _():
+    import time
+    from unittest.mock import patch
+    from backend import hardware_detector as HD
+    npu = HD.NPUInfo(available=True, name="X NPU", backend="vitisai", notes="n")
+
+    def run(delay=0.0, npu_fn=None, wmic_fn=None):
+        def slow_npu():
+            time.sleep(delay)
+            return npu
+
+        def slow_wmic():
+            time.sleep(delay)
+            return [("AMD Radeon RX 6800M", 12 * 1024 ** 3), ("AMD Radeon(TM) Graphics", 512 * 1024 ** 2)]
+        with patch.object(HD, "_cpu_name", lambda: "CPU x"), patch.object(HD, "_ram_gb", lambda: 32),                 patch.object(HD, "_cuda_gpus", lambda: [("AMD Radeon RX 6800M [ZLUDA]", 12 * 1024 ** 3)]), patch.object(HD, "_directml_available", lambda: True),                 patch.object(HD, "_detect_npu", npu_fn or slow_npu), patch.object(HD, "_wmic_gpus", wmic_fn or slow_wmic):
+            t0 = time.perf_counter()
+            prof = HD.detect_hardware()
+            return prof, time.perf_counter() - t0
+    p0, _ = run(0.0)
+    assert p0.npu == npu and p0.cpu_name == "CPU x" and p0.ram_gb == 32, p0
+    assert len(p0.gpus) == 2 and p0.gpus[0].backend == "cuda_zluda" and p0.best_gpu is p0.gpus[0] and p0.gpus[1].is_igpu, [(g.name, g.backend) for g in p0.gpus]
+    assert "NPU   : X NPU ✅" in p0.summary and "CPU   : CPU x" in p0.summary and "RAM   : 32 GB" in p0.summary, p0.summary
+    # the same profile with slow queries, in less time than the two queries one after the other
+    p1, dt = run(0.4)
+    assert p1.summary == p0.summary and [(g.name, g.vram_mb, g.score) for g in p1.gpus] == [(g.name, g.vram_mb, g.score) for g in p0.gpus] and p1.npu == p0.npu
+    assert dt < 0.7, dt                                                         # sequential would need >= 0.8 s
+    # a query that raises falls back to its default (no NPU / no extra GPU), the rest of the profile is intact
+
+    def boom():
+        raise RuntimeError("powershell missing")
+    p2, _ = run(0.0, npu_fn=boom, wmic_fn=boom)
+    assert p2.npu == HD.NPUInfo() and len(p2.gpus) == 1 and p2.best_gpu.name.startswith("AMD Radeon RX 6800M"), p2
+
+
 @test("SmartSplit NPU detection mirrors hardware_detector")
 def _():
     from backend.smartsplit_pipeline import detect_smartsplit_capability
@@ -262,55 +297,142 @@ def _():
 print("\n[4/8] ONNX Session & VitisAI EP Fallback")
 # ══════════════════════════════════════════════════════════════════════════
 
-@test("_ort_session maps 'npu' to VitisAIExecutionProvider")
+@test("_ort_session (round 26: behaviour): 'npu' asks for VitisAI, 'igpu_directml' for DirectML, 'cpu' for CPU; a provider this onnxruntime lacks falls back to CPU, an unknown device too")
 def _():
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import patch
     from backend.smartsplit_pipeline import _ort_session
-    # We can't create a real session without an ONNX file, but verify the EP map
-    src = Path(APP_DIR / "backend" / "smartsplit_pipeline.py").read_text(encoding="utf-8")
-    assert '"npu":           "VitisAIExecutionProvider"' in src
-    assert '"igpu_directml": "DmlExecutionProvider"' in src
-    assert '"cpu":           "CPUExecutionProvider"' in src
+    made = []
+    fake = SimpleNamespace(get_available_providers=lambda: avail[0], InferenceSession=lambda path, providers=None: made.append((path, providers)) or "session")
+    avail = [["VitisAIExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"]]
+    with patch.dict(sys.modules, {"onnxruntime": fake}):
+        for ep, want in (("npu", "VitisAIExecutionProvider"), ("igpu_directml", "DmlExecutionProvider"), ("cpu", "CPUExecutionProvider"), ("something-else", "CPUExecutionProvider")):
+            made.clear()
+            assert _ort_session(Path("m.onnx"), ep) == "session" and made == [("m.onnx", [want])], (ep, made)
+        avail[0] = ["CPUExecutionProvider"]                                   # no VitisAI / DML in this onnxruntime: CPU, with the model path unchanged
+        for ep in ("npu", "igpu_directml"):
+            made.clear()
+            _ort_session(Path("m.onnx"), ep)
+            assert made == [("m.onnx", ["CPUExecutionProvider"])], (ep, made)
 
-@test("_ort_session falls back to CPU when VitisAI unavailable")
+@test("ONNX export (round 26: behaviour): the text encoder is exported with input_ids -> last_hidden_state / pooler_output and a dynamic batch, on the CPU and moved back; a cached file is reused")
 def _():
-    # Test by inspecting the fallback logic in source
-    src = Path(APP_DIR / "backend" / "smartsplit_pipeline.py").read_text(encoding="utf-8")
-    assert 'provider not in available' in src
-    assert 'falling back to CPU' in src
-    assert 'CPUExecutionProvider' in src
+    import tempfile
+    import torch
+    from unittest.mock import patch
+    import backend.smartsplit_pipeline as SP
 
-@test("ONNX TE export uses correct input/output names")
+    class TE(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = torch.nn.Linear(2, 2)
+            self.moves = []
+
+        def cpu(self):
+            self.moves.append("cpu")
+            return self
+
+        def to(self, dev):
+            self.moves.append(str(dev))
+            return self
+
+    class Tok:
+        model_max_length = 77
+
+        def __call__(self, texts, padding=None, max_length=None, return_tensors=None):
+            return {"input_ids": torch.zeros(1, max_length, dtype=torch.long)}
+    te = TE()
+    pipe = type("P", (), {})()
+    pipe.text_encoder, pipe.tokenizer = te, Tok()
+    calls = []
+    out = Path(tempfile.mkdtemp())
+    with patch.object(SP, "ONNX_CACHE_DIR", out), patch.object(torch.onnx, "export", lambda *a, **k: (calls.append((a, k)), Path(a[2]).write_bytes(b"onnx"))):
+        p = SP._export_text_encoder_to_onnx(pipe, "stem")
+        assert p == out / "stem_text_encoder.onnx" and p.exists() and len(calls) == 1
+        a, k = calls[0]
+        assert a[1][0].shape == (1, 77) and k["input_names"] == ["input_ids"] and k["output_names"] == ["last_hidden_state", "pooler_output"], k
+        assert k["dynamic_axes"] == {"input_ids": {0: "batch"}, "last_hidden_state": {0: "batch"}} and k["opset_version"] == 17, k
+        assert te.moves[0] == "cpu" and len(te.moves) == 2, te.moves                       # exported on the CPU, then back where it was
+        assert SP._export_text_encoder_to_onnx(pipe, "stem") == p and len(calls) == 1      # cached: no second export
+
+@test("ONNX export (round 26: behaviour): the VAE decoder is exported with latents -> images and dynamic batch / height / width axes; a cached file is reused")
 def _():
-    src = Path(APP_DIR / "backend" / "smartsplit_pipeline.py").read_text(encoding="utf-8")
-    assert 'input_names=["input_ids"]' in src
-    assert 'output_names=["last_hidden_state", "pooler_output"]' in src
+    import tempfile
+    import torch
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import backend.smartsplit_pipeline as SP
 
-@test("ONNX VAE export uses dynamic batch axes")
-def _():
-    src = Path(APP_DIR / "backend" / "smartsplit_pipeline.py").read_text(encoding="utf-8")
-    assert '"latents": {0: "batch", 2: "height", 3: "width"}' in src
+    class VAE(torch.nn.Module):
+        config = SimpleNamespace(latent_channels=4)
 
+        def __init__(self):
+            super().__init__()
+            self.w = torch.nn.Linear(2, 2)
+
+        def decode(self, z):
+            return SimpleNamespace(sample=z)
+    pipe = SimpleNamespace(vae=VAE())
+    calls = []
+    out = Path(tempfile.mkdtemp())
+    with patch.object(SP, "ONNX_CACHE_DIR", out), patch.object(torch.onnx, "export", lambda *a, **k: (calls.append((a, k)), Path(a[2]).write_bytes(b"onnx"))):
+        p = SP._export_vae_decoder_to_onnx(pipe, "stem")
+        assert p == out / "stem_vae_decoder.onnx" and len(calls) == 1
+        a, k = calls[0]
+        assert a[1][0].shape == (1, 4, 64, 64) and k["input_names"] == ["latents"] and k["output_names"] == ["images"], k
+        assert k["dynamic_axes"]["latents"] == {0: "batch", 2: "height", 3: "width"} and k["dynamic_axes"]["images"] == {0: "batch", 2: "img_height", 3: "img_width"}, k
+        assert SP._export_vae_decoder_to_onnx(pipe, "stem") == p and len(calls) == 1
 
 # ══════════════════════════════════════════════════════════════════════════
 print("\n[5/8] SmartSplit Pipeline NPU Path")
 # ══════════════════════════════════════════════════════════════════════════
 
-@test("SmartSplitPipeline._setup handles NPU bridge path")
+@test("SmartSplitPipeline._setup (round 26: behaviour): an NPU text encoder uses the bridge proxy when it starts, else the local ORT session of the same device; a failing export leaves the dGPU path")
 def _():
-    src = Path(APP_DIR / "backend" / "smartsplit_pipeline.py").read_text(encoding="utf-8")
-    # Verify NPU bridge path exists in _setup
-    assert 'self._setup_npu_te(onnx_path)' in src
-    # Verify fallback to local ort session
-    assert '_ort_session(onnx_path, fallback)' in src
+    from unittest.mock import patch
+    import backend.smartsplit_pipeline as SP
+    cfg = SP.SmartSplitConfig(enabled=True, text_encoder_device="npu", unet_device="cuda", vae_device="cpu")
+    sessions = []
+    with patch.object(SP, "_export_text_encoder_to_onnx", lambda pipe, stem: Path("te.onnx")), \
+            patch.object(SP, "_ort_session", lambda p, ep: sessions.append((str(p), ep)) or "ort-session"):
+        with patch.object(SP.SmartSplitPipeline, "_setup_npu_te", lambda self, p: "npu-proxy"):
+            sp = SP.SmartSplitPipeline(object(), cfg, "stem")
+            assert sp._te_session == "npu-proxy" and not sessions                       # the bridge started: no local session
+        with patch.object(SP.SmartSplitPipeline, "_setup_npu_te", lambda self, p: None):
+            sp = SP.SmartSplitPipeline(object(), cfg, "stem")
+            assert sp._te_session == "ort-session" and sessions == [("te.onnx", "npu")]  # no bridge: the local session for the same device (which falls back to CPU itself)
+        cfg2 = SP.SmartSplitConfig(enabled=True, text_encoder_device="igpu_directml", unet_device="cuda", vae_device="cpu")
+        sessions.clear()
+        assert SP.SmartSplitPipeline(object(), cfg2, "stem")._te_session == "ort-session" and sessions == [("te.onnx", "igpu_directml")]
+    with patch.object(SP, "_export_text_encoder_to_onnx", lambda pipe, stem: (_ for _ in ()).throw(RuntimeError("export failed"))):
+        assert SP.SmartSplitPipeline(object(), cfg, "stem")._te_session is None          # offload failed: the standard dGPU encoder
+    assert SP.SmartSplitPipeline(object(), SP.SmartSplitConfig(enabled=False), "stem")._te_session is None
 
-@test("SmartSplitPipeline.encode_prompt runs NPU/iGPU ONNX session")
+@test("SmartSplitPipeline.encode_prompt (round 26: behaviour): the offloaded session encodes the prompt, then the negative prompt, and the result is [negative, positive] in fp16 on the target device")
 def _():
-    src = Path(APP_DIR / "backend" / "smartsplit_pipeline.py").read_text(encoding="utf-8")
-    # Verify the ONNX inference path
-    assert 'self._te_session.run(None, {"input_ids": pos_ids})' in src
-    assert 'self._te_session.run(None, {"input_ids": neg_ids})' in src
-    # Verify output conversion to torch
-    assert 'torch.from_numpy(pos_embeds).to(device, dtype=torch.float16)' in src
+    import numpy as np
+    import torch
+    from types import SimpleNamespace
+    import backend.smartsplit_pipeline as SP
+    sp = SP.SmartSplitPipeline(object(), SP.SmartSplitConfig(enabled=False), "stem")
+    seen = []
+
+    class Sess:
+        def run(self, names, inputs):
+            ids = inputs["input_ids"]
+            seen.append(ids.copy())
+            return [np.full((1, 3, 4), float(ids[0, 0]), np.float32)]
+
+    class Tok:
+        model_max_length = 5
+
+        def __call__(self, texts, padding=None, max_length=None, truncation=None, return_tensors=None):
+            return {"input_ids": np.full((1, max_length), 7 if texts[0] == "pos" else 9)}
+    sp.pipe, sp._te_session = SimpleNamespace(tokenizer=Tok()), Sess()
+    out = sp.encode_prompt("pos", "neg", "cpu")
+    assert [int(x[0, 0]) for x in seen] == [7, 9] and all(x.dtype == np.int64 for x in seen)         # prompt first, then the negative prompt, as int64 ids
+    assert out.dtype == torch.float16 and out.shape == (2, 3, 4) and float(out[0, 0, 0]) == 9.0 and float(out[1, 0, 0]) == 7.0, out    # [negative, positive]
 
 @test("SmartSplitPipeline.generate has NPU timing tracking")
 def _():
@@ -339,13 +461,11 @@ def _():
 print("\n[6/8] App.py SmartSplit Generation Path Routing")
 # ══════════════════════════════════════════════════════════════════════════
 
-@test("app.py imports SmartSplit components")
+@test("app.py (round 26: behaviour) exposes the SmartSplit components the Settings tab and Generate path use")
 def _():
-    src = Path(APP_DIR / "app.py").read_text(encoding="utf-8")
-    assert "from backend.smartsplit_pipeline import" in src
-    assert "SmartSplitPipeline" in src
-    assert "SmartSplitConfig" in src
-    assert "detect_smartsplit_capability" in src
+    import app as _app
+    for name in ("SmartSplitPipeline", "SmartSplitConfig", "detect_smartsplit_capability", "_smartsplit_te_choices", "_smartsplit_vae_choices", "_build_smartsplit_cap_html"):
+        assert callable(getattr(_app, name, None)), name
 
 @test("app.py has _smartsplit_cfg and _smartsplit_pipe globals")
 def _():
@@ -353,17 +473,6 @@ def _():
     assert hasattr(_app, '_smartsplit_cfg')
     assert hasattr(_app, '_smartsplit_pipe')
     assert hasattr(_app, '_smartsplit_cap')
-
-@test("SmartSplit generation path checks enabled + pipe + not img2img")
-def _():
-    src = Path(APP_DIR / "app.py").read_text(encoding="utf-8")
-    assert "_smartsplit_cfg.enabled and _smartsplit_pipe is not None and not use_i2i" in src
-
-@test("SmartSplit path calls _smartsplit_pipe.generate()")
-def _():
-    src = Path(APP_DIR / "app.py").read_text(encoding="utf-8")
-    assert "_smartsplit_pipe.generate(" in src
-    assert "progress_callback=prog_cb" in src
 
 @test("SmartSplit auto-rebuilds on SD 1.5 model load")
 def _():
@@ -376,11 +485,22 @@ def _():
     assert '_smartsplit_pipe = None' in src
     assert 'SmartSplit disabled (SDXL not supported' in src
 
-@test("SmartSplit rejects SDXL in on_apply_split")
+@test("SmartSplit rejects SDXL in on_apply_split (round 26: behaviour: the handler run with an SDXL pipeline loaded, no SmartSplit pipe is built)")
 def _():
-    src = Path(APP_DIR / "app.py").read_text(encoding="utf-8")
-    assert 'SmartSplit not supported for SDXL/Pony/Illustrious' in src
-
+    import app as _app
+    from unittest.mock import patch
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    fn = getattr(by["on_apply_split"].fn, "__wrapped__", by["on_apply_split"].fn)
+    old_sd, old_pipe = _app.sd, _app._smartsplit_pipe
+    try:
+        _app.sd = object.__new__(_app.SDXLPipeline)
+        _app.sd.current_model = "x.safetensors"
+        out = fn(True, "cpu", "cpu")
+        txt = " ".join(str(x) for x in (out if isinstance(out, (list, tuple)) else [out]))
+        assert "SmartSplit not supported for SDXL/Pony/Illustrious" in txt, txt[:300]
+        assert _app._smartsplit_pipe is None
+    finally:
+        _app.sd, _app._smartsplit_pipe = old_sd, old_pipe
 
 # ══════════════════════════════════════════════════════════════════════════
 print("\n[7/8] UI Wiring: NPU Badge, SmartSplit Controls")
@@ -422,30 +542,59 @@ def _():
     info = _build_npu_info(npu)
     assert "No XDNA NPU detected" in info
 
-@test("_smartsplit_te_choices includes NPU when available")
+@test("_smartsplit_te_choices (round 26: behaviour) offers 'npu' only when an NPU is available, 'igpu_directml' only with a usable iGPU, 'cpu' always")
 def _():
-    src = Path(APP_DIR / "app.py").read_text(encoding="utf-8")
-    assert 'if cap.npu_available:      choices.append("npu")' in src
+    import app as _app
+    from backend.smartsplit_pipeline import SmartSplitCapability
+    cap = lambda **k: SmartSplitCapability(possible=True, dgpu_available=True, **k)
+    assert _app._smartsplit_te_choices(cap(npu_available=True, igpu_te_available=True)) == ["npu", "igpu_directml", "cpu"]
+    assert _app._smartsplit_te_choices(cap(npu_available=False, igpu_te_available=True)) == ["igpu_directml", "cpu"]
+    assert _app._smartsplit_te_choices(cap(npu_available=True, igpu_te_available=False)) == ["npu", "cpu"]
+    assert _app._smartsplit_te_choices(cap()) == ["cpu"]
 
-@test("_build_smartsplit_cap_html includes NPU name")
+@test("_build_smartsplit_cap_html (round 26: behaviour) names the dGPU, the iGPU and — only when available — the NPU")
 def _():
-    src = Path(APP_DIR / "app.py").read_text(encoding="utf-8")
-    assert 'if cap.npu_available:' in src
-    assert 'cap.npu_name' in src
+    import app as _app
+    from backend.smartsplit_pipeline import SmartSplitCapability
+    base = dict(possible=True, dgpu_available=True, dgpu_name="DGPU-X", igpu_name="IGPU-Y", npu_name="NPU-Z")
+    html_on = _app._build_smartsplit_cap_html(SmartSplitCapability(**base, npu_available=True))
+    html_off = _app._build_smartsplit_cap_html(SmartSplitCapability(**base, npu_available=False))
+    assert "DGPU-X" in html_on and "IGPU-Y" in html_on and "NPU: NPU-Z" in html_on and "NPU" not in html_off.replace("SmartSplit", ""), (html_on[:200], html_off[:200])
+    assert _app._build_smartsplit_cap_html(SmartSplitCapability(possible=False)) == ""
 
-@test("Settings tab has NPU section with badge and details")
+@test("Settings tab (round 26: behaviour: the built UI) shows the NPU section with badge and details when an NPU is detected, and not otherwise")
 def _():
-    src = Path(APP_DIR / "app.py").read_text(encoding="utf-8")
-    assert '### ⚡ AMD XDNA NPU (Ryzen AI)' in src
-    assert '_npu_badge(profile.npu)' in src
-    assert '_build_npu_info(profile.npu)' in src
+    import copy
+    from unittest.mock import patch
+    import app as _app
+    from backend.hardware_detector import NPUInfo
+    real = _app.get_profile()
 
-@test("SmartSplit TE dropdown offers NPU option")
+    def built(npu):
+        p = copy.copy(real)
+        p.npu = npu
+        with patch.object(_app, "get_profile", lambda: p):
+            demo = _app.build_app()
+        return [getattr(b, "value", "") for b in demo.blocks.values()]
+    have = NPUInfo(available=True, name="AMD XDNA NPU (VitisAI EP)", backend="vitisai", notes="n")
+    vals = built(have)
+    assert any("AMD XDNA NPU (Ryzen AI)" in str(v) for v in vals) and _app._npu_badge(have) in vals and _app._build_npu_info(have) in vals, "NPU section missing"
+    assert not any("AMD XDNA NPU (Ryzen AI)" in str(v) for v in built(NPUInfo(available=False, name="Not detected", backend=""))), "NPU section shown without an NPU"
+
+@test("SmartSplit TE dropdown (round 26: behaviour: the built UI) offers 'npu' when the capability has an NPU, and only the CPU on a machine without helpers")
 def _():
-    src = Path(APP_DIR / "app.py").read_text(encoding="utf-8")
-    assert 'te_device_dd = gr.Dropdown(' in src
-    assert '_smartsplit_te_choices(_cap)' in src
+    from unittest.mock import patch
+    import app as _app
+    from backend.smartsplit_pipeline import SmartSplitCapability
 
+    def choices(cap):
+        with patch.object(_app, "_get_smartsplit_cap", lambda: cap):
+            demo = _app.build_app()
+        dd = [b for b in demo.blocks.values() if type(b).__name__ == "Dropdown" and getattr(b, "label", "") == "Text Encoder device"]
+        return [[c[1] if isinstance(c, (list, tuple)) else c for c in d.choices] for d in dd]
+    assert choices(SmartSplitCapability(possible=True, dgpu_available=True, npu_available=True, npu_name="N", igpu_te_available=True)) == [["npu", "igpu_directml", "cpu"]]
+    assert choices(SmartSplitCapability(possible=True, dgpu_available=True, igpu_te_available=True)) == [["igpu_directml", "cpu"]]
+    assert choices(SmartSplitCapability(possible=False)) == []                    # not capable: the section isn't built
 
 # ══════════════════════════════════════════════════════════════════════════
 print("\n[8/10] End-to-End SmartSplit with NPU")
@@ -1818,7 +1967,7 @@ def _():
              patch("backend.model_manager.list_loras", return_value=[("l.safetensors", "/m/l.safetensors")]), \
              patch("backend.model_manager.list_vaes", return_value=[]):
             out = fn("do_card_load")("G", "(no outfit tags)", "", "", "/m/wai.safetensors")
-            assert len(out) == 26, len(out)            # + eye detail on / denoise
+            assert len(out) == 27, len(out)            # + eye detail on / denoise + the colour strength (round 26)
             assert out[0].get("__type__") == "update" and out[2] == "none"                         # checkpoint kept, profile has no LoRA
             assert (out[12], out[13]) == (4.5, 20) and out[14] == "DPM++ 2M Karras", out[12:15]
             assert (out[16], out[18], out[19], out[20], out[21]) == (2.0, True, True, 0.35, False), out[16:23]
@@ -1843,6 +1992,50 @@ def _():
         saved = CC.load_card("G")
         assert set(saved["profiles"]) == {"wai.safetensors", "sdxl.safetensors"}
         assert saved["identity"] == _ident and saved["notes"] == "her canon pin is the black butterfly", saved     # 💾 Save used to drop notes (and would drop the identity)
+    finally:
+        CC.CARDS_DIR = old
+
+
+@test("🎨 Colour strength in cards (round 26): an optional 'colour' key per card / profile, sanitised (0.5-1); 🎴 Load sets the slider (a card without it leaves it), a profile overrides the card, 📌 saves it, 💾 Save keeps it")
+def _():
+    import app as _app
+    import backend.character_cards as CC
+    c = CC.clean_card({"name": "C", "colour": 0.8, "profiles": {"a.safetensors": {"colour": "0.7", "cfg": 5}, "b.safetensors": {"colour": 3, "cfg": 5}, "c.safetensors": {"colour": "x", "cfg": 5}}})
+    assert c["colour"] == 0.8 and c["profiles"]["a.safetensors"]["colour"] == 0.7, c
+    assert "colour" not in c["profiles"]["b.safetensors"] and "colour" not in c["profiles"]["c.safetensors"], c["profiles"]        # out of range / junk: dropped, the profile stays
+    assert "colour" not in CC.clean_card({"name": "D", "colour": 0.2}) and CC.clean_card({"name": "D", "colour": 1.0})["colour"] == 1.0
+    tmp = Path(_tf.mkdtemp())
+    old = CC.CARDS_DIR
+    try:
+        CC.CARDS_DIR = tmp / "cards"
+        CC.CARDS_DIR.mkdir()
+        (CC.CARDS_DIR / "G.json").write_text(json.dumps({"name": "G", "checkpoint": "base.safetensors", "tags": "1girl", "colour": 0.8, "loras": [],
+                                                         "profiles": {"wai.safetensors": {"cfg": 5.0, "colour": 0.7}, "other.safetensors": {"cfg": 5.0}}}), encoding="utf-8")
+        (CC.CARDS_DIR / "H.json").write_text(json.dumps({"name": "H", "checkpoint": "base.safetensors", "tags": "1girl", "loras": []}), encoding="utf-8")
+        by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+        fn = lambda n: getattr(by[n].fn, "__wrapped__", by[n].fn)
+        cks = [("base.safetensors", "/m/base.safetensors"), ("wai.safetensors", "/m/wai.safetensors"), ("other.safetensors", "/m/other.safetensors")]
+        with patch("backend.model_manager.list_checkpoints", return_value=cks), patch("backend.model_manager.list_loras", return_value=[]), patch("backend.model_manager.list_vaes", return_value=[]):
+            assert fn("do_card_load")("G", "(no outfit tags)", "", "", "/m/base.safetensors")[-2] == 0.8        # the card's colour
+            assert fn("do_card_load")("G", "(no outfit tags)", "", "", "/m/wai.safetensors")[-2] == 0.7         # a profile overrides it
+            assert fn("do_card_load")("G", "(no outfit tags)", "", "", "/m/other.safetensors")[-2] == 0.8       # a profile without one: the card's
+            assert fn("do_card_load")("H", "(no outfit tags)", "", "", "/m/base.safetensors")[-2].get("__type__") == "update"   # no colour: the control stays
+            assert fn("do_card_load")("(none)", "", "", "")[-2].get("__type__") == "update"
+        # the slider is a Load output (right before the status) and a 📌 input (the last one)
+        demo = _app.build_app()
+        load_ev = [f for f in demo.fns if getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "") == "do_card_load"][0]
+        prof_ev = [f for f in demo.fns if getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "") == "do_card_profile"][0]
+        assert type(load_ev.outputs[-2]).__name__ == "Slider" and load_ev.outputs[-2].label == "Colour strength", [getattr(o, "label", None) for o in load_ev.outputs[-3:]]
+        assert prof_ev.inputs[-1].label == "Colour strength", prof_ev.inputs[-1].label
+        ck = tmp / "sdxl.safetensors"
+        ck.write_bytes(b"x")
+        base = ("H", str(ck), "none", "none", 0.7, "none", 0.7, "none", 0.7, "bad", 832, 1216, 5.0, 12, "DPM++ 2M AYS", 1, 2.0, False, 0.0, False, 0.35, False, 0.35, False, 0.4)
+        assert "📌 Saved" in fn("do_card_profile")(*base, 0.8)
+        assert CC.load_card("H")["profiles"]["sdxl.safetensors"]["colour"] == 0.8
+        assert "📌 Saved" in fn("do_card_profile")(*base)                                                          # the default slider value 1 is saved too (Load then resets it)
+        assert CC.load_card("H")["profiles"]["sdxl.safetensors"]["colour"] == 1.0
+        fn("do_card_save")("G", str(ck), "none", "none", 0.7, "none", 0.7, "none", 0.7, "1girl", "bad", 832, 1216, 6.0, 12, "Euler a", 1)
+        assert CC.load_card("G")["colour"] == 0.8 and CC.load_card("G")["profiles"]["wai.safetensors"]["colour"] == 0.7        # 💾 Save keeps them
     finally:
         CC.CARDS_DIR = old
 
@@ -4212,10 +4405,12 @@ class _BatchEnv:
     def __exit__(self, *exc):
         self._app.sd, self._app.OUTPUTS_DIR, self._CC.CARDS_DIR = self._old
 
-    def run_batch(self, seed, steps=4, seeds_per=2, resume=True, hires=False, **extra):
+    def run_batch(self, seed, steps=4, seeds_per=2, resume=True, hires=False, i2i_image=None, **extra):
         args = ["TestGirl", "", seeds_per, resume, "x.safetensors", "none", "none", 0.7, "none", 0.7, "none", 0.7, False,
                 "", "bad hands", "Euler a", steps, 6.0, 64, 64, 1, seed, None, 0.5, False, 1, -1, 0.0, hires, 1.5, 0.45,
                 14, "Lanczos", False, 0.35, "auto", "", 0.0, False, 0.0, False, 0.35]
+        if i2i_image is not None:
+            args[22], args[24] = i2i_image, True                  # the init picture and 'Use img2img'
         return list(self.cb(*args, progress=lambda *a, **k: None, **extra))
 
     def run_xy(self, x_axis, x_vals):
@@ -4256,6 +4451,41 @@ def _():
         res = E.run_xy("Steps", "4,5,6,7")
         assert len(E.calls) == 2, len(E.calls)
         assert "2 images" in res[1] and "stopped early" in res[1] and len(res[0]) == 3, res[1]   # grid + the 2 real cells, no blank tiles
+
+
+@test("SmartSplit generation path (round 26: behaviour instead of source text): enabled + a built pipe + not img2img → _smartsplit_pipe.generate() with a progress callback; disabled, no pipe, or img2img → the standard path")
+def _():
+    from unittest.mock import patch
+    from PIL import Image
+    import app as _app
+    import backend.sd_pipeline as SDP
+    from backend.smartsplit_pipeline import SmartSplitConfig
+    on = SmartSplitConfig(enabled=True, text_encoder_device="cpu", unet_device="cuda", vae_device="cpu")
+    off = SmartSplitConfig(enabled=False)
+
+    class FakeSplit:
+        pipe = object()
+
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, **kw):
+            self.calls.append(kw)
+            return [Image.new("RGB", (kw["width"], kw["height"]), (9, 9, 9))], {}
+
+    def run(cfg, pipe, i2i=False):
+        with _BatchEnv() as E, patch.object(SDP, "_load_scheduler", lambda *a, **k: None), patch.object(_app, "_smartsplit_cfg", cfg), patch.object(_app, "_smartsplit_pipe", pipe):
+            gen = dict(zip(E.cb.__code__.co_freevars, E.cb.__closure__))["do_generate"].cell_contents                       # the Generate tab's own do_generate
+            _app._generation_abort.clear()                                                                                 # an earlier test's Stop must not end this run before it starts
+            gen("1girl", "bad", "Euler a", 4, 6.0, 256, 256, 1, 11, Image.new("RGB", (256, 256)) if i2i else None, 0.5, i2i, True, _app._clean_extra({}),
+                progress=lambda *a, **k: None)
+            return len(E.calls), E.i2i_calls
+    fs = FakeSplit()
+    plain, i2i_calls = run(on, fs)
+    assert plain == 0 and len(fs.calls) == 1 and all(callable(c["progress_callback"]) and c["batch_size"] == 1 and c["width"] == 256 for c in fs.calls), (plain, len(fs.calls))   # SmartSplit made the pictures, the standard path made none
+    for cfg, pipe, i2i, label in ((off, FakeSplit(), False, "disabled"), (on, None, False, "no pipe"), (on, FakeSplit(), True, "img2img")):
+        n_plain, n_i2i = run(cfg, pipe, i2i)
+        assert (pipe is None or not pipe.calls) and (n_i2i == 1 if i2i else n_plain == 1), (label, n_plain, n_i2i, getattr(pipe, "calls", None))
 
 
 @test("Outfit batch: 'Skip pairs already made' also resumes with the default seed -1; a finished batch draws new seeds")
@@ -5047,7 +5277,20 @@ def _():
     assert dt.detail_schedule_steps("eye", 30, 0.4) == 38 and int(38 * 0.4) == 15       # more main steps: half of them, as before
     assert dt.detail_schedule_steps("eye", 400, 0.1) == 150                                # never longer than 150
     assert dt.detail_schedule_steps("unknown", 12, 0.5) == 20                              # an unknown pass keeps the 10-step minimum
-    assert "detail_schedule_steps(kind, steps, den)" in inspect.getsource(_app._build_generate_tab), "_detail_pass uses the shared rule"
+    # round 26 (behaviour instead of a look at the source): the real _detail_pass hands each detail function the steps of the shared rule
+    from PIL import Image
+    from unittest.mock import patch
+    with _BatchEnv() as E:
+        gen = dict(zip(E.cb.__code__.co_freevars, E.cb.__closure__))["do_generate"].cell_contents
+        dpass = dict(zip(gen.__code__.co_freevars, gen.__closure__))["_detail_pass"].cell_contents
+        seen = {}
+        fake = lambda kind: (lambda sdp, im, prompt, neg, **kw: (seen.setdefault(kind, []).append(kw["steps"]), (im, 1))[1])
+        ex = _app._clean_extra(dict(fd_denoise=0.35, hd_denoise=0.35, ed_denoise=0.4))
+        with patch.object(dt, "eye_detail", fake("eye")), patch.object(dt, "face_detail", fake("face")), patch.object(dt, "hand_detail", fake("hand")):
+            for kind in ("eye", "face", "hand"):
+                dpass(kind, [Image.new("RGB", (64, 64))], [1], "p", "n", 12, 6.0, "Euler a", ex, lambda *a, **k: None)
+        assert seen == {"eye": [dt.detail_schedule_steps("eye", 12, 0.4)], "face": [dt.detail_schedule_steps("face", 12, 0.35)], "hand": [dt.detail_schedule_steps("hand", 12, 0.35)]}, seen
+        assert int(seen["eye"][0] * 0.4) == 8 and int(seen["face"][0] * 0.35) == 10, seen
     assert P.recipe("Full body")["hires_steps"] == 8 and P.recipe("Wide shot")["hires_steps"] == 14 and P.recipe("Full body")["hires_denoise"] == 0.45
     assert P.time_factor("Wide shot") > P.time_factor("Full body") > P.time_factor("Portrait")             # the Wide chain is the longest, with its 14 hires steps
 

@@ -74,6 +74,10 @@ def _fill_settings(d: dict, out: dict) -> dict:
             out[k] = Path(d[k]).name if k == "vae" else d[k].strip()
     if isinstance(d.get("eye_style"), str) and d["eye_style"].strip().lower() in ("round", "natural"):
         out["eye_style"] = d["eye_style"].strip().lower()          # the eye pass's look (detail_tools.EYE_STYLES); 🎴 Load applies it, 📌 saves it
+    if d.get("colour") is not None:
+        v = _num(d.get("colour"), 0.5, 1.0, float)
+        if v is not None:
+            out["colour"] = round(v, 3)                            # 🎨 Colour strength (round 26; 1 = as drawn): 🎴 Load sets the slider, 📌 saves it, absent = leave it
     return out
 
 

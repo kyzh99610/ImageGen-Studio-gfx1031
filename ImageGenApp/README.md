@@ -65,7 +65,7 @@ Generate images from text prompts using Stable Diffusion checkpoints. The output
 - **CFG rescale** tames burned colours at high CFG.
 - **V-prediction** checkpoints (e.g. NoobAI-XL v-pred) are detected and set up automatically, with CFG rescale 0.7.
 - The X/Y grid has *PAG scale* and *CFG rescale* axes for comparisons.
-- **🎨 Colour strength** (off by default) tones the colours of the finished picture down: 0.8 = 20 % less colour. It scales the LAB chroma and keeps the lightness, so line art, shading and skin tones stay as drawn; it is recorded with the picture and restored by Send to Generate.
+- **🎨 Colour strength** (off by default) tones the colours of the finished picture down: 0.8 = 20 % less colour. It scales the LAB chroma and keeps the lightness, so line art, shading and skin tones stay as drawn; it is recorded with the picture and restored by Send to Generate. A character card (or one of its per-checkpoint profiles) can store a colour strength: 🎴 Load sets it, 📌 saves it.
 
 **🔤 Danbooru tags:** anime checkpoints learned exact Danbooru tags.
 - While you type, the most-used matching tags appear as chips (e.g. `thigh` → thighhighs 1.0M, thighs 466k…); click one to complete it.
