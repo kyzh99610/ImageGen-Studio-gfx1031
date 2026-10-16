@@ -843,22 +843,55 @@ def _():
         result = _build_sdxl_accel_embeds(pipe, "test", "bad", "model")
     assert result is None
 
-@test("SDXL accel-TE wired into txt2img path")
-def _():
-    import inspect
-    from backend.sdxl_pipeline import SDXLPipeline
-    src = inspect.getsource(SDXLPipeline.txt2img)
-    assert "_accel_te_enabled" in src, "txt2img should check _accel_te_enabled"
-    assert "_build_sdxl_accel_embeds" in src, "txt2img should call _build_sdxl_accel_embeds"
-    assert "_build_sdxl_embeds" in src, "txt2img should still have CPU fallback"
+def _sdxl_te_routing(kind, accel_on, accel_result):
+    """Run the real SDXLPipeline.txt2img / img2img with fakes around it; returns (embed builders called, the embeds run_pipe received)."""
+    from types import SimpleNamespace
+    import torch
+    from PIL import Image as _Img
+    from backend import sdxl_pipeline as SX
+    called, got = [], {}
+    cpu_embeds = {"prompt_embeds": "cpu"}
 
-@test("SDXL accel-TE wired into img2img path")
+    def fake_accel(pipe, prompt, neg, stem):
+        called.append("accel")
+        return dict(accel_result) if accel_result is not None else None
+
+    def fake_cpu(pipe, prompt, neg):
+        called.append("cpu")
+        return dict(cpu_embeds)
+
+    def fake_run(sdp, pipe, kind_, **kw):
+        got.update(kw)
+        return SimpleNamespace(images=[_Img.new("RGB", (64, 64))])
+
+    p = SX.SDXLPipeline()
+    p.device = "cpu"
+    p.pipe = MagicMock()
+    p.pipe.text_encoder.parameters.side_effect = lambda: iter([SimpleNamespace(device=torch.device("cpu"))])
+    p.img2img_pipe = MagicMock()
+    with patch.object(SX, "_accel_te_enabled", accel_on), patch.object(SX, "_build_sdxl_accel_embeds", fake_accel), \
+            patch.object(SX, "_build_sdxl_embeds", fake_cpu), patch.object(SX, "_load_scheduler"), \
+            patch.object(SX, "_make_generators", lambda seed, dev, n: (None, [1])), \
+            patch.object(SX, "_make_generator", lambda seed, dev: (None, 1)), patch.object(SX, "_vram_reset"), \
+            patch("backend.sd_pipeline.variation_latents", lambda *a, **k: (None, [])), \
+            patch("backend.sampling.run_pipe", fake_run):
+        if kind == "txt2img":
+            images, info = p.txt2img("a girl", "bad", 64, 64, 2, 5.0, 1)
+        else:
+            images, info = p.img2img(_Img.new("RGB", (64, 64)), "a girl", "bad", 0.5, 2, 5.0, 1)
+    assert images and not str(info).startswith("❌"), info
+    return called, got
+
+
+@test("SDXL accel-TE routing in txt2img and img2img: off = CPU Compel only; on = the accelerated embeds are used; on but failed = CPU fallback")
 def _():
-    import inspect
-    from backend.sdxl_pipeline import SDXLPipeline
-    src = inspect.getsource(SDXLPipeline.img2img)
-    assert "_accel_te_enabled" in src, "img2img should check _accel_te_enabled"
-    assert "_build_sdxl_accel_embeds" in src, "img2img should call _build_sdxl_accel_embeds"
+    for kind in ("txt2img", "img2img"):
+        called, got = _sdxl_te_routing(kind, False, None)
+        assert called == ["cpu"] and got["prompt_embeds"] == "cpu", (kind, called)
+        called, got = _sdxl_te_routing(kind, True, {"prompt_embeds": "accel"})
+        assert called == ["accel"] and got["prompt_embeds"] == "accel", (kind, called, got)
+        called, got = _sdxl_te_routing(kind, True, None)
+        assert called == ["accel", "cpu"] and got["prompt_embeds"] == "cpu", (kind, called)
 
 @test("DML EP available in onnxruntime")
 def _():
@@ -3243,7 +3276,7 @@ def _():
         # inside a pass: with the limit set the callback also checks the zone (every ~10 s, emergency brake)
         import inspect, torch
         from backend import sampling as S
-        assert "_size_factor" not in inspect.getsource(S._cool_callback) and not hasattr(S, "_size_factor")    # uniform pause (scaling was slower, not cooler); the helper is gone
+        assert not hasattr(S, "_size_factor")    # the pause is uniform (scaling by pass size was slower, not cooler); the helper is gone
         calls = []
         old_wait, old_every, old_cool = T.wait_cool, S._THERM_EVERY, S.COOL["factor"]
         try:
@@ -5519,8 +5552,25 @@ def _():
         assert PS.set_emphasis("Compel (stronger)") == "compel" and PS.set_emphasis("A1111 (default)") == "a1111"
     finally:
         PS.set_emphasis(old)
+    # the SDXL embedding cache must not serve one weighting mode's embeddings to the other
     from backend import sdxl_pipeline as SX
-    assert 'EMPHASIS["mode"])' in inspect.getsource(SX._build_sdxl_embeds)   # cache must not mix modes
+    from types import SimpleNamespace
+    fake_pipe = SimpleNamespace(_model_name_or_path="m")
+    saved = dict(SX._SDXL_EMBED_CACHE)
+    try:
+        SX._SDXL_EMBED_CACHE.clear()
+        SX._SDXL_EMBED_CACHE[("p", "n", "m", "a1111")] = {"prompt_embeds": torch.zeros(1)}
+        SX._SDXL_EMBED_CACHE[("p", "n", "m", "compel")] = {"prompt_embeds": torch.ones(1)}
+        try:
+            PS.set_emphasis("a1111")
+            assert SX._build_sdxl_embeds(fake_pipe, "p", "n")["prompt_embeds"].item() == 0.0
+            PS.set_emphasis("compel")
+            assert SX._build_sdxl_embeds(fake_pipe, "p", "n")["prompt_embeds"].item() == 1.0
+        finally:
+            PS.set_emphasis(old)
+    finally:
+        SX._SDXL_EMBED_CACHE.clear()
+        SX._SDXL_EMBED_CACHE.update(saved)
 
 
 @test("VAE family from the quant_conv bias: an SD 1.5 VAE on SDXL (or back) is ignored with a warning, not decoded")
