@@ -114,18 +114,19 @@ def read_temp() -> float | None:
 # at 31 % duty, so it hit 88 within ~40 s and then waited 1-3 min for 80), 8.7 instead of 3.9 min per Full-body picture, and
 # the peaks stayed at 95.9 — what keeps the laptop safe is the smooth per-step pause plus a cool start of every piece.
 IN_PASS_MARGIN = 6.0
+TRAIN_IN_PASS_MARGIN = 3.0      # round 25: a training (an hour of steady load) brakes at limit + 3, not + 6: at cool 0 it rode 93-95 °C (21 % of the readings >= 94 over 68 min, round 24)
 _PLATEAU = 20.0         # between pieces: no new low for this long below the limit = the laptop's idle level, go on
 
 
 def wait_cool(should_stop=None, say=None, read=read_temp, sleep=time.sleep, clock=time.monotonic,
-              in_pass: bool = False) -> float:
+              in_pass: bool = False, margin: float | None = None) -> float:
     """When the guard is on and the laptop is at or above the limit, wait until it is `limit - 8` or cooler (or Stop, or
-    15 min). in_pass: the emergency brake used between sampling steps — act at limit + 6, resume at the limit.
+    15 min). in_pass: the emergency brake used between sampling steps — act at limit + 6 (`margin` overrides the 6), resume at the limit.
     `say(text)` reports progress. Returns the seconds waited (0 when nothing was needed)."""
     limit = GUARD["limit"]
     if not limit:
         return 0.0
-    trigger, resume = (limit + IN_PASS_MARGIN, limit) if in_pass else (limit, limit - _RESUME_GAP)
+    trigger, resume = (limit + (IN_PASS_MARGIN if margin is None else margin), limit) if in_pass else (limit, limit - _RESUME_GAP)
     t = read()
     if t is None or t < trigger:
         return 0.0
