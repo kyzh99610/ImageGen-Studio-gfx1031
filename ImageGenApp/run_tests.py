@@ -2732,8 +2732,9 @@ def _():
     from PIL import Image
     from backend import detail_tools as dt
     seen = []
-    orig_det, orig_inp = dt.detect_hands, dt.inpaint_region
+    orig_det, orig_inp, orig_conf = dt.detect_hands, dt.inpaint_region, dt.confirmed_hands
     try:
+        dt.confirmed_hands = lambda image, boxes: list(boxes)
         dt.detect_hands = lambda image, max_hands=6, conf=0.45, min_frac=0.02: [(20, 20, 60, 60)]
         dt.inpaint_region = lambda sdp, im, mask, prompt, *a, **k: (seen.append(prompt), (im, 0))[1]
         full = ("masterpiece, best quality, 1girl, solo, grey hair, (black butterfly hair ornament:1.2), cowboy shot, white bikini, v, peace sign, hand up, "
@@ -2749,7 +2750,65 @@ def _():
         dt.hand_detail(object(), Image.new("RGB", (128, 128)), full, "lowres", hand_prompt="long fingers")       # an explicit hand_prompt is added to the hand-only prompt
         assert seen[0].endswith("long fingers") and "poolside" not in seen[0], seen[0]
     finally:
-        dt.detect_hands, dt.inpaint_region = orig_det, orig_inp
+        dt.detect_hands, dt.inpaint_region, dt.confirmed_hands = orig_det, orig_inp, orig_conf
+
+
+@test("Hand detail (round 30): a second look at each hand box — boxes the detector finds again on the box + context are re-drawn, boxes it does not find (a forearm, a hip, a nose) are left alone")
+def _():
+    from PIL import Image
+    from backend import detail_tools as dt
+    img = Image.new("RGB", (400, 400))
+    img.paste((255, 0, 0), (100, 100, 140, 140))                  # the real hand is red, the other box is empty black
+    real, fake = (100, 100, 140, 140), (250, 250, 290, 290)
+    calls = []
+
+    def fake_yolo(sess, im, conf, side=640):
+        calls.append((im.size, conf))
+        # the crop of the real box finds the hand again (a box in crop coordinates), the crop of the other one finds nothing
+        s = im.size[0]
+        return [((int(s * 0.3), int(s * 0.3), int(s * 0.7), int(s * 0.7)), 0.8)] if im.getpixel((s // 2, s // 2)) == (255, 0, 0) else []
+    orig = (dt._hand_session, dt._yolo_run, dt.detect_hands, dt.inpaint_region, dt._face_model_cached)
+    try:
+        dt._face_model_cached = lambda: False
+        dt._hand_session = lambda: object()
+        dt._yolo_run = fake_yolo
+        assert dt.hand_confirmed(img, real) is True and dt.hand_confirmed(img, fake) is False
+        assert calls[0][0] == (96, 96) and calls[0][1] == 0.05, calls[0]          # 40 px box x 2.4 = a 96 px crop, a low threshold for the second look
+        # a weak second look (below the minimum) does not confirm
+        dt._yolo_run = lambda sess, im, conf, side=640: [((int(im.size[0] * 0.3), int(im.size[1] * 0.3), int(im.size[0] * 0.7), int(im.size[1] * 0.7)), 0.2)]
+        assert dt.hand_confirmed(img, real) is False
+        # a hit that does not overlap the box (another hand in the context) does not confirm
+        dt._yolo_run = lambda sess, im, conf, side=640: [((0, 0, 8, 8), 0.9)]
+        assert dt.hand_confirmed(img, real) is False
+        # the first look can be sure on its own — a score >= 0.75 on a box that is not tiny next to the face (mitten fists the detector does not see in context) — but not on a tiny box
+        dt._yolo_run = lambda sess, im, conf, side=640: []
+        assert dt.hand_confirmed(img, real, score=0.8) is True and dt.hand_confirmed(img, real, score=0.7) is False
+        assert dt.hand_confirmed(img, real, score=0.8, face=(0, 0, 100, 100)) is True        # 1600 px² >= 12 % of the face's 10,000
+        assert dt.hand_confirmed(img, real, score=0.8, face=(0, 0, 300, 300)) is False       # 1600 px² < 12 % of 90,000: a small box with a high score (a hip, a nose) is not taken on its score
+        dt._yolo_run = fake_yolo
+        dt._hand_session = lambda: None                                           # no detector: the box is taken as it is
+        assert dt.hand_confirmed(img, fake) is True
+        # hand_detail re-draws only the confirmed boxes (and everything with confirm=False)
+        seen = []
+        dt._hand_session = lambda: object()
+        dt._yolo_run = fake_yolo
+        dt.detect_hands = lambda image, max_hands=6, conf=0.45, min_frac=0.02: [real, fake]
+        dt.inpaint_region = lambda sdp, im, mask, prompt, *a, **k: (seen.append(mask.getbbox()), (im, 0))[1]
+        out, n = dt.hand_detail(object(), img, "1girl, solo, v", "lowres")
+        assert n == 1 and len(seen) == 1 and seen[0][0] < 140 and seen[0][2] <= 150, (n, seen)
+        seen.clear()
+        out, n = dt.hand_detail(object(), img, "1girl, solo, v", "lowres", confirm=False)
+        assert n == 2 and len(seen) == 2, (n, seen)
+        # the opt-in Polish entries: the framing recipe + one hand pass at 0.7 (Auto never picks them)
+        from backend import polish as P
+        for name, base in (("Cowboy shot — hands", "Cowboy shot"), ("Full body — hands", "Full body")):
+            r, b0 = P.recipe(name), P.recipe(base)
+            assert r["hd_on"] and r["hd_denoise"] == 0.7 and not b0["hd_on"], (name, r)
+            assert all(r[k] == v for k, v in b0.items() if k not in ("hd_on",)), (name, r, b0)
+            assert P.time_factor(name) > P.time_factor(base) and "hands 0.7" in P.summary(name)
+        assert P.shot_type("1girl, v, peace sign, cowboy shot") == "Cowboy shot" and name in P.SHOTS
+    finally:
+        dt._hand_session, dt._yolo_run, dt.detect_hands, dt.inpaint_region, dt._face_model_cached = orig
 
 
 @test("Eye detail (round 29): the eye prompt carries the eye-state tags of an expression (closed / wink / half-closed / tears / sparkling / heart / star pupils / kaomoji eyes), so the pass keeps them instead of opening the eyes")
