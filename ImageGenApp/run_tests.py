@@ -2806,7 +2806,12 @@ def _():
             assert r["hd_on"] and r["hd_denoise"] == 0.7 and not b0["hd_on"], (name, r)
             assert all(r[k] == v for k, v in b0.items() if k not in ("hd_on",)), (name, r, b0)
             assert P.time_factor(name) > P.time_factor(base) and "hands 0.7" in P.summary(name)
-        assert P.shot_type("1girl, v, peace sign, cowboy shot") == "Cowboy shot" and name in P.SHOTS
+        assert name in P.SHOTS
+        # Auto: a gesture pose on a cowboy / full-body framing takes the '— hands' variant; portrait / wide and other poses don't
+        for prompt, want in (("1girl, v, peace sign, cowboy shot", "Cowboy shot — hands"), ("1girl, (reaching towards viewer:1.1), full body", "Full body — hands"),
+                             ("1girl, arms up, smile", "Cowboy shot — hands"), ("1girl, peace sign, portrait", "Portrait"), ("1girl, waving, wide shot", "Wide shot"),
+                             ("1girl, hands on hips, full body", "Full body"), ("1girl, v-neck, cowboy shot", "Cowboy shot"), ("1girl, arms up stretching", "Cowboy shot")):
+            assert P.shot_type(prompt) == want, (prompt, P.shot_type(prompt), want)
     finally:
         dt._hand_session, dt._yolo_run, dt.detect_hands, dt.inpaint_region, dt._face_model_cached = orig
 
