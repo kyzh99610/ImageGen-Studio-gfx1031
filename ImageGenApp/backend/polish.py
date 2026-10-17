@@ -48,7 +48,7 @@ RECIPES: dict[str, dict] = {
                                    fd_on=True, fd_denoise=0.35, hd_on=False, ed_on=True, ed_denoise=0.4, md_on=True),
     # round 30 (an SDXL Illustrious checkpoint with a character LoRA; the worst hand poses: reaching toward the viewer, peace sign, arms up, sitting cross-legged, hand on cheek; 71 hand boxes, rated blind before / after, one pass at 0.7
     # with the hand-only prompt on every confirmed box): 0 of 53 good hands made worse, 8 of 18 broken hands (mitten fists, blobs) fixed in one pass (the 🖐 button with several tries: 74 % per try); +~12-18 s per hand.
-    # Opt-in (Auto never picks these); the framing recipe plus the hand pass.
+    # The framing recipe plus the hand pass; Auto picks them only for a gesture pose (see _GESTURE).
     "Cowboy shot — hands": dict(hires_on=False, fd_on=False, hd_on=True, hd_denoise=0.7, ed_on=True, ed_denoise=0.4),
     "Full body — hands":   dict(hires_on=True, hires_scale=1.5, hires_denoise=0.45, hires_steps=8, hires_upscaler="Lanczos",
                                 fd_on=False, hd_on=True, hd_denoise=0.7, ed_on=True, ed_denoise=0.4),
@@ -69,13 +69,21 @@ _FRAMES = (
 )
 
 
+# gesture poses whose second hand is often a mitten fist (round 30, the worst poses: one hand pass at 0.7 fixed 8 of 18
+# broken hands and made 0 of 53 good ones worse) -> Auto takes the '— hands' variant of the Cowboy / Full body recipe
+_GESTURE = re.compile(r"(^|,)\s*(v|peace sign|double v|reaching|reaching towards? viewer|outstretched (arm|arms|hand)|arms up|arms raised|hands up|waving)\s*(?=,|$)", re.I)
+
+
 def shot_type(prompt: str) -> str:
-    """Which recipe fits a prompt: the framing tags it names (weights and brackets ignored), else the middle one."""
+    """Which recipe fits a prompt: the framing tags it names (weights and brackets ignored), else the middle one;
+    a gesture pose on a cowboy / full-body framing takes that recipe's '— hands' variant."""
     p = re.sub(r"[()\[\]\\]", " ", prompt or "")
-    for name, rx in _FRAMES:
-        if rx.search(p):
-            return name
-    return "Cowboy shot"
+    p = re.sub(r":\s*[0-9.]+\s*", " ", p)
+    name = next((n for n, rx in _FRAMES if rx.search(p)), "Cowboy shot")
+    hands = f"{name} — hands"
+    if hands in RECIPES and _GESTURE.search(p):
+        return hands
+    return name
 
 
 def recipe(name: str) -> dict:
