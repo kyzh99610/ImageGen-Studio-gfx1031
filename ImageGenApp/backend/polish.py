@@ -4,7 +4,7 @@ polish.py — ✨ Polish: one click sets the detail passes (hires fix, face, eye
 Where the recipes come from (AGENTS.md "Fifth-session round"): round 4 measured what each pass does at each face size (face detail does
 nothing once the face is ≥ 25 % of the width, equals hires 1.5× at 14–20 %, and hires 1.5× + face detail is best at ≤ 8 %; hires alone rescues
 a 14 % face as well as the face pass, so they are not stacked there); round 5 re-measured the face denoise per face width and the eye pass
-(eye-only prompt, denoise 0.4). The hand pass is left out: it cleans texture but never fixed a finger count. The planned per-recipe chain
+(eye-only prompt, denoise 0.4). The hand pass is left out of the framing recipes: at 0.35 it cleans texture but never fixed a finger count (round 30 added opt-in '— hands' entries: one pass at 0.7 with the hand-only prompt fixes ~2 of 5 broken hands without touching good ones). The planned per-recipe chain
 study (hires vs 2× + tiled detail, Real-ESRGAN vs Lanczos) was cut: the laptop powers off under sustained GPU load. What was measured instead (an Illustrious checkpoint + a character LoRA, 2 seeds per
 shot, CCIP identity / pin / sharpness per chain): at cowboy framing (faces 24–28 %) nothing in the chain moves identity — it is insurance; at full-body framing (14 %) the face pass
 lifts the plain picture (CCIP 0.937 → 0.953, pin .42 → .79), hires 1.5× + eyes lifts it more and sharpens (0.967, pin .90, face ×1.3) and the face pass on top of hires adds nothing —
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-SHOTS = ("Portrait", "Cowboy shot", "Full body", "Wide shot", "Full body — max detail", "Wide shot — max detail")
+SHOTS = ("Portrait", "Cowboy shot", "Full body", "Wide shot", "Full body — max detail", "Wide shot — max detail", "Cowboy shot — hands", "Full body — hands")
 
 # extra-settings keys of app._clean_extra that a recipe may set; anything not listed is left as the user has it
 _KEYS = ("hires_on", "hires_scale", "hires_denoise", "hires_steps", "hires_upscaler", "fd_on", "fd_denoise", "hd_on", "hd_denoise",
@@ -46,13 +46,19 @@ RECIPES: dict[str, dict] = {
     # the 2x stage 63-94 s, the eye pass 18-31 s). The plain Wide shot's eyes are ~20 px each: the cleanup pass has nothing to draw on; by eye A is blurred, W crisp.
     "Wide shot — max detail": dict(hires_on=True, hires_scale=1.5, hires_denoise=0.45, hires_steps=14, hires_upscaler="Lanczos",
                                    fd_on=True, fd_denoise=0.35, hd_on=False, ed_on=True, ed_denoise=0.4, md_on=True),
+    # round 30 (an SDXL Illustrious checkpoint with a character LoRA; the worst hand poses: reaching toward the viewer, peace sign, arms up, sitting cross-legged, hand on cheek; 71 hand boxes, rated blind before / after, one pass at 0.7
+    # with the hand-only prompt on every confirmed box): 0 of 53 good hands made worse, 8 of 18 broken hands (mitten fists, blobs) fixed in one pass (the 🖐 button with several tries: 74 % per try); +~12-18 s per hand.
+    # Opt-in (Auto never picks these); the framing recipe plus the hand pass.
+    "Cowboy shot — hands": dict(hires_on=False, fd_on=False, hd_on=True, hd_denoise=0.7, ed_on=True, ed_denoise=0.4),
+    "Full body — hands":   dict(hires_on=True, hires_scale=1.5, hires_denoise=0.45, hires_steps=8, hires_upscaler="Lanczos",
+                                fd_on=False, hd_on=True, hd_denoise=0.7, ed_on=True, ed_denoise=0.4),
 }
 
 # time of the whole recipe relative to the plain picture (RX 6800M, SDXL 832x1216, AYS 12 + PAG 2 ~30 s): the measured pieces added up —
 # hires 1.5x ~80 s at 14 steps (round 8: 8 steps give the same picture, ~46 s), face pass ~20 s, eye pass ~13 s at 10 steps (8 steps ~10 s) (laptop heat-soaked: a cool one is faster).
 # Round 8, stage seconds under cool 1.5 (Turbo, 1 plain base = 60 s): the Full body chain 222 s with 14 + 10 steps, 168 s with hires 8 (0.76x), 165 s with hires 10 + eyes 8.
 # Round 9 (Manual / AC, cool 1.5), whole chain / the plain base of the same seed: Full body 8 + 8 steps 2.7x (hassakuXL's round-8 chain 2.8x), 14 + 10 steps 3.8x; Wide shot 8 + 8 3.25-3.57x, 14 hires + 8 eye steps 4.1-4.6x (mean 4.35).
-TIME_FACTOR = {"Portrait": 1.3, "Cowboy shot": 1.3, "Full body": 3.0, "Wide shot": 4.5, "Full body — max detail": 4.5, "Wide shot — max detail": 5.8}
+TIME_FACTOR = {"Portrait": 1.3, "Cowboy shot": 1.3, "Full body": 3.0, "Wide shot": 4.5, "Full body — max detail": 4.5, "Wide shot — max detail": 5.8, "Cowboy shot — hands": 2.0, "Full body — hands": 3.7}
 
 # framing tags, widest first (a prompt with several takes the widest); no tag at all → the middle recipe
 _FRAMES = (

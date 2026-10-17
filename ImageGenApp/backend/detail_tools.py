@@ -446,12 +446,68 @@ def detect_hands(image: Image.Image, max_hands: int = 6, conf: float = _HAND_CON
     return keep[: max(0, int(max_hands))]
 
 
+# Round 30: confirm each hand box before re-drawing it. The detector's boxes include things that are not hands — a forearm or elbow, a hip, a nose, a shoe: 7 of the 86 boxes of the round-29 survey, scores 0.52-0.77,
+# so a score threshold alone cannot drop them (two scored 0.73 / 0.77). A SECOND LOOK — the same detector run again on the box + context (the crop x 2.4 of the box side) — finds nothing at all in all 7 of them
+# (score 0.00) while it finds 12 of 12 broken real hands of the survey (0.47-0.82) and 14 of 18 of the round-30 sample (the other four are mitten fists the detector does not recognise as a hand in context).
+# So a box is confirmed when the second look finds a hand overlapping it with a score >= HAND_CONFIRM_MIN, OR when the first look is very sure (a score >= HAND_SURE_SCORE) and the box is not tiny next to the
+# face (>= HAND_SURE_AREA of its area; the non-hand boxes with a high score were small). On the 157 rated boxes (7 not hands, 30 broken, 120 good): 0 of 7 non-hand boxes confirmed, 29 of 30 broken confirmed.
+HAND_CONFIRM_SCALE = 2.4
+HAND_CONFIRM_MIN = 0.30
+HAND_SURE_SCORE = 0.75
+HAND_SURE_AREA = 0.12
+
+
+def hand_confirmed(image: Image.Image, box, scale: float = HAND_CONFIRM_SCALE, min_score: float = HAND_CONFIRM_MIN, *,
+                   score: float | None = None, face=None) -> bool:
+    """True when the hand detector, run again on `box` + context (the box side x `scale`), finds a hand overlapping it with a score >= `min_score`;
+    or when `score` (the box's first-look score) is >= HAND_SURE_SCORE and, given the `face` box, the hand is not tiny next to it (area >= HAND_SURE_AREA of the face's).
+    Without the detector the box is taken as it is (True)."""
+    sess = _hand_session()
+    if sess is None:
+        return True
+    x1, y1, x2, y2 = box
+    if score is not None and score >= HAND_SURE_SCORE:
+        if face is None or (x2 - x1) * (y2 - y1) >= HAND_SURE_AREA * max(1, (face[2] - face[0]) * (face[3] - face[1])):
+            return True
+    cx, cy, s = (x1 + x2) / 2, (y1 + y2) / 2, max(x2 - x1, y2 - y1) * scale
+    left, top = int(cx - s / 2), int(cy - s / 2)
+    crop = image.crop((left, top, int(cx + s / 2), int(cy + s / 2))).convert("RGB")
+    for (bx1, by1, bx2, by2), sc in _yolo_run(sess, crop, 0.05):
+        if sc >= min_score and _iou((bx1 + left, by1 + top, bx2 + left, by2 + top), tuple(box)) >= 0.3:
+            return True
+    return False
+
+
+def confirmed_hands(image: Image.Image, boxes) -> list:
+    """The boxes of `boxes` that pass `hand_confirmed` (first-look scores and the biggest anime face come from the same detectors)."""
+    boxes = list(boxes)
+    sess = _hand_session()
+    if not boxes or sess is None:
+        return boxes
+    raw = _yolo_run(sess, image, _HAND_CONF)
+    face = None
+    try:
+        fc = detect_faces(image, "anime", 4) if _face_model_cached() else []
+        if fc:
+            face = max(fc, key=lambda f: (f[2] - f[0]) * (f[3] - f[1]))
+    except Exception:
+        face = None
+    keep = []
+    for b in boxes:
+        sc = max([s for bb, s in raw if _iou(bb, b) >= 0.5] or [0.0])
+        if hand_confirmed(image, b, score=sc, face=face):
+            keep.append(b)
+    return keep
+
+
 def hand_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, denoise: float = 0.35,
                 steps: int = 20, cfg: float = 7.0, seed: int = -1, scheduler: str = "DPM++ 2M Karras",
-                clip_skip: int = 1, hand_prompt: str = "", max_hands: int = 6,
+                clip_skip: int = 1, hand_prompt: str = "", max_hands: int = 6, confirm: bool = True,
                 step_callback=None) -> tuple[Image.Image, int]:
-    """Re-draw each detected hand at native resolution. Returns (image, hands fixed)."""
+    """Re-draw each detected hand at native resolution. Returns (image, hands fixed). `confirm`: only boxes that pass the second look (`hand_confirmed`) are re-drawn."""
     hands = detect_hands(image, max_hands)
+    if confirm:
+        hands = confirmed_hands(image, hands)
     if not hands:
         return image, 0
     from backend.sampling import uniform_variant

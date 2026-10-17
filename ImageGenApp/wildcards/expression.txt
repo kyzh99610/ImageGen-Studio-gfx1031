@@ -13,6 +13,6 @@ crying, streaming tears, sad
 angry, furrowed brow, clenched teeth
 embarrassed, blush, wavy mouth, sweatdrop
 tongue out, :p
-drowsy, heavy-lidded eyes, half-closed eyes
+(sleepy:1.2), (half-closed eyes:1.3), drowsy
 expressionless
 grin

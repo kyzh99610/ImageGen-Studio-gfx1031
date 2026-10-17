@@ -318,7 +318,7 @@ def parameters_html() -> str:
              "in 6 of 44 crops, with the hand-only prompt in none) and fixed 5 of 9 broken hands at 0.35, 6 of 9 at 0.7 (the whole prompt: 4 of 9 at 0.35, 0.5 and 0.7); 13 of 13 good hands stayed good. "
              "The usual SDXL failure is the second hand — a mitten fist or a glove blob while the gesturing hand is fine (peace sign 3 of 6 pictures, reaching 3 of 6, looking back 2 of 5) — "
              "and 🖐 Re-draw hand does the job there: a plausible hand in 20 of 27 single tries (74 %), at least one in three tries for 8 of 9 hands; gesture words (“v, peace sign, index and middle finger raised …”) "
-             "did not help (71 % against 81 % on the same 7 hands), a hires pass first fixed 3 of 9. One rater, 9 hands: a direction, not a number.",
+             "did not help (71 % against 81 % on the same 7 hands), a hires pass first fixed 3 of 9. One rater, 9 hands: a direction, not a number. Round 30 (71 hands in the five worst poses, 18 broken, rated blind before / after; one pass at 0.7 with the hand-only prompt): 0 of 53 good hands made worse, 8 of 18 broken hands fixed. Every box is now confirmed before it is redrawn: the detector also boxes forearms, elbows, hips, noses and shoes (7 of 86 boxes in the round-29 survey, scores 0.52–0.77), which a score threshold cannot separate — a second look with the same detector on the box and its surroundings finds nothing in all 7 and a hand in 12 of 12 broken real hands of that survey (14 of 18 of the new sample; the rest are mitten fists the detector does not recognise in context, and a box the first look is very sure of — score ≥ 0.75, not tiny next to the face — is confirmed too): 0 of 7 non-hand boxes redrawn, 29 of 30 broken hands kept. The Polish dropdown has opt-in “— hands” entries.",
              _cn("对手部做同样的重绘（动漫手部检测，手套也算），在脸部之前进行：0.35 清理手指。实测 11 只真正画坏的手：0.35–0.55 约一半能把团块/连指拳变成有手形的拳头，"
                  "但从未修正手指数量或缠在一起的双手；0.8 重画 10 只中有 2 只得到正确的手（另有 4 只合理但手套/道具/姿势变了），1.0 会凭空画出物品。"
                  "手画坏了：先换种子，或用 Inpaint 框里的 🖐 重画手部（涂抹那只手，或不涂抹让它取最大的检测到的手）：用只含手部的提示词在 0.7 下重画多次，每次不同种子，原图在前、各次结果在后，挑一张喜欢的。"
@@ -331,7 +331,7 @@ def parameters_html() -> str:
                  "（之前用整个场景的提示词：0.5 以上会往手的框里画出多余的东西——发饰蝴蝶、水滴、甚至一个小人——44 张裁剪图中 6 张，改用手部提示词后为 0 张），"
                  "9 只坏手在 0.35 下修好 5 只，0.7 下 6 只（整个提示词：0.35 / 0.5 / 0.7 都是 4 只）；13 只好手全部保持完好。SDXL 常见的问题是另一只手——手势那只没问题，另一只变成连指拳或手套团块"
                  "（比耶 6 张中 3 张、伸手 6 张中 3 张、回头 5 张中 2 张），这时用 🖐 重画手部：27 次单次中 20 次得到合理的手（74 %），9 只手中 8 只在 3 次内至少有一次；"
-                 "加手势词（“v, peace sign, 食指和中指竖起…”）没有帮助（同样 7 只手 71 % 对 81 %），先做 hires 只修好 9 只中的 3 只。只有一个评分者、9 只手：看方向，不要看数字。")],
+                 "加手势词（“v, peace sign, 食指和中指竖起…”）没有帮助（同样 7 只手 71 % 对 81 %），先做 hires 只修好 9 只中的 3 只。只有一个评分者、9 只手：看方向，不要看数字。第 30 轮（五种最难姿势共 71 只手，18 只坏手，前后盲评；只含手部提示词、0.7、一次）：53 只好手没有变差，18 只坏手修好 8 只。重绘前每个框都会先确认：检测器也会框到前臂、手肘、髋部、鼻子和鞋子（第 29 轮 86 个框里有 7 个，分数 0.52–0.77，分数阈值分不开），对框和周围区域再检测一次，7 个都检测不到，而第 29 轮 12 只坏手全部能检测到（新样本 18 只里 14 只；其余是检测器在上下文中认不出的连指拳；首次检测分数 ≥ 0.75 且框不比脸小太多的也算确认）：7 个非手框 0 个被重绘，30 只坏手保留 29 只。高清修复的下拉框里有可选的“— 手部”方案。")],
             ["👁 Eye detail",
              "Finds the eyes (anime eye detector, on each face) and re-draws both eyes of a face in one pass at high "
              "resolution, after the face pass, with a prompt of only the eye tags (colour, gaze, expression, glasses…) plus “detailed eyes, "
@@ -391,7 +391,9 @@ def parameters_html() -> str:
              "Eye detail is skipped on Pony models (it blurs them). Measured (2 seeds each): at a cowboy shot "
              "(face 24–28 %) nothing in the chain changes identity — it is insurance; for a full body the plain face is often damaged and hires 1.5× + eyes "
              "fixes it best (identity score 0.937 → 0.967, the hair pin .42 → .90, face ×1.3 sharper) — the face pass on top of hires adds nothing. "
-             "Hands are left out: the hand pass cleans texture but never fixed a finger count. Change any control afterwards. "
+             "Hands are left out of the framing recipes (the hand pass at 0.35 cleans texture but never fixed a finger count). The opt-in <b>Cowboy shot — hands</b> and <b>Full body — hands</b> entries add one hand pass at 0.7 with the hand-only prompt "
+             "(round 30, SDXL, 71 hands in the worst poses — reaching toward the viewer, peace sign, arms up, sitting cross-legged, hand on cheek — rated blind before / after): 0 of 53 good hands made worse, 8 of 18 broken ones (mitten fists, blobs) fixed "
+             "in one pass, +~15 s per hand; 🖐 Re-draw hand with several tries fixes more (74 % per try). Boxes that are not hands (a forearm, a hip, a nose) are skipped by a second look. Change any control afterwards. "
              "<b>Full body — max detail</b> (round 14) is the Full body recipe plus 🔬 Max detail: a Real-ESRGAN 2× of the finished picture right before the eye pass, so a full-body face's eyes (~70 px) are drawn on twice the pixels; "
              "the picture comes out 2496×3648 instead of 1248×1824. Measured on hassakuXL and waiIllustrious, 3 seeds each, at the same display size: eye detail ×7 (Laplacian energy of the eye boxes), face sharpness ×1.7, the whole picture's "
              "line energy ×1.9 (crisper), identity unchanged (CCIP +0.004), +49 % time, VRAM peak 10.3 of 12 GB with no spill; a plain Lanczos 2× before the eye pass is free but gives only ×2, a 2× + tiled SD detail pass 0.3 was 2.7× the time and softer. "
@@ -404,7 +406,8 @@ def parameters_html() -> str:
                  "高清修复降噪 0.40 略差于 0.45，底图 10 步或关闭 PAG 并不是免费的（身份 −0.02 / 发饰 −0.09～−0.19）。"
                  "实测（各 2 个种子）：牛仔镜头（脸宽 24–28%）整条链几乎不改变相似度，只是保险；全身图的原始脸常有损坏，高清修复 1.5×+眼睛修得最好"
                  "（相似度 0.937→0.967，发饰 .42→.90，脸部清晰度 ×1.3），在其上再做脸部重绘没有额外收益。"
-                 "不含手部重绘（只改善纹理，不能修正手指数）。之后仍可调整任何控件。"
+                 "构图方案不含手部重绘（0.35 只改善纹理，不能修正手指数）；可选的“牛仔镜头 — 手部”和“全身 — 手部”再加一次 0.7 的手部重绘（只含手部的提示词；第 30 轮，SDXL，最难的姿势——伸手、比耶、举手、盘腿坐、托腮——共 71 只手，前后盲评）："
+                 "53 只好手没有变差，18 只坏手（连指拳、团块）一次修好 8 只，每只手约多 15 秒；用 🖐 重画手部多试几次更好（每次 74 %）。不是手的框（前臂、髋部、鼻子）会被二次检测跳过。之后仍可调整任何控件。"
                  "“全身 — 最大细节”（第 14 轮）= 全身方案 + 🔬 最大细节：在眼部重绘之前把成图用 Real-ESRGAN 放大 2×，让全身脸的眼睛（约 70 像素）有两倍像素可画；图片变为 2496×3648（原 1248×1824）。"
                  "实测（hassakuXL 与 waiIllustrious 各 3 个种子，相同显示尺寸）：眼部细节 ×7，脸部清晰度 ×1.7，整图线条能量 ×1.9（更利落），相似度不变（CCIP +0.004），耗时 +49%，显存峰值 10.3/12 GB 无溢出；"
                  "仅用 Lanczos 2× 再重绘眼睛免费但只有 ×2，2× 加分块 SD 细节 0.3 慢 2.7 倍且更软。复选框在“脸与手细节”里眼部控件下方；PNG 约大 4 倍（约 6 MB，原 1.5 MB）。"
