@@ -6041,7 +6041,7 @@ def _():
     from PIL import Image
     from backend import pose_control as pc
     tmp = Path(tempfile.mkdtemp())
-    with patch.object(pc, "POSES_DIR", tmp / "poses"), patch.object(pc, "CONTROLNET_DIR", tmp / "cn"), patch.object(pc, "DETECTOR_DIR", tmp / "det"):
+    with patch.object(pc, "POSES_DIR", tmp / "poses"), patch.object(pc, "STARTER_DIR", tmp / "no_starters"), patch.object(pc, "CONTROLNET_DIR", tmp / "cn"), patch.object(pc, "DETECTOR_DIR", tmp / "det"):
         # strengths and names
         assert pc.clamp_strength(None) == 0.8 and pc.clamp_strength("x") == 0.8 and pc.clamp_strength(float("nan")) == 0.8
         assert pc.clamp_strength(0.1) == 0.4 and pc.clamp_strength(3) == 1.0 and pc.clamp_strength(0.6) == 0.6
@@ -6226,7 +6226,7 @@ def _():
     assert m_txt["pose_control"] == {"model": "some_model", "strength": 0.6, "legs": "hidden"}, m_txt
     assert "Pose control" in format_png_info_html(m_txt)
     tmp = Path(tempfile.mkdtemp())
-    with patch.object(pc, "POSES_DIR", tmp / "poses"):
+    with patch.object(pc, "POSES_DIR", tmp / "poses"), patch.object(pc, "STARTER_DIR", tmp / "no_starters"):
         plan = _app._restore_plan(meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1"))
         assert plan["pose_control"]["model"] == "xinsir_openpose_sdxl_1.0" and "pose control" in _app._plan_summary(plan)
         ups = _app._plan_extra_updates(plan)
@@ -6283,7 +6283,7 @@ def _():
     _app.sd, _app.OUTPUTS_DIR = FakeSD(), tmp / "outputs"
     _app.OUTPUTS_DIR.mkdir()
     try:
-        with patch.object(pc, "POSES_DIR", tmp / "poses"), patch.object(pc, "CONTROLNET_DIR", tmp / "cn"):
+        with patch.object(pc, "POSES_DIR", tmp / "poses"), patch.object(pc, "STARTER_DIR", tmp / "no_starters"), patch.object(pc, "CONTROLNET_DIR", tmp / "cn"):
             pc.save_pose("v-sign", pose, pc.preview_of_pose(pose))
             mdir = tmp / "cn" / pc.DEFAULT_MODEL
             mdir.mkdir(parents=True); (mdir / "config.json").write_text("{}"); (mdir / "m.safetensors").write_bytes(b"x")
@@ -6382,7 +6382,7 @@ def _():
     tmp = Path(tempfile.mkdtemp())
     pose = {"v": 1, "size": [100, 150], "body": [[10.0 + 2 * i, 8.0 + 3 * i, 0.9] for i in range(18)], "lh": [], "rh": []}
     pic = Image.new("RGB", (100, 150), (120, 120, 120))
-    with patch.object(pc, "POSES_DIR", tmp / "poses"):
+    with patch.object(pc, "POSES_DIR", tmp / "poses"), patch.object(pc, "STARTER_DIR", tmp / "no_starters"):
         assert "Upload" in ext(None, False)[2]
         with patch.object(pc, "extract", side_effect=FileNotFoundError("missing")):
             out = ext(pic, False)
@@ -6407,6 +6407,182 @@ def _():
             assert "Download failed" in out[0] and "offline" in out[0]
         with patch.object(pc, "download_dwpose", return_value="DWPose files ready."), patch.object(pc, "download_model", return_value="m ready (Apache-2.0)"):
             assert "ready" in dl("DWPose skeleton files (351 MB)")[0] and "ready" in dl(pc.DEFAULT_MODEL + " (2.4 GB, Apache-2.0)")[0]
+
+
+@test("🧍 Starter poses (round 35): the shipped files are keypoints only (no picture, no name), they are listed with a ★ after the user's poses, load with a hash, can't be overwritten or deleted, build a control, and a record naming one finds it again")
+def _():
+    import json as _j, tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    import numpy as np
+    from backend import pose_control as pc
+    real = sorted(pc.STARTER_DIR.glob("*.json"))
+    assert len(real) >= 12, real                                                                    # the shipped set (round 35: 12-16 poses)
+    for f in real:
+        d = _j.loads(f.read_text(encoding="utf-8"))
+        assert d.get("title") and len(d["body"]) == 18 and len(d["size"]) == 2 and len(d["lh"]) in (0, 21) and len(d["rh"]) in (0, 21), f.name
+        assert all(len(k) == 3 for k in d["body"]) and not any(k in d for k in ("image", "picture", "file", "source")), f.name       # keypoints only
+        text = f.read_text(encoding="utf-8").lower()
+        assert not any(w in text for w in ("heroine", "azur")), f.name                                        # generic: no character name anywhere
+        assert (pc.STAR + d["title"]) in pc.starter_poses(), f.name
+    assert not list(pc.STARTER_DIR.glob("*.png")) and not list(pc.STARTER_DIR.glob("*.jp*"))                                         # no source pictures
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "starters").mkdir()
+    for title, stem in (("reach toward viewer — cowboy", "reach_cowboy"), ("a hand on hip", "hand_on_hip")):
+        body = [[10.0 + 3 * i, 8.0 + 2 * i, 0.9] for i in range(18)]
+        (tmp / "starters" / f"{stem}.json").write_text(_j.dumps({"v": 1, "title": title, "size": [200, 300], "body": body, "lh": [], "rh": []}))
+    (tmp / "starters" / "broken.json").write_text("{not json")
+    (tmp / "cn" / pc.DEFAULT_MODEL).mkdir(parents=True)
+    (tmp / "cn" / pc.DEFAULT_MODEL / "config.json").write_text("{}"); (tmp / "cn" / pc.DEFAULT_MODEL / "w.safetensors").write_bytes(b"x")
+    with patch.object(pc, "STARTER_DIR", tmp / "starters"), patch.object(pc, "POSES_DIR", tmp / "poses"), patch.object(pc, "CONTROLNET_DIR", tmp / "cn"):
+        assert pc.starter_poses() == {"★ a hand on hip": "hand_on_hip", "★ reach toward viewer — cowboy": "reach_cowboy"}                  # a broken file is skipped
+        body = [[1.0 * i, 2.0 * i, 0.9] for i in range(18)]
+        pc.save_pose("mine", {"v": 1, "size": [100, 100], "body": body, "lh": [], "rh": []})
+        pc.save_pose(pc.CURRENT, {"v": 1, "size": [100, 100], "body": body, "lh": [], "rh": []})
+        assert pc.list_poses() == [pc.CURRENT, "mine", "★ a hand on hip", "★ reach toward viewer — cowboy"], pc.list_poses()           # the user's first, the starters last
+        p = pc.load_pose("★ a hand on hip")
+        assert p["size"] == [200, 300] and len(p["body"]) == 18 and p["hash"] == pc.pose_hash(p) and pc.load_pose("★ nothing") is None
+        assert pc.preview_of("★ a hand on hip") is not None
+        for bad in ("★ mine", "★"):
+            try:
+                pc.save_pose(bad, p); raise AssertionError("a ★ name is reserved")
+            except ValueError as e:
+                assert "★" in str(e)
+        assert pc.delete_pose("★ a hand on hip") is False and "★ a hand on hip" in pc.list_poses()
+        ctl, rec, err = pc.build_control(dict(pc_pose="★ a hand on hip", pc_model="", pc_strength=0.8, pc_legs=False), 64, 96)
+        assert not err and ctl["image"].size == (64, 96) and rec["pose"] == "★ a hand on hip" and rec["source"] == p["hash"] and rec["keypoints"]["body"] == p["body"]
+        assert pc.ensure_pose_from_record({"pose": "★ a hand on hip", "keypoints": rec["keypoints"]}) == "★ a hand on hip"            # a record naming a starter finds it again
+        moved = dict(rec["keypoints"], body=[[x + 5, y, s] for x, y, s in p["body"]])
+        assert pc.ensure_pose_from_record({"pose": "★ a hand on hip", "keypoints": moved}).startswith("restored_")                       # ... unless its keypoints differ (an edited starter)
+        assert "★" not in "".join(pc.list_poses()[:2])
+
+
+@test("🧍 Pose model kept across a batch (round 35): kept only when asked and the pass succeeded, released by a Stop, an error, a pass without the pose (hires / detail / plain), the idle timer and a model unload; never while a pass runs")
+def _():
+    import time, types
+    from unittest.mock import patch
+    from PIL import Image
+    from diffusers import EulerDiscreteScheduler
+    from backend import sampling
+
+    class Unet:
+        dtype = None
+        def __init__(self): self.procs = {"a": 1}
+        @property
+        def attn_processors(self): return dict(self.procs)
+        def set_attn_processor(self, p): self.procs = dict(p)
+        def enable_freeu(self, **k): pass
+        def disable_freeu(self): pass
+
+    class Target:
+        def __init__(self, tag, fail=False): self.tag, self.fail, self.calls, self.scheduler, self.unet = tag, fail, [], EulerDiscreteScheduler(), Unet()
+        def __call__(self, prompt_embeds=None, image=None, controlnet_conditioning_scale=None, control_guidance_start=None, control_guidance_end=None, num_inference_steps=1):
+            self.calls.append(image)
+            if self.fail:
+                raise RuntimeError("boom")
+            return self.tag
+    plain = Target("plain"); plain.text_encoder_2 = object()
+    builds = []
+
+    def fake_target(sdp, pipe, ctl):
+        if getattr(sdp, "_cn_cache", None) is None:
+            builds.append(1)
+            sdp._cn_cache = {"model": ctl["model"]}
+        return Target("control", fail=ctl.get("fail"))
+    img = Image.new("RGB", (8, 8))
+    mk = lambda: types.SimpleNamespace(boosters={}, prediction={}, control=None, _cn_cache=None)
+    ctl = lambda **k: dict({"image": img, "scale": 0.8, "model": "m", "keep": True}, **k)
+    with patch.object(sampling, "_control_target", fake_target), patch.object(sampling, "CONTROL_IDLE_S", 30.0):
+        sdp = mk()
+        sdp.control = ctl()
+        assert sampling.run_pipe(sdp, plain, "txt2img", prompt_embeds=1) == "control" and sdp._cn_cache is not None and builds == [1]          # asked to keep: kept
+        assert sampling.run_pipe(sdp, plain, "txt2img", prompt_embeds=1) == "control" and builds == [1] and sdp._cn_cache is not None             # the next picture reuses it (no second build)
+        sdp.control = None
+        assert sampling.run_pipe(sdp, plain, "img2img", prompt_embeds=1) == "plain" and sdp._cn_cache is None                                      # hires / a detail pass / a plain picture: released first
+        sdp.control = ctl(keep=False)
+        sampling.run_pipe(sdp, plain, "txt2img", prompt_embeds=1)
+        assert sdp._cn_cache is None                                                                                                               # a picture with later passes: today's behaviour
+        sdp.control = ctl(fail=True)
+        try:
+            sampling.run_pipe(sdp, plain, "txt2img", prompt_embeds=1); raise AssertionError
+        except RuntimeError:
+            pass
+        assert sdp._cn_cache is None and sdp._cn_busy is False and getattr(sdp, "_cn_timer", None) is None                                          # an error releases it
+        sdp.control = ctl()
+        with patch.object(sampling, "should_stop", lambda: True):
+            sampling.run_pipe(sdp, plain, "txt2img", prompt_embeds=1)
+        assert sdp._cn_cache is None                                                                                                               # a Stop releases it
+        # the idle timer (the end of a batch) and a pass that owns the model
+        with patch.object(sampling, "CONTROL_IDLE_S", 0.05):
+            sdp.control = ctl()
+            sampling.run_pipe(sdp, plain, "txt2img", prompt_embeds=1)
+            assert sdp._cn_cache is not None
+            time.sleep(0.5)
+            assert sdp._cn_cache is None and getattr(sdp, "_cn_timer", None) is None
+            sdp.control = ctl()
+            sampling.run_pipe(sdp, plain, "txt2img", prompt_embeds=1)
+            sdp._cn_busy = True
+            time.sleep(0.4)
+            assert sdp._cn_cache is not None                                                                                                       # a running pass is never pulled from under
+            sdp._cn_busy = False
+            sampling.release_control(sdp)
+            assert sdp._cn_cache is None
+        # a model unload drops the cache and the control
+        from backend.sdxl_pipeline import SDXLPipeline
+        p = SDXLPipeline()
+        p._cn_cache, p.control = {"x": 1}, {"image": img}
+        p._unload()
+        assert p._cn_cache is None and p.control is None
+
+
+@test("🧍 Pose model kept (round 35) in a real Generate run: a plain pose picture asks to keep the model, a picture with hires / hand / face / eye / max-detail passes does not; the batch loops reach the same do_generate")
+def _():
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    from PIL import Image
+    from backend import pose_control as pc
+    _app, dg, _hp = _app_closures()
+    tmp = Path(tempfile.mkdtemp())
+    seen = []
+    body = [[10.0 + 3 * i, 8.0 + 2 * i, 0.9] for i in range(18)]
+
+    class FakeSD:
+        model_family, current_model, _last_vae_path, prediction, device = "illustrious", "x.safetensors", None, {}, "cuda:0"
+        _lora_adapters, boosters, last_seeds, last_var_seeds, pipe = {}, {}, [], [], object()
+        control = None
+
+        def txt2img(self, prompt, neg, w, h, steps, cfg, seed, sched, batch, step_callback=None, **kw):
+            seen.append(dict(self.control or {}))
+            self.last_seeds = [seed + i for i in range(batch)]
+            _app._generation_abort.set()               # Stop right after the first pass: the later passes (detectors, downloads) never start
+            return [Image.new("RGB", (w, h), (seed % 255, 40, 90)) for _ in range(batch)], "info"
+    old = (_app.sd, _app.OUTPUTS_DIR)
+    _app.sd, _app.OUTPUTS_DIR = FakeSD(), tmp / "outputs"
+    _app.OUTPUTS_DIR.mkdir()
+    try:
+        with patch.object(pc, "POSES_DIR", tmp / "poses"), patch.object(pc, "CONTROLNET_DIR", tmp / "cn"), patch.object(pc, "STARTER_DIR", tmp / "none"):
+            pc.save_pose("p", {"v": 1, "size": [256, 384], "body": body, "lh": [], "rh": []})
+            m = tmp / "cn" / pc.DEFAULT_MODEL
+            m.mkdir(parents=True); (m / "config.json").write_text("{}"); (m / "w.safetensors").write_bytes(b"x")
+            base = dict(pc_on=True, pc_pose="p", pc_strength=0.8)
+            assert pc.KEEP_RESIDENT is False                                                              # measured: it spilled on 12 GB, so the shipped default is today's release after every picture
+            pc.KEEP_RESIDENT = True
+            for extra, keep in ((base, True), (dict(base, hires_on=True), False), (dict(base, hd_on=True), False), (dict(base, fd_on=True), False),
+                                (dict(base, ed_on=True), False), (dict(base, md_on=True), False)):
+                seen.clear(); _app._generation_abort.clear()
+                with patch.object(_app, "_thermal_wait", lambda *a, **k: 0.0):
+                    dg("1girl", "bad", "Euler a", 4, 6.0, 256, 384, 1, 5, None, 0.5, False, extra=extra, progress=lambda *a, **k: None)
+                assert seen and seen[0].get("keep") is keep, (extra, seen)
+            pc.KEEP_RESIDENT = False
+            seen.clear(); _app._generation_abort.clear()
+            with patch.object(_app, "_thermal_wait", lambda *a, **k: 0.0):
+                dg("1girl", "bad", "Euler a", 4, 6.0, 256, 384, 1, 5, None, 0.5, False, extra=base, progress=lambda *a, **k: None)
+            assert seen and seen[0].get("keep") is False, seen                                              # default: never kept
+    finally:
+        pc.KEEP_RESIDENT = False
+        _app._generation_abort.clear()
+        _app.sd, _app.OUTPUTS_DIR = old
 
 
 # ══════════════════════════════════════════════════════════════════════════

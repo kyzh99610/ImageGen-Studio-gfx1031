@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import struct
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -443,8 +444,37 @@ def _control_target(sdp, pipe, ctl: dict):
     return cache["pipe"]
 
 
+CONTROL_IDLE_S = 30.0               # a kept pose model is released after this long without another pose-controlled pass (the end of an X/Y / Auto-Loop / outfit batch)
+_CN_LOCK = threading.Lock()
+
+
+def _cancel_idle(sdp) -> None:
+    t = getattr(sdp, "_cn_timer", None)
+    if t is not None:
+        t.cancel()
+        sdp._cn_timer = None
+
+
+def _idle_release(sdp) -> None:
+    with _CN_LOCK:
+        if getattr(sdp, "_cn_busy", False):
+            return                                              # a pass has just started: it owns the model now
+        sdp._cn_timer = None
+    release_control(sdp)
+
+
+def _schedule_idle_release(sdp) -> None:
+    """Keep the pose model for the next picture of a batch, but not for ever: the timer releases it."""
+    _cancel_idle(sdp)
+    t = threading.Timer(CONTROL_IDLE_S, _idle_release, [sdp])
+    t.daemon = True
+    sdp._cn_timer = t
+    t.start()
+
+
 def release_control(sdp) -> None:
     """Drop the ControlNet pipeline and model (and their VRAM)."""
+    _cancel_idle(sdp)
     if getattr(sdp, "_cn_cache", None) is None:
         return
     sdp._cn_cache = None
@@ -472,9 +502,18 @@ def run_pipe(sdp, pipe, kind: str, **call):
         unet.enable_freeu(**_FREEU[xl])
     target = pipe
     ctl = getattr(sdp, "control", None) if (kind == "txt2img" and xl) else None
+    if not ctl and getattr(sdp, "_cn_cache", None) is not None:
+        release_control(sdp)                  # round 35: a pass without the pose (hires, a detail pass, a plain picture, inpaint) frees the kept pose model first
     if ctl:
         # 🧍 Pose control (round 34): the SDXL ControlNet pipeline on the same modules. PAG is never combined with it (the pair reserved 12.7 GB on a 12 GB card).
-        target = _control_target(sdp, pipe, ctl)
+        with _CN_LOCK:
+            _cancel_idle(sdp)
+            sdp._cn_busy = True
+        try:
+            target = _control_target(sdp, pipe, ctl)
+        except BaseException:
+            sdp._cn_busy = False
+            raise
         call.update(image=ctl["image"], controlnet_conditioning_scale=float(ctl["scale"]),
                     control_guidance_start=float(ctl.get("start", 0.0)), control_guidance_end=float(ctl.get("end", 1.0)))
     elif b["pag"] > 0 and kind in ("txt2img", "img2img"):
@@ -499,9 +538,12 @@ def run_pipe(sdp, pipe, kind: str, **call):
     if (COOL["factor"] > 0 or thermal.GUARD["limit"]) and (
             "callback_on_step_end" in call or "callback_on_step_end" in _call_params(type(target))):
         call["callback_on_step_end"] = _cool_callback(call.get("callback_on_step_end"))
+    ran_ok = False
     try:
         with torch.no_grad():
-            return target(**call)
+            res = target(**call)
+        ran_ok = True
+        return res
     finally:
         if procs is not None:
             unet.set_attn_processor(procs)
@@ -509,4 +551,10 @@ def run_pipe(sdp, pipe, kind: str, **call):
             unet.disable_freeu()
         target = None
         if ctl:
-            release_control(sdp)          # the 2.5 GB pose model must not sit next to the hires / detail passes (10 GB peak on a 12 GB card)
+            sdp._cn_busy = False
+            # the 2.5 GB pose model must not sit next to the hires / detail passes (10 GB peak on a 12 GB card): the app asks to KEEP it (ctl["keep"], round 35) only when
+            # no later pass follows this picture, so the next picture of a batch reuses it; a Stop, an error or a pass that is not controlled releases it
+            if ctl.get("keep") and ran_ok and not (should_stop is not None and should_stop()):
+                _schedule_idle_release(sdp)
+            else:
+                release_control(sdp)

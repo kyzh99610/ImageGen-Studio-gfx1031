@@ -54,7 +54,7 @@ def build_section(ns, ls: dict) -> SimpleNamespace:
             extract_btn = gr.Button("🦴 Read skeleton from the picture", size="sm")
         with gr.Row():
             pose_dd = gr.Dropdown(pc.list_poses(), value=str(ls.get("pc_pose") or ""), allow_custom_value=True, label="Pose",
-                                  info=f"Saved poses (settings/poses) · “{pc.CURRENT}” = the picture above")
+                                  info=f"★ = built-in starter poses · your saved poses (settings/poses) · “{pc.CURRENT}” = the picture above")
             save_name = gr.Textbox(label="Save the chosen pose as…", placeholder="e.g. reaching, v-sign", max_lines=1, scale=1)
         with gr.Row():
             save_btn = gr.Button("💾 Save pose", size="sm")
@@ -111,6 +111,8 @@ def build_section(ns, ls: dict) -> SimpleNamespace:
         return gr.update(choices=pc.list_poses(), value=stem), _ok(f"Saved as “{stem}”.")
 
     def on_pose_delete(selected):
+        if pc.is_starter(selected):
+            return gr.update(), _warn("The ★ starter poses stay — save a copy under your own name to change it.")
         if not str(selected or "").strip() or not pc.delete_pose(selected):
             return gr.update(), _warn("Nothing to delete — choose a saved pose.")
         left = pc.list_poses()
