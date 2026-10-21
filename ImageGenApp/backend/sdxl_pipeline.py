@@ -880,6 +880,8 @@ class SDXLPipeline:
         # left in place it kept ~2.5 GB of VRAM after switching SD 1.5 → SDXL
         self._inpaint_pipe = None
         self._pag_pipes = None
+        self._cn_cache = None            # the pose-control ControlNet pipeline (backend/sampling.py)
+        self.control = None
         self.prediction = {}
         if getattr(self, "_snap", None) is not None:
             self._snap.close()

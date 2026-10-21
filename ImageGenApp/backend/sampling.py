@@ -428,6 +428,36 @@ def _cool_callback(orig):
     return cb
 
 
+def _control_target(sdp, pipe, ctl: dict):
+    """The SDXL ControlNet pipeline for `ctl["model"]` (a folder of models/controlnet/), built on the loaded pipe's own modules and cached until release_control()."""
+    import torch
+    from diffusers import ControlNetModel, StableDiffusionXLControlNetPipeline
+    unet = pipe.unet
+    cache = getattr(sdp, "_cn_cache", None)
+    if cache is None or cache.get("unet") is not unet or cache.get("path") != ctl["model"]:
+        release_control(sdp)
+        cn = ControlNetModel.from_pretrained(ctl["model"], torch_dtype=unet.dtype).to(unet.device)
+        tgt = StableDiffusionXLControlNetPipeline.from_pipe(pipe, controlnet=cn, torch_dtype=unet.dtype)
+        cache = sdp._cn_cache = {"unet": unet, "path": ctl["model"], "pipe": tgt}
+    cache["pipe"].scheduler = pipe.scheduler            # the sampler chosen for this run
+    return cache["pipe"]
+
+
+def release_control(sdp) -> None:
+    """Drop the ControlNet pipeline and model (and their VRAM)."""
+    if getattr(sdp, "_cn_cache", None) is None:
+        return
+    sdp._cn_cache = None
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def run_pipe(sdp, pipe, kind: str, **call):
     """Call a diffusers pipeline with PAG / FreeU / CFG rescale applied as set on `sdp`.
     kind: txt2img / img2img / inpaint (PAG isn't used for inpaint)."""
@@ -441,7 +471,13 @@ def run_pipe(sdp, pipe, kind: str, **call):
         _patch_fourier_filter()
         unet.enable_freeu(**_FREEU[xl])
     target = pipe
-    if b["pag"] > 0 and kind in ("txt2img", "img2img"):
+    ctl = getattr(sdp, "control", None) if (kind == "txt2img" and xl) else None
+    if ctl:
+        # 🧍 Pose control (round 34): the SDXL ControlNet pipeline on the same modules. PAG is never combined with it (the pair reserved 12.7 GB on a 12 GB card).
+        target = _control_target(sdp, pipe, ctl)
+        call.update(image=ctl["image"], controlnet_conditioning_scale=float(ctl["scale"]),
+                    control_guidance_start=float(ctl.get("start", 0.0)), control_guidance_end=float(ctl.get("end", 1.0)))
+    elif b["pag"] > 0 and kind in ("txt2img", "img2img"):
         cls = _pag_class(xl, kind)
         if cls is not None:
             cache = getattr(sdp, "_pag_pipes", None)
@@ -472,3 +508,5 @@ def run_pipe(sdp, pipe, kind: str, **call):
         if b["freeu"]:
             unet.disable_freeu()
         target = None
+        if ctl:
+            release_control(sdp)          # the 2.5 GB pose model must not sit next to the hires / detail passes (10 GB peak on a 12 GB card)

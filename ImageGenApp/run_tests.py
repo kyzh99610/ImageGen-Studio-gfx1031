@@ -2667,9 +2667,9 @@ def _():
         meta = read_image_metadata(f)
     assert meta["hand_detail"] == {"denoise": 0.45}, meta.get("hand_detail")
     ups = _app._plan_extra_updates(_app._restore_plan(meta))
-    assert ups[-6:-4] == [True, 0.45] and ups[8] is True, ups           # the colour strength is the last value since round 25
+    assert ups[-11:-9] == [True, 0.45] and ups[8] is True, ups           # the five pose-control values (round 34) and the colour strength (round 25) come last
     ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
-    assert ups0[-6] is False
+    assert ups0[-11] is False
 
 
 @test("Inpaint: NaN latents from an fp16 VAE encode (a NoobAI checkpoint's bf16-origin VAE) are retried once in fp32 and the need is remembered; NaN is never pasted")
@@ -2967,7 +2967,7 @@ def _():
         meta = read_image_metadata(f)
     assert meta["eye_detail"] == {"denoise": 0.3}, meta.get("eye_detail")
     ups = _app._plan_extra_updates(_app._restore_plan(meta))
-    assert ups[-4:-2] == [True, 0.3] and ups[-6:-4] == [True, 0.45] and ups[-2] is False and ups[-1] == 1.0, ups
+    assert ups[-9:-7] == [True, 0.3] and ups[-11:-9] == [True, 0.45] and ups[-7] is False and ups[-6] == 1.0, ups
     assert "eye detail" in _app._plan_summary(_app._restore_plan(meta))
 
 
@@ -4551,10 +4551,10 @@ class _BatchEnv:
             args[22], args[24] = i2i_image, True                  # the init picture and 'Use img2img'
         return list(self.cb(*args, progress=lambda *a, **k: None, **extra))
 
-    def run_xy(self, x_axis, x_vals):
+    def run_xy(self, x_axis, x_vals, pose=""):
         args = ["x.safetensors", "none", "none", 0.7, "none", 0.7, "none", 0.7, False, "1girl", "bad", "Euler a", 4, 6.0,
                 64, 64, 1, 5, None, 0.5, False, 1, -1, 0.0, False, 1.5, 0.45, 14, "Lanczos", False, 0.35, "auto", "",
-                0.0, False, 0.0, False, 0.35, False, 0.35, False, 1.0, x_axis, x_vals, "none", ""]
+                0.0, False, 0.0, False, 0.35, False, 0.35, False, 1.0, False, pose, 0.8, "", False, x_axis, x_vals, "none", ""]
         return self.xy(*args, progress=lambda *a, **k: None)
 
 
@@ -5114,8 +5114,8 @@ def _():
     assert "Max detail: 2× Real-ESRGAN" in txt and "Eye detail: denoise 0.4" in txt, txt
     m_rec = meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1")                       # the record (exact restore)
     plan = _app._restore_plan(m_rec)
-    assert plan["max_detail"] and _app._plan_extra_updates(plan)[-2] is True and "max detail" in _app._plan_summary(plan), plan
-    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-2] is False and _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-1] == 1.0
+    assert plan["max_detail"] and _app._plan_extra_updates(plan)[-7] is True and "max detail" in _app._plan_summary(plan), plan
+    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-7] is False and _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-6] == 1.0
     m_txt = meta_of(parameters="1girl\nSteps: 12, Seed: 1, Max detail: 2× Real-ESRGAN, Eye detail: denoise 0.4")   # the A1111 text alone
     assert m_txt.get("max_detail") == {"scale": 2, "method": "Real-ESRGAN (ONNX)"}, m_txt
     # the pass: twice the size per picture (the Real-ESRGAN call is replaced by a resize), the session is released, > 64 MP refused
@@ -5180,8 +5180,8 @@ def _():
                 return read_png_info(im)
     m_rec = meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1")
     plan = _app._restore_plan(m_rec)
-    assert plan["colour"] == {"strength": 0.8, "method": "lab-chroma"} and _app._plan_extra_updates(plan)[-1] == 0.8 and "colour strength 0.8" in _app._plan_summary(plan), plan
-    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-1] == 1.0
+    assert plan["colour"] == {"strength": 0.8, "method": "lab-chroma"} and _app._plan_extra_updates(plan)[-6] == 0.8 and "colour strength 0.8" in _app._plan_summary(plan), plan
+    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-6] == 1.0
     m_txt = meta_of(parameters="1girl\nSteps: 12, Seed: 1, Colour strength: 0.7")                                       # the A1111 text alone
     assert m_txt.get("colour") == {"strength": 0.7, "method": "lab-chroma"}, m_txt
     from backend.png_info import format_png_info_html
@@ -6030,6 +6030,383 @@ def _():
         assert not shipped(rel), f"{rel} would ship"
     for rel in ("app.py", "config.py", "backend\\detail_tools.py", "wildcards\\outfit.txt", "download_models.py", "README.md", "requirements.txt", "install.bat", "launch.bat", "run_zluda.bat"):
         assert shipped(rel), f"{rel} would be left out"
+
+
+@test("🧍 Pose control (round 34): saved poses, rendering (legs hidden, aspect fit, image poses), extraction on fake ORT sessions, the control built from a pose, pinned downloads, nothing private in the public files")
+def _():
+    import hashlib, tempfile, types
+    from pathlib import Path
+    from unittest.mock import patch
+    import numpy as np
+    from PIL import Image
+    from backend import pose_control as pc
+    tmp = Path(tempfile.mkdtemp())
+    with patch.object(pc, "POSES_DIR", tmp / "poses"), patch.object(pc, "CONTROLNET_DIR", tmp / "cn"), patch.object(pc, "DETECTOR_DIR", tmp / "det"):
+        # strengths and names
+        assert pc.clamp_strength(None) == 0.8 and pc.clamp_strength("x") == 0.8 and pc.clamp_strength(float("nan")) == 0.8
+        assert pc.clamp_strength(0.1) == 0.4 and pc.clamp_strength(3) == 1.0 and pc.clamp_strength(0.6) == 0.6
+        assert pc.safe_pose_name("../a:b") == "a_b" and pc.safe_pose_name("_current") == "current" and pc.safe_pose_name("CON") == "_CON" and pc.safe_pose_name("") == ""
+        # a stored pose: arms in the upper half, legs (knees / ankles) in the lower
+        body = [[100.0, 40.0 + i, 0.9] for i in range(18)]
+        for i, (x, y) in {1: (100, 60), 2: (80, 60), 3: (60, 90), 4: (40, 120), 5: (120, 60), 6: (140, 90), 7: (160, 120), 8: (90, 150), 11: (110, 150),
+                          9: (90, 200), 10: (90, 250), 12: (110, 200), 13: (110, 250)}.items():
+            body[i] = [float(x), float(y), 0.9]
+        pose = {"v": 1, "size": [200, 300], "body": body, "lh": [[40.0 + k, 120.0 + k, 0.9] for k in range(21)], "rh": [[160.0 - k, 120.0 + k, 0.9] for k in range(21)]}
+        assert pc.save_pose("v-sign", pose, pc.preview_of_pose(pose)) == "v-sign"
+        assert pc.save_pose(pc.CURRENT, pose) == pc.CURRENT and pc.list_poses() == [pc.CURRENT, "v-sign"]
+        got = pc.load_pose("v-sign")
+        assert got["body"] == body and got["hash"] == pc.pose_hash(pose) and len(got["hash"]) == 10
+        assert pc.load_pose("nothing") is None and pc.load_pose("") is None
+        try:
+            pc.save_pose("", pose); raise AssertionError("an empty name must be refused")
+        except ValueError:
+            pass
+        # rendering: size, hands drawn, legs hidden, a different aspect ratio is fitted (centred) not stretched
+        arr = np.asarray(pc.render(pose, 400, 600))
+        assert arr.shape == (600, 400, 3) and arr.sum() > 0 and arr[:420].sum() > 0 and arr[420:].sum() > 0              # legs drawn below y = 420
+        hidden = np.asarray(pc.render(pose, 400, 600, hide_legs=True))
+        assert hidden[420:].sum() == 0 and hidden[:420].sum() > 0                                                      # knees + ankles gone, the rest stays
+        wide = np.asarray(pc.render(pose, 600, 400))
+        assert wide.shape == (400, 600, 3) and wide[:, :120].sum() == 0 and wide[:, 480:].sum() == 0 and wide.sum() > 0
+        # an image pose: the picture itself, fitted
+        pc.save_pose("flat", {"v": 1, "image": True, "size": [100, 200]}, preview=Image.new("RGB", (100, 200), (255, 0, 0)))
+        ip = pc.load_pose("flat")
+        sq = pc.render(ip, 400, 400)
+        assert sq.getpixel((5, 200)) == (0, 0, 0) and sq.getpixel((200, 200)) == (255, 0, 0) and pc.render(ip, 200, 400).getpixel((5, 5)) == (255, 0, 0)
+        assert pc.delete_pose("flat") and pc.load_pose("flat") is None and not pc.delete_pose("flat")
+        # a record's keypoints become a saved pose (once)
+        rec = {"keypoints": {k: pose[k] for k in ("size", "body", "lh", "rh")}}
+        again = pc.ensure_pose_from_record(rec)
+        assert again == "v-sign" and pc.ensure_pose_from_record(rec) == again and len(pc.list_poses()) == 2, (again, pc.list_poses())          # the same keypoints exist already: a named pose wins over '(uploaded picture)'
+        assert pc.ensure_pose_from_record(dict(rec, pose=pc.CURRENT)) == pc.CURRENT and pc.ensure_pose_from_record(dict(rec, pose="v-sign")) == "v-sign"   # ... unless the record names the other one
+        assert pc.ensure_pose_from_record({}) is None and pc.ensure_pose_from_record({"keypoints": {"body": [1]}}) is None
+        pc.delete_pose(pc.CURRENT); pc.delete_pose("v-sign")
+        moved = dict(rec, keypoints=dict(rec["keypoints"], body=[[x + 1, y, s] for x, y, s in body]))
+        made = pc.ensure_pose_from_record(moved)
+        assert made.startswith("restored_") and made in pc.list_poses() and pc.load_pose(made)["body"][0][0] == 101.0
+
+        # extraction on fake ORT sessions (a person box + 133 keypoints)
+        (tmp / "det").mkdir()
+        for n in pc.DWPOSE:
+            (tmp / "det" / n).write_bytes(b"x")
+
+        class FakeDet:
+            def __init__(self, cells): self.cells = cells
+            def get_inputs(self): return [types.SimpleNamespace(name="images")]
+            def run(self, _o, feed):
+                out = np.zeros((1, 8400, 85), np.float32)
+                for idx, h_raw in self.cells:                    # stride-8 cells: index = row * 80 + column; w = 100 px, h = 8·exp(h_raw) px on the 640 canvas
+                    out[0, idx, 2] = np.log(100 / 8); out[0, idx, 3] = h_raw; out[0, idx, 4] = 0.9; out[0, idx, 5] = 0.9
+                return [out]
+
+        class FakePose:
+            def __init__(self, conf): self.conf = conf
+            def get_inputs(self): return [types.SimpleNamespace(name="input")]
+            def run(self, _o, feed):
+                sx = np.zeros((1, 133, 576), np.float32); sy = np.zeros((1, 133, 768), np.float32)
+                for k in range(133):
+                    sx[0, k, int(round((0.4 + 0.002 * k) * 576))] = self.conf; sy[0, k, int(round((0.3 + 0.004 * k) * 768))] = self.conf
+                return sx, sy
+        sessions = {"dwpose_yolox_l.onnx": FakeDet([(40 * 80 + 40, np.log(200 / 8))]), "dwpose_dw-ll_ucoco_384.onnx": FakePose(5.0)}
+        img = Image.new("RGB", (320, 320), (90, 90, 90))
+        with patch.object(pc, "_session", lambda f: sessions[f]):
+            people = pc.detect_people(np.zeros((320, 320, 3), np.uint8))
+            assert len(people) == 1 and abs(people[0][1] - 0.81) < 0.01 and np.allclose(people[0][0], [135, 110, 185, 210], atol=1.0), people
+            p, msg = pc.extract(img)
+            assert p["size"] == [320, 320] and len(p["body"]) == 18 and len(p["lh"]) == 21 and len(p["rh"]) == 21 and p["hash"] == pc.pose_hash(p) and msg.startswith("Skeleton found (18 of 18 body points)"), (p and p["size"], msg)
+            assert abs(p["body"][0][0] - 150.55) < 0.6 and abs(p["body"][0][1] - 134.9) < 0.6, p["body"][0]         # the nose = COCO keypoint 0, mapped back from the 288×384 crop
+            sessions["dwpose_yolox_l.onnx"] = FakeDet([(40 * 80 + 40, np.log(200 / 8)), (40 * 80 + 60, np.log(120 / 8))])
+            p2, msg2 = pc.extract(img)
+            assert p2 is not None and "2 people" in msg2 and "biggest" in msg2, msg2
+            sessions["dwpose_yolox_l.onnx"] = FakeDet([])
+            none, msg3 = pc.extract(img)
+            assert none is None and msg3.startswith("No person found"), msg3
+            sessions["dwpose_yolox_l.onnx"] = FakeDet([(40 * 80 + 40, np.log(200 / 8))]); sessions["dwpose_dw-ll_ucoco_384.onnx"] = FakePose(0.1)
+            weak, msg4 = pc.extract(img)
+            assert weak is None and "too little" in msg4, msg4
+        (tmp / "det" / "dwpose_yolox_l.onnx").unlink()
+        try:
+            pc.extract(img); raise AssertionError("missing DWPose files must raise FileNotFoundError")
+        except FileNotFoundError as e:
+            assert "dwpose_yolox_l.onnx" in str(e)
+        assert pc.missing_dwpose() == ["dwpose_yolox_l.onnx"] and not pc.dwpose_available()
+
+        # the control a Generate run gets
+        pc.save_pose("v-sign", pose, pc.preview_of_pose(pose))
+        ex = dict(pc_pose="v-sign", pc_model="", pc_strength=0.8, pc_legs=True)
+        ctl, rec2, err = pc.build_control(ex, 64, 96)
+        assert ctl is None and "ControlNet model" in err and "Download" in err, err                                # no model folder yet
+        mdir = tmp / "cn" / pc.DEFAULT_MODEL
+        mdir.mkdir(parents=True); (mdir / "config.json").write_text("{}"); (mdir / "diffusion_pytorch_model.safetensors").write_bytes(b"x")
+        assert pc.list_models() == [pc.DEFAULT_MODEL] and pc.model_path("") == mdir and pc.model_path("../x") is None
+        ctl, rec2, err = pc.build_control(ex, 64, 96)
+        assert not err and ctl["image"].size == (64, 96) and ctl["scale"] == 0.8 and ctl["model"] == str(mdir) and ctl["name"] == "v-sign", (err, ctl)
+        assert rec2["model"] == pc.DEFAULT_MODEL and rec2["legs"] == "hidden" and rec2["source"] == pc.pose_hash(pose)
+        assert rec2["keypoints"]["body"] == body and rec2["strength"] == 0.8
+        ctl2, rec3, _ = pc.build_control(dict(ex, pc_legs=False, pc_strength=9), 64, 96)
+        assert rec3["legs"] == "shown" and rec3["strength"] == 1.0 and np.asarray(ctl2["image"]).sum() > np.asarray(ctl["image"]).sum()
+        assert "no pose is chosen" in pc.build_control(dict(ex, pc_pose=""), 64, 96)[2] and "was not found" in pc.build_control(dict(ex, pc_pose="gone"), 64, 96)[2]
+
+        # downloads: written next to the target, SHA-256 checked, a mismatch is deleted
+        data = b"pinned bytes"
+        sha = hashlib.sha256(data).hexdigest()
+
+        def fake_hf(repo, file, local_dir=None, **kw):
+            p = Path(local_dir) / file; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(data); return str(p)
+        import huggingface_hub
+        with patch.object(huggingface_hub, "hf_hub_download", fake_hf):
+            dest = tmp / "out" / "a.onnx"
+            pc._fetch("r", "a.onnx", dest, sha)
+            assert dest.read_bytes() == data and not (tmp / "out" / ".download").exists()
+            bad = tmp / "out" / "b.onnx"
+            try:
+                pc._fetch("r", "b.onnx", bad, "0" * 64); raise AssertionError("a wrong checksum must be refused")
+            except RuntimeError as e:
+                assert "SHA-256" in str(e) and not bad.exists() and not (tmp / "out" / ".download").exists()
+            with patch.object(pc, "DWPOSE", {"dwpose_t.onnx": dict(repo="r", file="t.onnx", mb=1, sha256=sha)}):
+                assert "Downloaded dwpose_t.onnx" in pc.download_dwpose() and (tmp / "det" / "dwpose_t.onnx").read_bytes() == data
+                assert pc.download_dwpose() == "DWPose files ready."                                                  # nothing fetched twice
+            with patch.dict(pc.MODELS, {"tmodel": dict(repo="r", license="MIT", mb=1, files={"config.json": ("config.json", sha), "diffusion_pytorch_model.safetensors": ("w.safetensors", sha)})}):
+                assert pc.download_model("tmodel").startswith("tmodel ready") and "tmodel" in pc.list_models()
+                try:
+                    pc.download_model("nope"); raise AssertionError
+                except ValueError:
+                    pass
+    # the shipped pins are well-formed, the default model is Apache-2.0, and no model without a stated licence is named in any public file
+    assert all(len(d["sha256"]) == 64 for d in pc.DWPOSE.values()) and pc.MODELS[pc.DEFAULT_MODEL]["license"] == "Apache-2.0"
+    assert all(len(h) == 64 for _f, h in pc.MODELS[pc.DEFAULT_MODEL]["files"].values())
+    here = Path(pc.__file__).parent
+    priv = here / "pose_models_private.py"
+    if priv.exists():                                  # the private repo only: a model without a stated licence lives in that one file, nowhere else
+        assert "PRIVATE-ONLY" in priv.read_text(encoding="utf-8")[:300]
+        import importlib
+        ids = []
+        for key, m in importlib.import_module("backend.pose_models_private").PRIVATE_MODELS.items():
+            ids += [key.lower(), m["repo"].lower(), m["repo"].split("/")[0].lower()]
+        for rel in ("pose_control.py", "ui_pose.py", "help_content.py", "records.py", "png_info.py", "sampling.py", "../app.py", "../README.md", "../run_tests.py"):
+            text = (here / rel).read_text(encoding="utf-8").lower()
+            assert not [i for i in ids if i in text], (rel, ids)
+
+
+@test("🧍 Pose control (round 34) plumbing: clean_extra, record → A1111 text → PNG Info → restore plan → controls (a missing pose is rebuilt from the record), the X/Y 'Pose strength' axis, the Generate endpoints grew by the same five trailing inputs")
+def _():
+    import json as _j, tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    import app as _app
+    from backend import pose_control as pc
+    from backend.png_info import read_png_info, format_png_info_html
+    d0 = _app._clean_extra({})
+    assert d0["pc_on"] is False and d0["pc_pose"] == "" and d0["pc_strength"] == 0.8 and d0["pc_model"] == "" and d0["pc_legs"] is False, d0
+    j = _app._clean_extra({"pc_on": 1, "pc_pose": " a\x00b ", "pc_strength": "x", "pc_legs": 1, "pc_model": "m" * 200})
+    assert j["pc_on"] and j["pc_pose"] == "ab" and j["pc_strength"] == 0.8 and j["pc_legs"] and len(j["pc_model"]) == 80
+    assert _app._clean_extra({"pc_strength": 0.1})["pc_strength"] == 0.4 and _app._clean_extra({"pc_strength": 7})["pc_strength"] == 1.0
+    assert "Pose strength" in _app._XY_AXES
+    vals, err = _app._xy_values("Pose strength", "0.6, 0.8, 1.0")
+    assert not err and vals == [0.6, 0.8, 1.0] and _app._xy_values("Pose strength", "0.3")[1] and _app._xy_values("Pose strength", "1.2")[1]
+    body = [[10.0 * i, 5.0 * i + 20, 0.9] for i in range(18)]
+    kp = {"size": [200, 300], "body": body, "lh": [[1.0, 2.0, 0.9]] * 21, "rh": [[3.0, 4.0, 0.9]] * 21}
+    rec = {"app": "ImageGen Studio", "format": 2, "mode": "txt2img", "prompt": "1girl", "steps": 12, "cfg_scale": 6.0, "seeds": [1], "scheduler": "DPM++ 2M AYS", "width": 64, "height": 64,
+           "pose_control": {"model": "xinsir_openpose_sdxl_1.0", "strength": 0.7, "pose": "gone", "source": "abc", "legs": "hidden", "keypoints": kp}}
+    txt = _app._params_text(rec)
+    assert "Pose control: xinsir_openpose_sdxl_1.0, 0.7, legs hidden" in txt and "Pose control" not in _app._params_text(dict(rec, pose_control=None))
+
+    def meta_of(**texts):
+        pi = PngInfo()
+        for k, v in texts.items():
+            pi.add_text(k, v)
+        with tempfile.TemporaryDirectory() as dd:
+            f = Path(dd) / "m.png"
+            Image.new("RGB", (8, 8)).save(f, pnginfo=pi)
+            with Image.open(f) as im:
+                return read_png_info(im)
+    m_txt = meta_of(parameters="1girl\nSteps: 12, Seed: 1, Pose control: some_model, 0.6, legs hidden")            # the A1111 text alone: no keypoints
+    assert m_txt["pose_control"] == {"model": "some_model", "strength": 0.6, "legs": "hidden"}, m_txt
+    assert "Pose control" in format_png_info_html(m_txt)
+    tmp = Path(tempfile.mkdtemp())
+    with patch.object(pc, "POSES_DIR", tmp / "poses"):
+        plan = _app._restore_plan(meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1"))
+        assert plan["pose_control"]["model"] == "xinsir_openpose_sdxl_1.0" and "pose control" in _app._plan_summary(plan)
+        ups = _app._plan_extra_updates(plan)
+        name = ups[-4]["value"]
+        assert ups[-5] is True and name.startswith("restored_") and name in ups[-4]["choices"] and ups[-3] == 0.7 and ups[-2] == "xinsir_openpose_sdxl_1.0" and ups[-1] is True, ups[-5:]
+        assert pc.load_pose(name)["body"] == body                                                                  # the pose came back from the record's keypoints
+        ups_text = _app._plan_extra_updates(_app._restore_plan(m_txt))                                              # no keypoints: switches it on, keeps the pose
+        assert ups_text[-5] is True and ups_text[-4] == {"__type__": "update"} and ups_text[-3] == 0.6
+        ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
+        assert ups0[-5] is False and all(u == {"__type__": "update"} for u in ups0[-4:]), ups0[-5:]               # a record without pose control switches it off and leaves the rest
+    # the Generate-side endpoints: the same five controls, last (X/Y: right before the axis inputs), the restore outputs too
+    b = _app.build_app()
+    by = {}
+    for f in b.fns:
+        by.setdefault(getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"), f)
+    labels = ["Use pose control", "Pose", "Pose strength", "ControlNet model", "Hide legs"]
+    lab = lambda comps: [getattr(c, "label", None) for c in comps]
+    for fn in ("do_generate_ui", "do_autoloop", "do_card_batch", "do_save_settings"):
+        assert lab(by[fn].inputs[-5:]) == labels, (fn, lab(by[fn].inputs[-7:]))
+    assert lab(by["do_xy_grid"].inputs[-9:-4]) == labels, lab(by["do_xy_grid"].inputs[-10:])
+    assert lab(by["on_i2i_drop"].outputs[-6:-1]) == labels, lab(by["on_i2i_drop"].outputs[-7:])
+    assert lab(by["do_load_settings"].outputs[-6:-1]) == labels, lab(by["do_load_settings"].outputs[-7:])
+    assert lab(by["do_send_to_gen"].outputs[-5:]) == labels, lab(by["do_send_to_gen"].outputs[-6:])
+
+
+@test("🧍 Pose control (round 34) in a real Generate run: PAG is forced to 0 and recorded as 0, the txt2img pass gets the skeleton at the picture's size, refusals (SD 1.5, no pose, no model, no GPU) say why, img2img ignores it, the off path is unchanged")
+def _():
+    import json as _j, tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    import numpy as np
+    from PIL import Image
+    from backend import pose_control as pc
+    _app, dg, _hp = _app_closures()
+    tmp = Path(tempfile.mkdtemp())
+    seen = []
+    body = [[10.0 + 3 * i, 8.0 + 2 * i, 0.9] for i in range(18)]
+    pose = {"v": 1, "size": [64, 96], "body": body, "lh": [[5.0, 5.0, 0.9]] * 21, "rh": [[9.0, 9.0, 0.9]] * 21}
+
+    class FakeSD:
+        model_family, current_model, _last_vae_path, prediction, device = "illustrious", "x.safetensors", None, {}, "cuda:0"
+        _lora_adapters, boosters, last_seeds, last_var_seeds, pipe = {}, {}, [], [], object()
+        control = None
+
+        def txt2img(self, prompt, neg, w, h, steps, cfg, seed, sched, batch, step_callback=None, **kw):
+            seen.append((self.control, dict(self.boosters)))
+            self.last_seeds = [seed + i for i in range(batch)]
+            return [Image.new("RGB", (w, h), (seed % 255, 40, 90)) for _ in range(batch)], "info"
+
+        def img2img(self, img, prompt, neg, strength, steps, cfg, seed, sched, step_callback=None, clip_skip=1):
+            seen.append((self.control, dict(self.boosters)))
+            return [img], "i2i"
+    old = (_app.sd, _app.OUTPUTS_DIR)
+    _app.sd, _app.OUTPUTS_DIR = FakeSD(), tmp / "outputs"
+    _app.OUTPUTS_DIR.mkdir()
+    try:
+        with patch.object(pc, "POSES_DIR", tmp / "poses"), patch.object(pc, "CONTROLNET_DIR", tmp / "cn"):
+            pc.save_pose("v-sign", pose, pc.preview_of_pose(pose))
+            mdir = tmp / "cn" / pc.DEFAULT_MODEL
+            mdir.mkdir(parents=True); (mdir / "config.json").write_text("{}"); (mdir / "m.safetensors").write_bytes(b"x")
+            prog = lambda *a, **k: None
+            ex = dict(pc_on=True, pc_pose="v-sign", pc_strength=0.7, pc_legs=True, pag_scale=2.0)
+            imgs, info, _ = dg("1girl", "bad", "Euler a", 4, 6.0, 256, 384, 1, 5, None, 0.5, False, extra=ex, progress=prog)
+            assert imgs and len(seen) == 1, (info, seen)
+            ctl, boosters = seen[0]
+            assert ctl["image"].size == (256, 384) and ctl["scale"] == 0.7 and boosters["pag"] == 0.0, (ctl, boosters)       # PAG forced off for the run
+            assert "Pose control: v-sign" in info and "PAG 2 → 0" in info and _app.sd.control is None and _app.sd.boosters == {}
+            f = sorted(_app.OUTPUTS_DIR.glob("*.png"))[0]
+            with Image.open(f) as im:
+                im.load()
+                r = _j.loads(im.info["imagegen"])
+                assert r["pose_control"]["model"] == pc.DEFAULT_MODEL and r["pose_control"]["strength"] == 0.7 and r["pose_control"]["keypoints"]["body"] == body and "pag_scale" not in r, r
+                assert "Pose control: " + pc.DEFAULT_MODEL + ", 0.7, legs hidden" in im.info["parameters"] and "PAG scale" not in im.info["parameters"]
+            # the off path: no control, PAG as set, nothing recorded
+            seen.clear()
+            imgs, info, _ = dg("1girl", "bad", "Euler a", 4, 6.0, 256, 384, 1, 6, None, 0.5, False, extra=dict(pag_scale=2.0), progress=prog)
+            assert seen[0][0] is None and seen[0][1]["pag"] == 2.0 and "Pose control" not in info
+            r2 = _j.loads(Image.open(sorted(_app.OUTPUTS_DIR.glob("*.png"), key=lambda p: p.stat().st_mtime)[-1]).info["imagegen"])
+            assert "pose_control" not in r2 and r2["pag_scale"] == 2.0, r2
+            # refusals: nothing is generated, the message says why
+            seen.clear()
+            for patch_attrs, ex2, want in (
+                    (dict(model_family="sd15"), ex, "SDXL"), (dict(device="cpu"), ex, "GPU runtime"),
+                    ({}, dict(ex, pc_pose=""), "no pose is chosen"), ({}, dict(ex, pc_pose="gone"), "was not found"), ({}, dict(ex, pc_model="missing_model"), "missing_model")):
+                for k, v in patch_attrs.items():
+                    setattr(_app.sd, k, v)
+                imgs, info, _ = dg("1girl", "bad", "Euler a", 4, 6.0, 256, 384, 1, 7, None, 0.5, False, extra=ex2, progress=prog)
+                assert not imgs and want in info and not seen, (want, info)
+                _app.sd.model_family, _app.sd.device = "illustrious", "cuda:0"
+            # img2img: pose control is ignored (with a note), the picture is made as usual
+            imgs, info, _ = dg("1girl", "bad", "Euler a", 4, 6.0, 256, 384, 1, 8, Image.new("RGB", (64, 96)), 0.5, True, extra=ex, progress=prog)
+            assert imgs and "not used for img2img" in info and seen[-1][0] is None, info
+    finally:
+        _app.sd, _app.OUTPUTS_DIR = old
+
+
+@test("🧍 Pose control (round 34): run_pipe builds the ControlNet target only for an SDXL txt2img pass, never combines it with PAG, passes the skeleton + strength, releases the model afterwards; img2img and a plain run are untouched")
+def _():
+    import types
+    from unittest.mock import patch
+    from PIL import Image
+    from diffusers import EulerDiscreteScheduler
+    from backend import sampling
+
+    class Unet:
+        dtype = None
+        def __init__(self): self.procs = {"a": 1}
+        @property
+        def attn_processors(self): return dict(self.procs)
+        def set_attn_processor(self, p): self.procs = dict(p)
+        def enable_freeu(self, **k): pass
+        def disable_freeu(self): pass
+
+    class Target:
+        def __init__(self, tag): self.tag, self.calls, self.scheduler, self.unet = tag, [], EulerDiscreteScheduler(), Unet()
+        def __call__(self, prompt_embeds=None, guidance_scale=7.0, image=None, controlnet_conditioning_scale=None, control_guidance_start=None, control_guidance_end=None,
+                     pag_scale=None, guidance_rescale=None, num_inference_steps=1, callback_on_step_end=None, width=64, height=64):
+            self.calls.append(dict(image=image, scale=controlnet_conditioning_scale, start=control_guidance_start, end=control_guidance_end, pag=pag_scale)); return self.tag
+    pipe = Target("plain"); pipe.text_encoder_2 = object()
+    ctl_target = Target("control")
+    sdp = types.SimpleNamespace(boosters={"pag": 2.0}, prediction={}, control=None)
+    built, released = [], []
+    with patch.object(sampling, "_control_target", lambda s, p, c: built.append(c) or ctl_target), patch.object(sampling, "release_control", lambda s: released.append(1)):
+        img = Image.new("RGB", (8, 8))
+        sdp.control = {"image": img, "scale": 0.8, "model": "m"}
+        assert sampling.run_pipe(sdp, pipe, "txt2img", prompt_embeds=1, num_inference_steps=2) == "control"
+        c = ctl_target.calls[0]
+        assert c["image"] is img and c["scale"] == 0.8 and c["start"] == 0.0 and c["end"] == 1.0 and c["pag"] is None and released == [1] and not pipe.calls          # no PAG with a pose model, model released
+        pipe.calls.clear()
+        assert sampling.run_pipe(types.SimpleNamespace(boosters={}, prediction={}, control={"image": img, "scale": 1, "model": "m"}), pipe, "img2img", prompt_embeds=1) == "plain"
+        assert pipe.calls[0]["image"] is None and len(ctl_target.calls) == 1                                                                                       # img2img: never controlled
+        sdp.control = None
+        built.clear(); released.clear(); pipe.calls.clear()
+        r = sampling.run_pipe(types.SimpleNamespace(boosters={}, prediction={}, control=None), pipe, "txt2img", prompt_embeds=1)
+        assert r == "plain" and pipe.calls[0]["image"] is None and not built and not released                                                                     # a plain run: nothing changes
+        sd15 = Target("sd15")                                                                                                                                     # no second text encoder: SD 1.5 is never controlled
+        assert sampling.run_pipe(types.SimpleNamespace(boosters={}, prediction={}, control={"image": img, "scale": 1, "model": "m"}), sd15, "txt2img", prompt_embeds=1) == "sd15" and not built
+
+
+@test("🧍 Pose control (round 34): the accordion's handlers — a skeleton from a picture, the missing-DWPose message with the download pointer, no person, already-a-pose-image, save / delete, download failures never raise")
+def _():
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    from PIL import Image
+    import app as _app
+    from backend import pose_control as pc
+    b = _app.build_app()
+    by = {}
+    for f in b.fns:
+        by.setdefault(getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"), f)
+    ext, sel, save, dele, dl = (getattr(by[n].fn, "__wrapped__", by[n].fn) for n in ("on_pose_extract", "on_pose_select", "on_pose_save", "on_pose_delete", "on_pose_download"))
+    tmp = Path(tempfile.mkdtemp())
+    pose = {"v": 1, "size": [100, 150], "body": [[10.0 + 2 * i, 8.0 + 3 * i, 0.9] for i in range(18)], "lh": [], "rh": []}
+    pic = Image.new("RGB", (100, 150), (120, 120, 120))
+    with patch.object(pc, "POSES_DIR", tmp / "poses"):
+        assert "Upload" in ext(None, False)[2]
+        with patch.object(pc, "extract", side_effect=FileNotFoundError("missing")):
+            out = ext(pic, False)
+            assert "Download" in out[2] and "DWPose" in out[2], out                                                  # a message, never a crash
+        with patch.object(pc, "extract", return_value=(None, "No person found in the picture — x")):
+            assert "No person found" in ext(pic, False)[2] and pc.list_poses() == []
+        with patch.object(pc, "extract", side_effect=RuntimeError("boom")):
+            assert "Could not read a skeleton" in ext(pic, False)[2]
+        with patch.object(pc, "extract", return_value=(dict(pose, hash=pc.pose_hash(pose)), "Skeleton found (18 of 18 body points).")):
+            shown, dd, status = ext(pic, False)
+            assert shown is not None and dd["value"] == pc.CURRENT and pc.CURRENT in dd["choices"] and "Skeleton found" in status
+        shown, dd, status = ext(pic, True)                                                                              # already a pose image: used as it is
+        assert shown is not None and pc.load_pose(pc.CURRENT).get("image") and "as it is" in status
+        assert sel(pc.CURRENT) is not None
+        assert "name" in save("", pc.CURRENT)[1].lower()
+        upd, status = save("Reach pose", pc.CURRENT)
+        assert upd["value"] == "Reach pose" and "Reach pose" in pc.list_poses() and "Saved" in status
+        upd, status = dele("Reach pose")
+        assert "Reach pose" not in pc.list_poses() and "Deleted" in status and "Nothing" in dele("")[1]
+        with patch.object(pc, "download_dwpose", side_effect=OSError("offline")):
+            out = dl("DWPose skeleton files (351 MB)")
+            assert "Download failed" in out[0] and "offline" in out[0]
+        with patch.object(pc, "download_dwpose", return_value="DWPose files ready."), patch.object(pc, "download_model", return_value="m ready (Apache-2.0)"):
+            assert "ready" in dl("DWPose skeleton files (351 MB)")[0] and "ready" in dl(pc.DEFAULT_MODEL + " (2.4 GB, Apache-2.0)")[0]
 
 
 # ══════════════════════════════════════════════════════════════════════════
