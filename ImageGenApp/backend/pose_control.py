@@ -28,6 +28,12 @@ from PIL import Image
 from config import MODELS_DIR, SETTINGS_DIR
 
 POSES_DIR = SETTINGS_DIR / "poses"
+STARTER_DIR = Path(__file__).resolve().parent.parent / "poses"      # the built-in starter poses (keypoints only, shipped with the app; never written to)
+STAR = "★ "                                                          # prefix of a built-in pose in the Pose list
+# Keeping the 2.5 GB pose model loaded between the pictures of a batch (round 35) is OFF: measured on the 12 GB RX 6800M it SPILLS ~1 GB into shared GPU memory (shared 1,316 MB against
+# 231-253 MB when it is released after every picture) and saved nothing (49.2 s against 43.9 s per picture over 6 X/Y cells, noise from the heat pauses). The machinery in
+# sampling.run_pipe stays for cards with more VRAM (untested): set True to enable it.
+KEEP_RESIDENT = False
 CONTROLNET_DIR = MODELS_DIR / "controlnet"
 DETECTOR_DIR = MODELS_DIR / "detectors"
 
@@ -100,19 +106,55 @@ def pose_hash(pose: dict) -> str:
 
 
 # ── saved poses ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+def starter_poses() -> dict[str, str]:
+    """The built-in poses: label ('★ title') -> file stem in STARTER_DIR. A file is {"title", "size", "body", "lh", "rh"}: keypoints in the pixels of a `size` canvas, no picture."""
+    out = {}
+    try:
+        for p in sorted(STARTER_DIR.glob("*.json"), key=lambda q: q.stem.lower()):
+            try:
+                title = str(json.loads(p.read_text(encoding="utf-8")).get("title") or p.stem.replace("_", " ")).strip()
+            except (OSError, ValueError, AttributeError):
+                continue
+            out[STAR + title] = p.stem
+    except OSError:
+        pass
+    return out
+
+
+def is_starter(name) -> bool:
+    return str(name or "").startswith(STAR.strip())
+
+
 def list_poses() -> list[str]:
-    """Names of the saved poses (the uploaded picture's pose first, as CURRENT)."""
+    """Names for the Pose list: the uploaded picture's pose (CURRENT), the user's saved poses, then the built-in ★ poses."""
     out = []
     try:
         for p in sorted(POSES_DIR.glob("*.json"), key=lambda q: q.stem.lower()):
             out.append(CURRENT if p.stem == _CURRENT_FILE else p.stem)
     except OSError:
         pass
-    return sorted(out, key=lambda n: (n != CURRENT, n.lower()))
+    mine = sorted(out, key=lambda n: (n != CURRENT, n.lower()))
+    return mine + sorted(starter_poses(), key=str.lower)
+
+
+def _load_starter(name: str) -> dict | None:
+    stem = starter_poses().get(str(name or "").strip())
+    if not stem:
+        return None
+    try:
+        data = json.loads((STARTER_DIR / f"{stem}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not (isinstance(data, dict) and isinstance(data.get("body"), list) and len(data["body"]) == 18):
+        return None
+    data["hash"] = pose_hash(data)
+    return data
 
 
 def save_pose(name: str, pose: dict, preview: Image.Image | None = None) -> str:
     """Store a pose; returns the name it is listed under. `pose` = extract()'s dict (or an image pose: {"image": True, "size": [w, h]} + `preview` = the picture)."""
+    if is_starter(name):
+        raise ValueError("A name starting with ★ is reserved for the built-in poses — pick another name.")
     stem = _file_of(name)
     if not stem:
         raise ValueError("Give the pose a name.")
@@ -133,6 +175,8 @@ def save_pose(name: str, pose: dict, preview: Image.Image | None = None) -> str:
 
 
 def load_pose(name: str) -> dict | None:
+    if is_starter(name):
+        return _load_starter(name)
     stem = _file_of(name)
     if not stem:
         return None
@@ -153,6 +197,8 @@ def load_pose(name: str) -> dict | None:
 
 
 def delete_pose(name: str) -> bool:
+    if is_starter(name):
+        return False                                        # the built-in poses stay
     stem = _file_of(name)
     if not stem:
         return False

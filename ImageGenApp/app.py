@@ -2210,6 +2210,9 @@ def _build_generate_tab():
             pc_ctl, pc_rec, pc_err, pc_note = _pose_control_setup(ex, width, height, bool(use_i2i and init_img is not None))
             if pc_err:
                 return [], f'<p style="color:#f38ba8;">❌ {html.escape(pc_err)}</p>', []
+            if pc_ctl is not None:
+                # round 35: keeping the pose model for the next picture of a batch is off (pose_control.KEEP_RESIDENT: it spilled ~1 GB on 12 GB); when on, only when no pass follows this one
+                pc_ctl["keep"] = _pose.KEEP_RESIDENT and not (ex["hires_on"] or ex["hd_on"] or ex["fd_on"] or ex["ed_on"] or ex["md_on"])
         # PAG / FreeU / CFG rescale are read by backend.sampling.run_pipe for every pass
         # (txt2img, hires, face detail) of this run; cfg_rescale 0 = auto (0.7 for v-pred)
         sd.boosters = {"pag": 0.0 if pc_ctl else ex["pag_scale"], "freeu": ex["freeu"], "cfg_rescale": ex["cfg_rescale"] or None}
