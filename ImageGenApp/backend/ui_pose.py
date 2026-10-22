@@ -79,7 +79,7 @@ def build_section(ns, ls: dict) -> SimpleNamespace:
         with gr.Row():
             img = gr.Image(label="Composition picture — its depth map is made on the CPU" if is_comp else "Pose picture — a picture of a person (the skeleton is read on the CPU)",
                            type="pil", sources=["upload", "clipboard"], height=280)
-            preview = gr.Image(label="Depth map (what the model gets)" if is_comp else "Skeleton (what the model gets)", interactive=False, height=280,
+            preview = gr.Image(label="Depth map, flattened (what the model gets)" if is_comp else "Skeleton (what the model gets)", interactive=False, height=280,
                                show_download_button=False, value=None)
         with gr.Row():
             already_cb = gr.Checkbox(label="The picture is already a depth map (used as it is)" if is_comp else "The picture is already a pose image (skeleton on black)", value=False)
@@ -120,7 +120,7 @@ def build_section(ns, ls: dict) -> SimpleNamespace:
                 print(f"[Composition] depth map failed: {type(e).__name__}: {e}")
                 return gr.update(), gr.update(), _warn(f"Could not make a depth map: {str(e).splitlines()[0][:160] if str(e) else type(e).__name__}")
             comp.save_current(depth)
-            return _depth_preview(depth), gr.update(), _ok("Depth map ready — Generate with the box ticked copies this picture's figure and framing (the picture itself is not stored in the record).")
+            return _depth_preview(comp.flatten(depth)), gr.update(), _ok("Depth map ready — Generate with the box ticked copies this picture's figure and framing (the picture itself is not stored in the record).")
         try:
             if already:
                 from PIL import Image
@@ -201,7 +201,7 @@ def build_section(ns, ls: dict) -> SimpleNamespace:
         mdls, val = _model_for("depth" if c else "pose", cur_model)
         if c:
             depth = comp.load_current()
-            shown = _depth_preview(depth) if depth is not None else None
+            shown = _depth_preview(comp.flatten(depth)) if depth is not None else None
         else:
             shown = pc.preview_of(pose_name) if str(pose_name or "").strip() else None
         return (gr.update(minimum=comp.STRENGTH_MIN if c else pc.STRENGTH_MIN, maximum=comp.STRENGTH_MAX if c else pc.STRENGTH_MAX,
@@ -209,7 +209,7 @@ def build_section(ns, ls: dict) -> SimpleNamespace:
                 gr.update(choices=mdls, value=val),
                 gr.update(visible=not c), gr.update(visible=not c), gr.update(visible=not c),
                 gr.update(label="Composition picture — its depth map is made on the CPU" if c else "Pose picture — a picture of a person (the skeleton is read on the CPU)"),
-                gr.update(label="Depth map (what the model gets)" if c else "Skeleton (what the model gets)", value=shown),
+                gr.update(label="Depth map, flattened (what the model gets)" if c else "Skeleton (what the model gets)", value=shown),
                 gr.update(label="The picture is already a depth map (used as it is)" if c else "The picture is already a pose image (skeleton on black)"),
                 gr.update(value="🗺 Make the depth map" if c else "🦴 Read skeleton from the picture"),
                 gr.update(value=DEPTH_ESTIMATOR_CHOICE if c else _download_choices()[0]))
