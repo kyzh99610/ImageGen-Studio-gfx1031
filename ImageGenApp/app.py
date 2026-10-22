@@ -751,7 +751,45 @@ _SDXL_BAD_SAMPLERS = ("PNDM", "Heun")
 _SDXL_FAMILIES = ("sdxl", "pony", "illustrious")
 
 _XY_AXES = ["none", "CFG", "Steps", "Sampler", "Seed", "LoRA 1 weight", "CLIP skip", "Hires denoise",
-            "Face denoise", "Hand denoise", "Eye denoise", "PAG scale", "CFG rescale", "Colour strength", "Pose strength", "Prompt S/R", "Checkpoint"]
+            "Face denoise", "Hand denoise", "Eye denoise", "PAG scale", "CFG rescale", "Colour strength", "Pose strength", "Pose", "Prompt S/R", "Checkpoint"]
+
+
+def _xy_pose_values(text: str) -> tuple[list, str]:
+    """The Pose axis: names of the Pose list (built-in ★ poses and the user's own, with or without the ★, case ignored, a unique part of a name is enough) or "none" = no pose control in that cell.
+    A name may itself contain a comma ("peace sign, one hand"), so the commas are joined back greedily, longest name first."""
+    from backend import pose_control as _pc
+    names = [n for n in _pc.list_poses()]
+    raw = [v.strip() for v in str(text or "").split(",") if v.strip()]
+    if not raw:
+        return [], "Enter pose names separated by commas (or none)."
+    norm = lambda t: t.lower().replace(_pc.STAR.strip().lower(), "").strip()
+
+    def find(cand: str):
+        if cand.lower() == "none":
+            return "none", True
+        key = norm(cand)
+        exact = [n for n in names if norm(n) == key]
+        if exact:
+            return exact[0], True
+        part = [n for n in names if key and key in norm(n)]
+        if len(part) == 1:
+            return part[0], True
+        return None, len(part) > 1               # (None, True) = ambiguous
+    out, i = [], 0
+    while i < len(raw):
+        for j in range(len(raw), i, -1):
+            hit, _ = find(", ".join(raw[i:j]))
+            if hit:
+                out.append(hit); i = j
+                break
+        else:
+            _, ambiguous = find(raw[i])
+            shown = ", ".join(html.escape(n) for n in names) or "(no saved poses)"
+            return [], (f"“{html.escape(raw[i])}” matches more than one pose — type more of the name. Poses: {shown}, none" if ambiguous
+                        else f"Unknown pose “{html.escape(raw[i])}” — choose from: {shown}, none")
+    if len(out) > 48:
+        return [], "At most 48 poses."
+    return out, ""
 
 
 def _xy_values(axis: str, text: str) -> tuple[list, str]:
@@ -764,6 +802,8 @@ def _xy_values(axis: str, text: str) -> tuple[list, str]:
         return [], f"Enter values for {axis}, separated by commas."
     if axis == "Prompt S/R":
         return raw, ""
+    if axis == "Pose":
+        return _xy_pose_values(text)
     if axis == "Checkpoint":
         out = []
         for v in raw:
@@ -3291,6 +3331,7 @@ def _build_generate_tab():
                         elif axis == "CFG rescale": p["extra"]["cfg_rescale"] = v
                         elif axis == "Colour strength": p["extra"]["cs"] = v
                         elif axis == "Pose strength": p["extra"].update(pc_on=True, pc_strength=v)
+                        elif axis == "Pose": p["extra"].update(pc_on=False) if v == "none" else p["extra"].update(pc_on=True, pc_pose=v)
                         elif axis == "Prompt S/R": p["prompt"] = p["prompt"].replace(vals[0], v)
                         elif axis == "Checkpoint": p["model"] = v
                     if p["model"] != model_now:           # Checkpoint axis: switch models
@@ -3320,8 +3361,8 @@ def _build_generate_tab():
         finally:
             if lora_w_now is not None and lora_w_now != w1:
                 _sync_loras([(lora1, w1), (lora2, w2), (lora3, w3)])
-        fmt = lambda a, v: "" if a in (None, "none") else Path(str(v)).stem[:24] if a == "Checkpoint" else \
-            f"{a} {v:g}" if isinstance(v, float) else f"{v}" if a in ("Sampler", "Prompt S/R") else f"{a} {v}"
+        fmt = lambda a, v: "" if a in (None, "none") else Path(str(v)).stem[:24] if a == "Checkpoint" else str(v).replace("★ ", "") if a == "Pose" else \
+            f"{a} {v:g}" if isinstance(v, float) else f"{v}" if a in ("Sampler", "Prompt S/R", "Pose") else f"{a} {v}"
         xl = [fmt(x_axis, v) for v in xs]
         yl = [fmt(y_axis, v) for v in ys]
         cols = len(xs)
@@ -3433,16 +3474,25 @@ def _build_generate_tab():
     _polish_keys = ["hires_on", "hires_scale", "hires_denoise", "hires_steps", "hires_upscaler", "fd_on", "fd_denoise",
                     "hd_on", "hd_denoise", "ed_on", "ed_denoise", "md_on"]
 
-    def on_polish(choice, prompt):
+    def on_polish(choice, prompt, pose_on=False):
         from backend import polish as _pl
-        name = _pl.shot_type(prompt) if choice == "Auto" else choice
+        name = _pl.shot_type(prompt, pose=pose_on) if choice == "Auto" else choice
         r = _pl.recipe(name)
         if not r:
             return [gr.update()] * len(_polish_outs) + [""]
         return ([gr.update(value=r[k]) if k in r else gr.update() for k in _polish_keys]
                 + [f'<p style="color:#a6e3a1;font-size:13px;">✨ {html.escape(name)}: {html.escape(_pl.summary(name))} '
                    f'— about {_pl.time_factor(name):g}× the time of the plain picture.</p>'])
-    polish_dd.input(on_polish, [polish_dd, prompt_txt], _polish_outs + [polish_note])
+    _polish_evt = polish_dd.input(on_polish, [polish_dd, prompt_txt], _polish_outs + [polish_note])
+
+    # round 36: with 🧍 pose control on, Auto also takes the '— hands' recipe (cowboy / full body). on_polish's inputs are API (unchanged), so this is a second, API-less listener that sees the checkbox:
+    # it runs right after on_polish (a Polish choice) and when the user ticks or clears the checkbox (not a programmatic change: Send to Generate must not be overwritten) while the dropdown says Auto; every other choice is left as it is
+    def on_polish_pose(choice, prompt, pose_on):
+        if choice != "Auto":
+            return [gr.update()] * (len(_polish_outs) + 1)
+        return on_polish("Auto", prompt, bool(pose_on))
+    _polish_evt.then(on_polish_pose, [polish_dd, prompt_txt, pc_cb], _polish_outs + [polish_note], api_name=False)
+    pc_cb.input(on_polish_pose, [polish_dd, prompt_txt, pc_cb], _polish_outs + [polish_note], api_name=False)
 
     # ⚡ Use the measured recipe: Sampler / Steps / CFG / PAG for the checkpoint's family, only where a recipe was measured (backend/recipes.py); nothing else is touched
     def on_measured_recipe(model_path):
