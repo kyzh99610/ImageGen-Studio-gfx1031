@@ -74,14 +74,15 @@ _FRAMES = (
 _GESTURE = re.compile(r"(^|,)\s*(v|peace sign|double v|reaching|reaching towards? viewer|outstretched (arm|arms|hand)|arms up|arms raised|hands up|waving)\s*(?=,|$)", re.I)
 
 
-def shot_type(prompt: str) -> str:
+def shot_type(prompt: str, pose: bool = False) -> str:
     """Which recipe fits a prompt: the framing tags it names (weights and brackets ignored), else the middle one;
-    a gesture pose on a cowboy / full-body framing takes that recipe's '— hands' variant."""
+    a gesture pose on a cowboy / full-body framing takes that recipe's '— hands' variant, and so does any cowboy / full-body picture made under
+    pose control (round 36: a ControlNet pose raises the broken-hand rate from ~12 % to ~26-28 %)."""
     p = re.sub(r"[()\[\]\\]", " ", prompt or "")
     p = re.sub(r":\s*[0-9.]+\s*", " ", p)
     name = next((n for n, rx in _FRAMES if rx.search(p)), "Cowboy shot")
     hands = f"{name} — hands"
-    if hands in RECIPES and _GESTURE.search(p):
+    if hands in RECIPES and (_GESTURE.search(p) or pose):
         return hands
     return name
 

@@ -4675,6 +4675,72 @@ def _():
         assert [s["cs"] for s in seen] == [1.0, 1.0]                                                                # no colour axis: the control's own value (default 1)
 
 
+@test("X/Y grid (round 36): a 'Pose' axis — starter and own pose names (the ★ optional, case ignored, a unique part is enough, commas inside a name kept), 'none' = no pose in that cell; unknown / ambiguous names refused with the list; each cell turns pose control on with its pose, strength and model from the controls; a dropdown choice, not a new input")
+def _():
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    from PIL import Image
+    import app as _app
+    from backend import pose_control as pc
+    assert "Pose" in _app._XY_AXES and "Pose strength" in _app._XY_AXES
+    tmp = Path(tempfile.mkdtemp())
+    body = [[10.0 + i, 8.0 + i, 0.9] for i in range(18)]
+    import json as _j
+    (tmp / "starters").mkdir()
+    for title, stem in (("peace sign, one hand (cowboy)", "peace_one"), ("waving (cowboy)", "wave"), ("hands on hips (cowboy)", "hips_c"), ("hands on hips (full body)", "hips_f")):
+        (tmp / "starters" / f"{stem}.json").write_text(_j.dumps({"v": 1, "title": title, "size": [200, 300], "body": body, "lh": [], "rh": []}))
+    with patch.object(pc, "STARTER_DIR", tmp / "starters"), patch.object(pc, "POSES_DIR", tmp / "poses"):
+        pc.save_pose("mine", {"v": 1, "size": [100, 100], "body": body, "lh": [], "rh": []})
+        v, e = _app._xy_values("Pose", "★ waving (cowboy), peace sign, one hand (cowboy), MINE, none, hips (full body)")
+        assert not e and v == ["★ waving (cowboy)", "★ peace sign, one hand (cowboy)", "mine", "none", "★ hands on hips (full body)"], (v, e)      # a comma inside a name, case, a unique part
+        v, e = _app._xy_values("Pose", "wav, peace")
+        assert not e and v == ["★ waving (cowboy)", "★ peace sign, one hand (cowboy)"], (v, e)
+        for bad, word in (("waving (cowboy), nonsense", "Unknown pose"), ("hands on hips", "more than one pose"), ("", "Enter")):
+            v, e = _app._xy_values("Pose", bad)
+            assert not v and word in e, (bad, v, e)
+        assert "waving (cowboy)" in _app._xy_values("Pose", "nonsense")[1] and "none" in _app._xy_values("Pose", "nonsense")[1]        # the refusal lists the poses
+        with _BatchEnv() as E:
+            seen = []
+            cl = dict(zip(E.xy.__code__.co_freevars, E.xy.__closure__))
+            cl["do_generate"].cell_contents = lambda *a, **k: (seen.append(dict(k["extra"])) or [Image.new("RGB", (a[5], a[6]))], "info", [])
+            E.run_xy("Pose", "waving, mine, none")
+            assert [(s["pc_on"], s["pc_pose"] if s["pc_on"] else None) for s in seen] == [(True, "★ waving (cowboy)"), (True, "mine"), (False, None)], seen
+            assert all(s["pc_strength"] == 0.8 for s in seen)                                                                   # strength / model come from the controls
+            seen.clear()
+            E.run_xy("Pose", "waving, none", pose="mine")                                                                         # the checkbox value of the form does not matter: the cell decides
+            assert [s["pc_on"] for s in seen] == [True, False], seen
+            seen.clear()
+            r = E.run_xy("Pose", "nonsense")
+            assert not seen and "Unknown pose" in str(r[1]), r
+
+
+@test("✨ Polish Auto under pose control (round 36): cowboy / full-body pictures take the '— hands' recipe, portrait / wide shot do not; the second (API-less) listener acts on Auto only, after the dropdown and when the user ticks the checkbox; on_polish's own inputs are unchanged")
+def _():
+    import app as _app
+    from backend import polish as P
+    assert P.shot_type("1girl, cowboy shot, standing") == "Cowboy shot" and P.shot_type("1girl, cowboy shot, standing", pose=True) == "Cowboy shot — hands"
+    assert P.shot_type("1girl, full body", pose=True) == "Full body — hands" and P.shot_type("", pose=True) == "Cowboy shot — hands"            # no framing tag = the middle recipe
+    for prompt in ("1girl, portrait, close-up", "1girl, very wide shot, full body"):
+        assert P.shot_type(prompt, pose=True) == P.shot_type(prompt), prompt                                                                    # portrait and wide shot: unchanged
+    assert P.shot_type("1girl, cowboy shot, peace sign") == "Cowboy shot — hands"                                                              # the gesture rule is still there
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    assert [type(c).__name__ for c in by["on_polish"].inputs] == ["Dropdown", "Textbox"]                                                       # the endpoint's inputs did not change
+    two = by["on_polish_pose"]
+    assert [type(c).__name__ for c in two.inputs] == ["Dropdown", "Textbox", "Checkbox"] and len(two.outputs) == 13, len(two.outputs)
+    cfg = _app.build_app().get_config_file()
+    assert not any(d.get("api_name") == "on_polish_pose" for d in cfg["dependencies"]) and sum(1 for d in cfg["dependencies"] if d.get("api_name") == "on_polish") == 1     # no endpoint of its own
+    keys = ["hires_on", "hires_scale", "hires_denoise", "hires_steps", "hires_upscaler", "fd_on", "fd_denoise", "hd_on", "hd_denoise", "ed_on", "ed_denoise", "md_on"]
+    out = two.fn("Auto", "1girl, cowboy shot", True)
+    want = P.recipe("Cowboy shot — hands")
+    assert [u.get("value") for u in out[:-1]] == [want.get(k) for k in keys] and "Cowboy shot — hands" in out[-1], out
+    out = two.fn("Auto", "1girl, cowboy shot", False)                                                                                           # the checkbox cleared while on Auto: the plain recipe again
+    assert "hands" not in out[-1] and out[7].get("value") in (None, False) or out[7] == {"__type__": "update"}, out
+    for choice in ("(off)", "Full body", "Portrait"):                                                                                           # only Auto is touched
+        res = two.fn(choice, "1girl, cowboy shot", True)
+        assert all(u == {"__type__": "update"} for u in res), (choice, res)
+
+
 @test("Stop that lands after an image's sampler (post pass) still ends the outfit batch and the X/Y grid")
 def _():
     with _BatchEnv() as E:
