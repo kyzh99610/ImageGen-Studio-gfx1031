@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 from backend import colour as _colour
+from backend import composition as _comp
 from backend import pose_control as _pose
 
 LORA_TAG = re.compile(r"<lora:([^:>]+)(?::([-\d.]+))?[^>]*>", re.I)       # A1111 <lora:name:weight>
@@ -57,9 +58,10 @@ def clean_extra(extra: dict | None, available_methods) -> dict:
         # round 34: 🧍 pose control — off unless pc_on; pose = a saved pose's name, model = a folder of models/controlnet/ ('' = the default)
         "pc_on": bool(e.get("pc_on")),
         "pc_pose": re.sub(r"[\x00-\x1f]", "", str(e.get("pc_pose") or "")).strip()[:80],
-        "pc_strength": _pose.clamp_strength(e.get("pc_strength")),
+        "pc_strength": (_comp.clamp_strength if _pose.clean_type(e.get("pc_type")) == _pose.TYPE_COMP else _pose.clamp_strength)(e.get("pc_strength")),
         "pc_model": re.sub(r"[\x00-\x1f]", "", str(e.get("pc_model") or "")).strip()[:80],
         "pc_legs": bool(e.get("pc_legs")),
+        "pc_type": _pose.clean_type(e.get("pc_type")),                       # round 37: Pose (skeleton) / Composition (depth) — off by default like the rest
     }
 
 
@@ -166,6 +168,9 @@ def restore_plan(meta: dict, *, list_checkpoints, list_vaes, list_loras, schedul
     plan["max_detail"] = meta.get("max_detail") if isinstance(meta.get("max_detail"), dict) else None
     plan["colour"] = meta.get("colour") if isinstance(meta.get("colour"), dict) else None
     plan["pose_control"] = meta.get("pose_control") if isinstance(meta.get("pose_control"), dict) else None
+    plan["composition_control"] = meta.get("composition_control") if isinstance(meta.get("composition_control"), dict) else None
+    if plan["composition_control"]:
+        plan["notes"].append("composition control: the depth map is not stored in the picture — upload the source picture again in the 🧍 box (the strength and model are restored)")
     plan["pag_scale"] = float(num(meta.get("pag_scale"), 0.0))
     plan["freeu"] = bool(meta.get("freeu"))
     plan["cfg_rescale"] = float(num(meta.get("cfg_rescale"), 0.0))
@@ -208,11 +213,12 @@ def plan_extra_updates(plan: dict, clean_extra, keep) -> list:
             bool(ed), edx["ed_denoise"] if ed else keep,
             bool(plan.get("max_detail")),
             _colour.clamp_strength((plan.get("colour") or {}).get("strength")),          # a record without a colour scale = back to 1 (off)
-            *(lambda pc: [bool(pc),                                                       # round 34: a record without pose control switches it off, the rest stays
-                          (str(pc.get("pose") or "") or keep) if pc else keep,
-                          _pose.clamp_strength(pc.get("strength")) if pc else keep,
-                          (str(pc.get("model") or "") or keep) if pc else keep,
-                          (pc.get("legs") == "hidden") if pc else keep])(plan.get("pose_control") or {})]
+            *(lambda pc, cc: [bool(pc or cc),                                             # round 34: a record without pose control switches it off, the rest stays
+                              (str(pc.get("pose") or "") or keep) if pc else keep,
+                              (_pose.clamp_strength(pc.get("strength")) if pc else _comp.clamp_strength(cc.get("strength"))) if (pc or cc) else keep,
+                              (str((pc or cc).get("model") or "") or keep) if (pc or cc) else keep,
+                              (pc.get("legs") == "hidden") if pc else keep,
+                              _pose.TYPE_COMP if cc else (_pose.TYPE_POSE if pc else keep)])(plan.get("pose_control") or {}, plan.get("composition_control") or {})]
 
 
 def gen_record(pipe, **settings) -> dict:
