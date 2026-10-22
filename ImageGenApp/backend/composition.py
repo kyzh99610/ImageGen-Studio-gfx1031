@@ -30,6 +30,10 @@ DEPTH_DIR = MODELS_DIR / "depth"
 COMP_DIR = SETTINGS_DIR / "composition"
 CURRENT = "_current"
 STRENGTH_MIN, STRENGTH_MAX, STRENGTH_DEFAULT = 0.4, 0.8, 0.5
+# Round 38: the depth map is flattened to this many layers before it is used. Fine garment relief (collars, cuffs, the folds of a jacket, shoe shapes) is what the source's clothes leak through;
+# flat layers keep the figure, the framing and (mostly) the hands. Measured on 3 sources x 4 outfits (her card, strength 0.5): the leak 0.83 -> 0.12 (0 = none, 1 = yes), composition about the same.
+# 0 / 1 = off (the round-37 behaviour). control_guidance_end < 1 (0.4 / 0.6 / 0.8) did nothing: the garments are set in the first steps.
+FLATTEN_LEVELS = 8
 DEFAULT_MODEL = "xinsir_depth_sdxl_1.0"
 ESTIMATOR_FILE = "depth_anything_v2_small.onnx"
 ESTIMATORS = {
@@ -110,6 +114,16 @@ def depth_map(img: Image.Image, size: int = 518) -> Image.Image:
     return Image.fromarray((d * 255).astype(np.uint8), "L").resize((w, h), Image.BICUBIC)
 
 
+def flatten(depth: Image.Image, levels: int | None = None) -> Image.Image:
+    """The depth map as `levels` flat layers (an 'L' image; the same size). levels < 2 returns it unchanged."""
+    n = FLATTEN_LEVELS if levels is None else int(levels)
+    d = depth.convert("L")
+    if n < 2:
+        return d
+    a = np.asarray(d, np.float32) / 255.0
+    return Image.fromarray((np.round(a * (n - 1)) / (n - 1) * 255).astype(np.uint8), "L")
+
+
 def depth_hash(depth: Image.Image) -> str:
     """10 hex digits that identify a depth map (the record's `source`)."""
     return hashlib.sha256(depth.convert("L").tobytes()).hexdigest()[:10]
@@ -164,5 +178,8 @@ def build_control(ex: dict, width: int, height: int) -> tuple[dict | None, dict 
                             + ("Pick one of: " + ", ".join(local) + "." if local else "Use the ⬇ Download button in the 🧍 box (xinsir depth, Apache-2.0)."))
     strength = clamp_strength(ex.get("pc_strength"))
     rec = {"model": mdl.name, "strength": strength, "source": depth_hash(depth)}
-    ctl = {"image": render(depth, width, height), "scale": strength, "model": str(mdl), "name": "composition"}
+    if FLATTEN_LEVELS >= 2:
+        rec["levels"] = FLATTEN_LEVELS                                    # what ran (round 38); a round-37 record has none = the raw depth map
+    # flattened AFTER the fit: resizing a flat map would blend the layers again (the lab flattened at the generated size)
+    ctl = {"image": flatten(render(depth, width, height).convert("L")).convert("RGB"), "scale": strength, "model": str(mdl), "name": "composition"}
     return ctl, rec, ""

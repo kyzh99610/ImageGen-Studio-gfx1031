@@ -4138,14 +4138,14 @@ def _():
     want = te.text_model.final_layer_norm(enc.hidden_states[-2])      # = Compel PENULTIMATE_..._NORMALIZED
     assert torch.allclose(LT._sd1_hidden(te, enc, 2), want) and LT._sd1_hidden(te, enc, 1) is enc[0]
     cfg = LT.TrainingConfig(base_model="x/base.safetensors", model_type="sd15", dataset_dir="d/myset",
-                            trigger_word="dunk", output_name="t")
+                            trigger_word="mytrig", output_name="t")
     out = Path(_tf.mkdtemp()) / "t.safetensors"
     with patch("peft.get_peft_model_state_dict", return_value={}):
-        LT.save_lora(object(), None, out, cfg, ["dunk, 1girl, grey hair", "dunk, 1girl, red eyes"])
+        LT.save_lora(object(), None, out, cfg, ["mytrig, 1girl, grey hair", "mytrig, 1girl, red eyes"])
     from safetensors import safe_open
     with safe_open(str(out), "pt") as f:
         meta = f.metadata()
-    assert _j.loads(meta["ss_tag_frequency"]) == {"myset": {"dunk": 2, "1girl": 2, "grey hair": 1, "red eyes": 1}}
+    assert _j.loads(meta["ss_tag_frequency"]) == {"myset": {"mytrig": 2, "1girl": 2, "grey hair": 1, "red eyes": 1}}
     assert _j.loads(meta["ss_dataset_dirs"])["myset"]["img_count"] == 2 and meta["ss_clip_skip"] == "2"
     kw = lora_keywords(str(out))
     assert kw is not None and kw.n_images == 2 and dict(kw.tags).get("grey hair") == 0.5, kw
@@ -4342,9 +4342,9 @@ def _():
     assert LT.drop_shared_tags(["a, b", "a, c"], 50) == (["a, b", "a, c"], [])   # < 3 captions: nothing
     assert LT.drop_shared_tags(["a, b", "a, c", "a, d"], 0)[1] == []            # 0 = off
     # the trainer applies it to its items; off = captions untouched
-    items = lambda: [LT._TrainItem(f"{i}.png", c, 64, 64) for i, c in enumerate(["dkq, 1girl, grey hair, x", "dkq, 1girl, grey hair, y", "dkq, 1girl, grey hair, z"])]
-    for pct, want in ((80, ["dkq, x", "dkq, y", "dkq, z"]), (0, ["dkq, 1girl, grey hair, x", "dkq, 1girl, grey hair, y", "dkq, 1girl, grey hair, z"])):
-        tr = LT.LoRATrainer(LT.TrainingConfig(base_model="x.safetensors", trigger_word="dkq", dataset_dir="d", device="cpu", drop_shared_pct=pct))
+    items = lambda: [LT._TrainItem(f"{i}.png", c, 64, 64) for i, c in enumerate(["mytrig, 1girl, grey hair, x", "mytrig, 1girl, grey hair, y", "mytrig, 1girl, grey hair, z"])]
+    for pct, want in ((80, ["mytrig, x", "mytrig, y", "mytrig, z"]), (0, ["mytrig, 1girl, grey hair, x", "mytrig, 1girl, grey hair, y", "mytrig, 1girl, grey hair, z"])):
+        tr = LT.LoRATrainer(LT.TrainingConfig(base_model="x.safetensors", trigger_word="mytrig", dataset_dir="d", device="cpu", drop_shared_pct=pct))
         with patch.object(LT, "_build_items", lambda cfg: items()):
             tr._build_items(None)
         got = [it.caption for it in tr.items]
@@ -4365,7 +4365,7 @@ def _():
             return "✅ Ready"
         cleanup = lambda self: None
     folder = Path(_tf.mkdtemp())
-    base = (str(folder), "dkq", "512 (SD 1.5)", "m.safetensors", 16, 16, 1e-4, 5e-5, 1, True, "attn", "cosine", 1, 0.05, True, False, 0, 42, "cpu", "t", 2)
+    base = (str(folder), "mytrig", "512 (SD 1.5)", "m.safetensors", 16, 16, 1e-4, 5e-5, 1, True, "attn", "cosine", 1, 0.05, True, False, 0, 42, "cpu", "t", 2)
     with patch("backend.lora_trainer.LoRATrainer", FakeTrainer):
         _app._trainer = None
         r_on = h(*base, True, 70)
@@ -4815,6 +4815,13 @@ def _():
         assert r.size == (64, 96) and r.mode == "RGB"
         wide = C.render(g, 128, 64)                                                                                  # another aspect ratio: fitted and centred, black bars
         assert wide.size == (128, 64) and wide.getpixel((0, 32)) == (0, 0, 0) and wide.getpixel((64, 32)) != (0, 0, 0)
+        # the flattening (round 38): N flat layers, idempotent, the same size, off below 2 layers
+        ramp = Image.fromarray(np.tile(np.arange(256, dtype=np.uint8), (8, 1)), "L")
+        f8 = C.flatten(ramp, 8)
+        vals = sorted({v for v in np.asarray(f8).flatten().tolist()})
+        assert f8.size == ramp.size and len(vals) == 8 and vals[0] == 0 and vals[-1] == 255, vals
+        assert np.array_equal(np.asarray(C.flatten(f8, 8)), np.asarray(f8)) and len({v for v in np.asarray(C.flatten(ramp, 3)).flatten().tolist()}) == 3
+        assert np.array_equal(np.asarray(C.flatten(ramp, 1)), np.asarray(ramp)) and np.array_equal(np.asarray(C.flatten(ramp, 0)), np.asarray(ramp)) and C.FLATTEN_LEVELS == 8
         # build_control: refusals and the record
         C.COMP_DIR.joinpath("_current.png").unlink()
         ctl, rec, err = C.build_control(dict(pc_model="", pc_strength=0.5), 64, 96)
@@ -4831,7 +4838,11 @@ def _():
         assert ctl is None and "OpenPose model" in err, err
         ctl, rec, err = C.build_control(dict(pc_model="other_depth_model", pc_strength=2.0), 64, 96)
         assert not err and ctl["scale"] == 0.8 and ctl["image"].size == (64, 96) and ctl["model"].endswith("other_depth_model") and ctl["name"] == "composition", (ctl, err)
-        assert rec == {"model": "other_depth_model", "strength": 0.8, "source": C.depth_hash(g)} and "keypoints" not in rec            # no pixels in the record
+        assert rec == {"model": "other_depth_model", "strength": 0.8, "source": C.depth_hash(g), "levels": C.FLATTEN_LEVELS} and "keypoints" not in rec            # no pixels in the record; what ran (the flattened layers) is
+        assert len({v for v in np.asarray(ctl["image"].convert("L")).flatten().tolist()}) <= C.FLATTEN_LEVELS and C.FLATTEN_LEVELS >= 2       # the model gets flat layers, not the raw depth map
+        with patch.object(C, "FLATTEN_LEVELS", 0):
+            ctl0, rec0, err0 = C.build_control(dict(pc_model="other_depth_model", pc_strength=0.5), 64, 96)
+            assert not err0 and "levels" not in rec0 and len({v for v in np.asarray(ctl0["image"].convert("L")).flatten().tolist()}) > 8      # off = the round-37 raw map
         assert pc.list_models("depth") == ["other_depth_model"] and pc.list_models("pose") == ["xinsir_openpose_sdxl_1.0"] and len(pc.list_models()) == 2
         assert pc.kind_of("xinsir_depth_sdxl_1.0") == "depth" and pc.kind_of("my_pose_net") == "pose" and pc.kind_of("mystery") == "any"
         assert pc.clean_type("composition (depth)") == pc.TYPE_COMP and pc.clean_type(None) == pc.TYPE_POSE and pc.clean_type("Pose (skeleton)") == pc.TYPE_POSE
@@ -4874,6 +4885,9 @@ def _():
     plan = _app._restore_plan(m_rec)
     assert plan["composition_control"]["source"] == "abc1234567" and plan["pose_control"] is None
     assert any("upload the source picture again" in n for n in plan["notes"]), plan["notes"]                                  # the depth map is not stored: said in the restore note
+    assert any("before the depth map was flattened" in n for n in plan["notes"]), plan["notes"]                               # a round-37 record has no `levels`
+    rec8 = dict(rec, composition_control=dict(rec["composition_control"], levels=8))
+    assert not any("flattened" in n for n in _app._restore_plan(meta_of(imagegen=_j.dumps(rec8), parameters="1girl\nSteps: 12, Seed: 1"))["notes"])
     assert "composition control" in _app._plan_summary(plan)
     ups = _app._plan_extra_updates(plan)
     assert ups[-6] is True and ups[-5] == {"__type__": "update"} and ups[-4] == 0.5 and ups[-3] == "xinsir_depth_sdxl_1.0" and ups[-2] == {"__type__": "update"} and ups[-1] == pc.TYPE_COMP, ups[-6:]

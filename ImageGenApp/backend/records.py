@@ -171,6 +171,8 @@ def restore_plan(meta: dict, *, list_checkpoints, list_vaes, list_loras, schedul
     plan["composition_control"] = meta.get("composition_control") if isinstance(meta.get("composition_control"), dict) else None
     if plan["composition_control"]:
         plan["notes"].append("composition control: the depth map is not stored in the picture — upload the source picture again in the 🧍 box (the strength and model are restored)")
+        if "levels" not in plan["composition_control"]:
+            plan["notes"].append("it was made before the depth map was flattened (round 38): it regenerates with flattened depth, so the clothes and small details differ")
     plan["pag_scale"] = float(num(meta.get("pag_scale"), 0.0))
     plan["freeu"] = bool(meta.get("freeu"))
     plan["cfg_rescale"] = float(num(meta.get("cfg_rescale"), 0.0))
