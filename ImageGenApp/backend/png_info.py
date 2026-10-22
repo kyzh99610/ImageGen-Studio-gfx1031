@@ -209,6 +209,9 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
     m = re.search(r"\bPose control: ([^,]+), ([0-9.]+)(, legs hidden)?", param_text)       # round 34: the A1111 text has no keypoints, the imagegen record does
     if m:
         result["pose_control"] = {"model": m.group(1).strip(), "strength": float(m.group(2)), "legs": "hidden" if m.group(3) else "shown"}
+    m = re.search(r"\bComposition control: ([^,]+), ([0-9.]+)", param_text)             # round 37: the depth map is not stored; the record has model / strength / source
+    if m:
+        result["composition_control"] = {"model": m.group(1).strip(), "strength": float(m.group(2))}
     if re.search(r"\bMax detail: 2× Real-ESRGAN\b", param_text):
         result["max_detail"] = {"scale": 2, "method": "Real-ESRGAN (ONNX)"}
 
@@ -237,7 +240,7 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
                                         for l in rec["loras"] if isinstance(l, dict) and l.get("file"))
         if rec.get("vae"):
             result["vae"] = (rec["vae"] or {}).get("file")
-        for k in ("clip_skip", "var_seed", "var_strength", "hires", "face_detail", "hand_detail", "eye_detail", "max_detail", "colour", "pose_control", "inpaint_padding", "emphasis",
+        for k in ("clip_skip", "var_seed", "var_strength", "hires", "face_detail", "hand_detail", "eye_detail", "max_detail", "colour", "pose_control", "composition_control", "inpaint_padding", "emphasis",
                   "pag_scale", "freeu", "cfg_rescale"):
             if rec.get(k) is not None:
                 result[k] = rec[k]
@@ -361,6 +364,8 @@ def format_png_info_html(meta: dict[str, Any]) -> str:
         badges.append(f'<span style="background:#313244;color:#f9e2af;padding:3px 8px;border-radius:4px;font-size:13px;">🎨 Colour strength: <b>{meta["colour"].get("strength")}</b></span>')
     if isinstance(meta.get("pose_control"), dict):
         badges.append(f'<span style="background:#313244;color:#f9e2af;padding:3px 8px;border-radius:4px;font-size:13px;">🧍 Pose control: <b>{escape(str(meta["pose_control"].get("model")))}, {meta["pose_control"].get("strength")}</b></span>')
+    if isinstance(meta.get("composition_control"), dict):
+        badges.append(f'<span style="background:#313244;color:#f9e2af;padding:3px 8px;border-radius:4px;font-size:13px;">🧍 Composition control: <b>{escape(str(meta["composition_control"].get("model")))}, {meta["composition_control"].get("strength")}</b></span>')
     if isinstance(meta.get("max_detail"), dict):
         badges.append('<span style="background:#313244;color:#f9e2af;padding:3px 8px;border-radius:4px;font-size:13px;">🔬 Max detail: <b>2× Real-ESRGAN</b></span>')
     if meta.get("model_hash"):

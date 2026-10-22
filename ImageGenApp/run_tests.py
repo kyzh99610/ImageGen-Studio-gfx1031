@@ -2667,9 +2667,9 @@ def _():
         meta = read_image_metadata(f)
     assert meta["hand_detail"] == {"denoise": 0.45}, meta.get("hand_detail")
     ups = _app._plan_extra_updates(_app._restore_plan(meta))
-    assert ups[-11:-9] == [True, 0.45] and ups[8] is True, ups           # the five pose-control values (round 34) and the colour strength (round 25) come last
+    assert ups[-12:-10] == [True, 0.45] and ups[8] is True, ups           # the six pose / composition values (rounds 34, 37) and the colour strength (round 25) come last
     ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
-    assert ups0[-11] is False
+    assert ups0[-12] is False
 
 
 @test("Inpaint: NaN latents from an fp16 VAE encode (a NoobAI checkpoint's bf16-origin VAE) are retried once in fp32 and the need is remembered; NaN is never pasted")
@@ -2967,7 +2967,7 @@ def _():
         meta = read_image_metadata(f)
     assert meta["eye_detail"] == {"denoise": 0.3}, meta.get("eye_detail")
     ups = _app._plan_extra_updates(_app._restore_plan(meta))
-    assert ups[-9:-7] == [True, 0.3] and ups[-11:-9] == [True, 0.45] and ups[-7] is False and ups[-6] == 1.0, ups
+    assert ups[-10:-8] == [True, 0.3] and ups[-12:-10] == [True, 0.45] and ups[-8] is False and ups[-7] == 1.0, ups
     assert "eye detail" in _app._plan_summary(_app._restore_plan(meta))
 
 
@@ -4554,7 +4554,7 @@ class _BatchEnv:
     def run_xy(self, x_axis, x_vals, pose=""):
         args = ["x.safetensors", "none", "none", 0.7, "none", 0.7, "none", 0.7, False, "1girl", "bad", "Euler a", 4, 6.0,
                 64, 64, 1, 5, None, 0.5, False, 1, -1, 0.0, False, 1.5, 0.45, 14, "Lanczos", False, 0.35, "auto", "",
-                0.0, False, 0.0, False, 0.35, False, 0.35, False, 1.0, False, pose, 0.8, "", False, x_axis, x_vals, "none", ""]
+                0.0, False, 0.0, False, 0.35, False, 0.35, False, 1.0, False, pose, 0.8, "", False, "Pose (skeleton)", x_axis, x_vals, "none", ""]
         return self.xy(*args, progress=lambda *a, **k: None)
 
 
@@ -4727,7 +4727,7 @@ def _():
     by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
     assert [type(c).__name__ for c in by["on_polish"].inputs] == ["Dropdown", "Textbox"]                                                       # the endpoint's inputs did not change
     two = by["on_polish_pose"]
-    assert [type(c).__name__ for c in two.inputs] == ["Dropdown", "Textbox", "Checkbox"] and len(two.outputs) == 13, len(two.outputs)
+    assert [type(c).__name__ for c in two.inputs] == ["Dropdown", "Textbox", "Checkbox", "Radio"] and len(two.outputs) == 13, len(two.outputs)
     cfg = _app.build_app().get_config_file()
     assert not any(d.get("api_name") == "on_polish_pose" for d in cfg["dependencies"]) and sum(1 for d in cfg["dependencies"] if d.get("api_name") == "on_polish") == 1     # no endpoint of its own
     keys = ["hires_on", "hires_scale", "hires_denoise", "hires_steps", "hires_upscaler", "fd_on", "fd_denoise", "hd_on", "hd_denoise", "ed_on", "ed_denoise", "md_on"]
@@ -4739,6 +4739,299 @@ def _():
     for choice in ("(off)", "Full body", "Portrait"):                                                                                           # only Auto is touched
         res = two.fn(choice, "1girl, cowboy shot", True)
         assert all(u == {"__type__": "update"} for u in res), (choice, res)
+
+
+@test("🧍 Composition control (round 37) module: the depth estimator on a FAKE ORT session (multiples of 14, near = white, same size back, unusable output refused), missing / wrong-checksum files, the pinned download, the current depth map, the fit, build_control's refusals and its record")
+def _():
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    import numpy as np
+    from PIL import Image
+    from backend import composition as C, pose_control as pc
+    tmp = Path(tempfile.mkdtemp())
+    seen = {}
+
+    class FakeIn:
+        name = "pixel_values"
+
+    class FakeSess:
+        def get_inputs(self):
+            return [FakeIn()]
+
+        def run(self, _o, feeds):
+            x = feeds["pixel_values"]
+            seen["shape"] = x.shape
+            h, w = x.shape[2], x.shape[3]
+            d = np.tile(np.linspace(3.0, 9.0, w, dtype=np.float32), (h, 1))[None]         # bigger to the right = nearer there
+            return [d]
+    assert C.ESTIMATORS[C.ESTIMATOR_FILE]["license"] == "Apache-2.0" and len(C.ESTIMATORS[C.ESTIMATOR_FILE]["sha256"]) == 64
+    assert C.clamp_strength(None) == 0.5 and C.clamp_strength(0.1) == 0.4 and C.clamp_strength(1.0) == 0.8 and C.clamp_strength("x") == 0.5 and C.clamp_strength(0.65) == 0.65
+    with patch.object(C, "DEPTH_DIR", tmp / "depth"), patch.object(C, "COMP_DIR", tmp / "comp"), patch.object(pc, "CONTROLNET_DIR", tmp / "cn"), patch.object(pc, "POSES_DIR", tmp / "poses"):
+        assert not C.estimator_available() and C.missing_downloads()
+        try:
+            C.depth_map(Image.new("RGB", (64, 96))); raise AssertionError("needs the file")
+        except FileNotFoundError as e:
+            assert "estimator" in str(e)
+        (tmp / "depth").mkdir()
+        C.estimator_path().write_bytes(b"not the model")
+        with patch.object(C.pc, "_make_session", lambda p: FakeSess()):
+            try:
+                C.depth_map(Image.new("RGB", (64, 96))); raise AssertionError("wrong checksum")
+            except RuntimeError as e:
+                assert "SHA-256" in str(e)
+            with patch.dict(C.ESTIMATORS[C.ESTIMATOR_FILE], {"sha256": C.pc._sha256(C.estimator_path())}):
+                C._SESS.clear()
+                im = Image.new("RGB", (160, 240), (90, 40, 40))
+                d = C.depth_map(im)
+                assert d.mode == "L" and d.size == (160, 240), (d.mode, d.size)
+                assert seen["shape"][1] == 3 and seen["shape"][2] % 14 == 0 and seen["shape"][3] % 14 == 0 and min(seen["shape"][2:]) == 518, seen        # 518 short side, multiples of 14
+                a = np.asarray(d)
+                assert a[:, 0].max() <= 3 and a[:, -1].min() >= 252, (a[0, 0], a[0, -1])                           # min-max scaled: the nearest part is white
+                h1 = C.depth_hash(d)
+                assert len(h1) == 10 and h1 == C.depth_hash(d.copy()) and h1 != C.depth_hash(Image.fromarray(255 - a))
+
+                class Bad(FakeSess):
+                    def run(self, _o, feeds):
+                        return [np.full((1, 518, 518), np.nan, np.float32)]
+                C._SESS.clear()
+                with patch.object(C.pc, "_make_session", lambda p: Bad()):
+                    try:
+                        C.depth_map(im); raise AssertionError("nan map")
+                    except RuntimeError as e:
+                        assert "unusable" in str(e)
+        # the pinned download (the shared fetcher is patched: nothing leaves the machine)
+        got = []
+        (tmp / "depth" / C.ESTIMATOR_FILE).unlink()
+        with patch.object(C.pc, "_fetch", lambda repo, f, dest, sha: (got.append((repo, f, sha)), dest.parent.mkdir(parents=True, exist_ok=True), dest.write_bytes(b"x"))):
+            assert "ready" in C.download_estimator() and got == [("onnx-community/depth-anything-v2-small", "onnx/model.onnx", C.ESTIMATORS[C.ESTIMATOR_FILE]["sha256"])]
+            assert "already" in C.download_estimator()
+        # the current depth map and the fit
+        assert C.load_current() is None and not C.has_current()
+        g = Image.fromarray(np.arange(0, 200 * 300, dtype=np.uint32).reshape(300, 200).astype(np.uint8) % 251, "L")
+        hh = C.save_current(g)
+        assert C.has_current() and C.load_current().size == (200, 300) and hh == C.depth_hash(g) and not list((tmp / "poses").glob("*"))        # never in the saved poses
+        r = C.render(g, 64, 96)
+        assert r.size == (64, 96) and r.mode == "RGB"
+        wide = C.render(g, 128, 64)                                                                                  # another aspect ratio: fitted and centred, black bars
+        assert wide.size == (128, 64) and wide.getpixel((0, 32)) == (0, 0, 0) and wide.getpixel((64, 32)) != (0, 0, 0)
+        # build_control: refusals and the record
+        C.COMP_DIR.joinpath("_current.png").unlink()
+        ctl, rec, err = C.build_control(dict(pc_model="", pc_strength=0.5), 64, 96)
+        assert ctl is None and "no picture is loaded" in err
+        C.save_current(g)
+        ctl, rec, err = C.build_control(dict(pc_model="", pc_strength=0.5), 64, 96)
+        assert ctl is None and "no depth ControlNet 'xinsir_depth_sdxl_1.0'" in err and "⬇ Download" in err, err           # nothing installed: the download is named
+        for name in ("other_depth_model", "xinsir_openpose_sdxl_1.0"):
+            m = tmp / "cn" / name
+            m.mkdir(parents=True); (m / "config.json").write_text("{}"); (m / "w.safetensors").write_bytes(b"x")
+        ctl, rec, err = C.build_control(dict(pc_model="", pc_strength=0.5), 64, 96)
+        assert ctl is None and "Pick one of: other_depth_model" in err, err                                         # a depth model exists: listed
+        ctl, rec, err = C.build_control(dict(pc_model="xinsir_openpose_sdxl_1.0", pc_strength=0.5), 64, 96)
+        assert ctl is None and "OpenPose model" in err, err
+        ctl, rec, err = C.build_control(dict(pc_model="other_depth_model", pc_strength=2.0), 64, 96)
+        assert not err and ctl["scale"] == 0.8 and ctl["image"].size == (64, 96) and ctl["model"].endswith("other_depth_model") and ctl["name"] == "composition", (ctl, err)
+        assert rec == {"model": "other_depth_model", "strength": 0.8, "source": C.depth_hash(g)} and "keypoints" not in rec            # no pixels in the record
+        assert pc.list_models("depth") == ["other_depth_model"] and pc.list_models("pose") == ["xinsir_openpose_sdxl_1.0"] and len(pc.list_models()) == 2
+        assert pc.kind_of("xinsir_depth_sdxl_1.0") == "depth" and pc.kind_of("my_pose_net") == "pose" and pc.kind_of("mystery") == "any"
+        assert pc.clean_type("composition (depth)") == pc.TYPE_COMP and pc.clean_type(None) == pc.TYPE_POSE and pc.clean_type("Pose (skeleton)") == pc.TYPE_POSE
+        pc.save_pose("p", {"v": 1, "size": [100, 100], "body": [[1.0, 2.0, 0.9]] * 18, "lh": [], "rh": []})
+        c2, r2, e2 = pc.build_control(dict(pc_pose="p", pc_model="other_depth_model", pc_strength=0.8), 64, 96)                  # the skeleton mode refuses a depth model
+        assert c2 is None and "depth model" in e2, e2
+    assert pc.MODELS["xinsir_depth_sdxl_1.0"]["license"] == "Apache-2.0" and all(len(h) == 64 for _f, h in pc.MODELS["xinsir_depth_sdxl_1.0"]["files"].values())
+
+
+@test("🧍 Composition control (round 37) plumbing: clean_extra (type, strength 0.4-0.8), record → A1111 text → PNG Info → restore plan (the 'upload the picture again' note) → controls, the Pose axis refused in this mode, the Generate endpoints grew by the control type")
+def _():
+    import json as _j, tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    from PIL import Image, PngImagePlugin
+    import app as _app
+    from backend import composition as C, pose_control as pc
+    from backend.png_info import read_png_info, format_png_info_html
+    d0 = _app._clean_extra({})
+    assert d0["pc_type"] == pc.TYPE_POSE and d0["pc_on"] is False and d0["pc_strength"] == 0.8                          # off by default, the skeleton mode unchanged
+    j = _app._clean_extra({"pc_on": 1, "pc_type": "composition (depth)", "pc_strength": 0.95})
+    assert j["pc_type"] == pc.TYPE_COMP and j["pc_strength"] == 0.8 and _app._clean_extra({"pc_type": "Composition (depth)", "pc_strength": "x"})["pc_strength"] == 0.5
+    assert _app._clean_extra({"pc_type": "Composition (depth)", "pc_strength": 0.2})["pc_strength"] == 0.4 and _app._clean_extra({"pc_type": "junk", "pc_strength": 0.95})["pc_strength"] == 0.95
+    rec = {"app": "ImageGen Studio", "format": 2, "mode": "txt2img", "prompt": "1girl", "steps": 12, "cfg_scale": 6.0, "seed": 5, "width": 64, "height": 96, "scheduler": "Euler a",
+           "composition_control": {"model": "xinsir_depth_sdxl_1.0", "strength": 0.5, "source": "abc1234567"}}
+    tmp = Path(tempfile.mkdtemp())
+
+    def meta_of(**chunks):
+        info = PngImagePlugin.PngInfo()
+        for k, v in chunks.items():
+            info.add_text(k, v)
+        f = tmp / f"m{len(list(tmp.glob('*.png')))}.png"
+        Image.new("RGB", (8, 8)).save(f, pnginfo=info)
+        with Image.open(f) as im:
+            return read_png_info(im)
+    m_txt = meta_of(parameters="1girl\nSteps: 12, Seed: 1, Composition control: some_depth, 0.6")
+    assert m_txt["composition_control"] == {"model": "some_depth", "strength": 0.6} and "pose_control" not in m_txt, m_txt
+    assert "Composition control" in format_png_info_html(m_txt)
+    m_rec = meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1")
+    plan = _app._restore_plan(m_rec)
+    assert plan["composition_control"]["source"] == "abc1234567" and plan["pose_control"] is None
+    assert any("upload the source picture again" in n for n in plan["notes"]), plan["notes"]                                  # the depth map is not stored: said in the restore note
+    assert "composition control" in _app._plan_summary(plan)
+    ups = _app._plan_extra_updates(plan)
+    assert ups[-6] is True and ups[-5] == {"__type__": "update"} and ups[-4] == 0.5 and ups[-3] == "xinsir_depth_sdxl_1.0" and ups[-2] == {"__type__": "update"} and ups[-1] == pc.TYPE_COMP, ups[-6:]
+    ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
+    assert ups0[-6] is False and all(u == {"__type__": "update"} for u in ups0[-5:]), ups0[-6:]                               # no control in the record: switched off, the rest stays
+    pose_plan = _app._restore_plan(meta_of(imagegen=_j.dumps(dict(rec, composition_control=None, pose_control={"model": "xinsir_openpose_sdxl_1.0", "strength": 0.8, "pose": "p", "legs": "shown"})),
+                                         parameters="1girl"))
+    assert _app._plan_extra_updates(pose_plan)[-1] == pc.TYPE_POSE and not any("upload the source" in n for n in pose_plan["notes"])
+    # the A1111 text names the composition control only when it ran
+    assert "Composition control: xinsir_depth_sdxl_1.0, 0.5" in _app._params_text(rec) and "Pose control" not in _app._params_text(rec)
+    # the Generate-side endpoints carry the control type last
+    b = _app.build_app()
+    by = {}
+    for f in b.fns:
+        by.setdefault(getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"), f)
+    lab = lambda comps: [getattr(c, "label", None) for c in comps]
+    for fn in ("do_generate_ui", "do_autoloop", "do_card_batch", "do_save_settings"):
+        assert lab(by[fn].inputs[-1:]) == ["Control type"], fn
+    assert lab(by["do_xy_grid"].inputs[-5:-4]) == ["Control type"]
+    # X/Y: the Pose axis (skeleton names) is refused in this mode, the strength axis needs a picture
+    with _BatchEnv() as E, patch.object(C, "COMP_DIR", tmp / "nocomp"):
+        args = ["x.safetensors", "none", "none", 0.7, "none", 0.7, "none", 0.7, False, "1girl", "bad", "Euler a", 4, 6.0,
+                64, 64, 1, 5, None, 0.5, False, 1, -1, 0.0, False, 1.5, 0.45, 14, "Lanczos", False, 0.35, "auto", "",
+                0.0, False, 0.0, False, 0.35, False, 0.35, False, 1.0, False, "", 0.5, "", False, pc.TYPE_COMP]
+        r = E.xy(*args, "Pose", "waving, none", "none", "", progress=lambda *a, **k: None)
+        assert not E.calls and "skeleton poses" in str(r[1]), r[1]
+        r = E.xy(*args, "Pose strength", "0.4, 0.5, 0.7", "none", "", progress=lambda *a, **k: None)
+        assert not E.calls and "upload a picture" in str(r[1]), r[1]
+
+
+@test("🧍 Composition control (round 37) in a real Generate run: a depth map at the picture's size reaches txt2img, PAG is forced to 0 and recorded as 0, the record has composition_control (no pose_control, no pixels), refusals (SD 1.5, no picture, no model, a pose model) say why, img2img ignores it, off = unchanged")
+def _():
+    import json as _j, tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    import numpy as np
+    from PIL import Image
+    from backend import composition as C, pose_control as pc
+    _app, dg, _hp = _app_closures()
+    tmp = Path(tempfile.mkdtemp())
+    seen = []
+
+    class FakeSD:
+        model_family, current_model, _last_vae_path, prediction, device = "illustrious", "x.safetensors", None, {}, "cuda:0"
+        _lora_adapters, boosters, last_seeds, last_var_seeds, pipe = {}, {}, [], [], object()
+        control = None
+
+        def txt2img(self, prompt, neg, w, h, steps, cfg, seed, sched, batch, step_callback=None, **kw):
+            seen.append((self.control, dict(self.boosters)))
+            self.last_seeds = [seed + i for i in range(batch)]
+            return [Image.new("RGB", (w, h), (seed % 255, 40, 90)) for _ in range(batch)], "info"
+
+        def img2img(self, img, prompt, neg, strength, steps, cfg, seed, sched, step_callback=None, clip_skip=1):
+            seen.append((self.control, dict(self.boosters)))
+            self.last_seeds = [seed]
+            return [Image.new("RGB", (img.width, img.height), (1, 2, 3))], "info"
+    old = (_app.sd, _app.OUTPUTS_DIR)
+    _app.sd, _app.OUTPUTS_DIR = FakeSD(), tmp / "outputs"
+    _app.OUTPUTS_DIR.mkdir()
+    try:
+        with patch.object(C, "COMP_DIR", tmp / "comp"), patch.object(pc, "CONTROLNET_DIR", tmp / "cn"), patch.object(pc, "POSES_DIR", tmp / "poses"), \
+                patch.object(_app, "_thermal_wait", lambda *a, **k: 0.0):
+            def run(**extra):
+                seen.clear(); _app._generation_abort.clear()
+                return dg("1girl", "bad", "Euler a", 4, 6.0, 64, 96, 1, 5, None, 0.5, False, extra=dict(pag_scale=2.0, **extra), progress=lambda *a, **k: None)
+            on = dict(pc_on=True, pc_type=pc.TYPE_COMP, pc_strength=0.5, pc_model="")
+            imgs, info, _ = run(**on)
+            assert not imgs and "no picture is loaded" in info, info                                                           # no depth map yet
+            C.save_current(Image.fromarray((np.arange(64 * 96) % 250).astype(np.uint8).reshape(96, 64), "L"))
+            imgs, info, _ = run(**on)
+            assert not imgs and "no depth ControlNet" in info, info                                                            # no model installed
+            m = tmp / "cn" / "xinsir_depth_sdxl_1.0"
+            m.mkdir(parents=True); (m / "config.json").write_text("{}"); (m / "w.safetensors").write_bytes(b"x")
+            imgs, info, _ = run(**on)
+            assert imgs and "Composition control: xinsir_depth_sdxl_1.0" in info and "PAG 2 → 0" in info, info
+            ctl, boost = seen[0]
+            assert ctl["scale"] == 0.5 and ctl["image"].size == imgs[0].size and boost["pag"] == 0.0 and ctl["model"].endswith("xinsir_depth_sdxl_1.0"), (ctl, boost)       # the depth map at the picture's size
+            png = sorted(_app.OUTPUTS_DIR.glob("*.png"), key=lambda p: p.stat().st_mtime)[-1]
+            im = Image.open(png); im.load()
+            r = _j.loads(im.info["imagegen"])
+            assert "pag_scale" not in r and "pose_control" not in r and r["composition_control"]["model"] == "xinsir_depth_sdxl_1.0" and r["composition_control"]["strength"] == 0.5, r
+            assert len(r["composition_control"]["source"]) == 10 and "Composition control: xinsir_depth_sdxl_1.0, 0.5" in im.info["parameters"] and "Pose control" not in im.info["parameters"]
+            assert not list((tmp / "outputs").glob("*.json")) and "depth" not in _j.dumps(r).replace("xinsir_depth", "")                    # the depth map is not stored in the record
+            # refusals and the other paths
+            (m / "w.safetensors").unlink(); (m / "config.json").unlink(); m.rmdir()
+            p2 = tmp / "cn" / "xinsir_openpose_sdxl_1.0"
+            p2.mkdir(); (p2 / "config.json").write_text("{}"); (p2 / "w.safetensors").write_bytes(b"x")
+            imgs, info, _ = run(**dict(on, pc_model="xinsir_openpose_sdxl_1.0"))
+            assert not imgs and "OpenPose model" in info, info
+            _app.sd.model_family = "sd15"
+            imgs, info, _ = run(**on)
+            assert not imgs and "Composition control needs an SDXL" in info, info
+            _app.sd.model_family = "illustrious"
+            imgs, info, _ = dg("1girl", "bad", "Euler a", 4, 6.0, 64, 96, 1, 5, Image.new("RGB", (64, 96)), 0.5, True, extra=dict(on), progress=lambda *a, **k: None)
+            assert imgs and "not used for img2img" in info and seen[-1][0] is None, info
+            imgs, info, _ = run()                                                                                              # the off path: no control, PAG as set
+            assert imgs and seen[0][0] is None and seen[0][1]["pag"] == 2.0 and "omposition" not in info
+    finally:
+        _app._generation_abort.clear()
+        _app.sd, _app.OUTPUTS_DIR = old
+
+
+@test("🧍 Composition control (round 37) box: the control type radio switches strength range / default, model list, pose-only controls and labels (a UI-only listener); the picture upload makes the depth map (a fake estimator), says what is missing; downloads are listed by kind; no pose or starter is touched")
+def _():
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    import numpy as np
+    from PIL import Image
+    import app as _app
+    from backend import composition as C, pose_control as pc
+    b = _app.build_app()
+    by = {}
+    for f in b.fns:
+        by.setdefault(getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"), f)
+    cfg = b.get_config_file()
+    assert not any(d.get("api_name") == "on_type_change" for d in cfg["dependencies"])                                          # the radio's listener has no endpoint of its own
+    assert [type(c).__name__ for c in by["on_pose_extract"].inputs] == ["Image", "Checkbox", "Radio"]
+    assert [type(c).__name__ for c in by["on_pose_download"].inputs] == ["Dropdown", "Radio"] and [type(c).__name__ for c in by["on_pose_refresh"].inputs] == ["Radio"]
+    tmp = Path(tempfile.mkdtemp())
+    for name in ("xinsir_depth_sdxl_1.0", "xinsir_openpose_sdxl_1.0"):
+        m = tmp / "cn" / name
+        m.mkdir(parents=True); (m / "config.json").write_text("{}"); (m / "w.safetensors").write_bytes(b"x")
+    with patch.object(C, "DEPTH_DIR", tmp / "depth"), patch.object(C, "COMP_DIR", tmp / "comp"), patch.object(pc, "CONTROLNET_DIR", tmp / "cn"), patch.object(pc, "POSES_DIR", tmp / "poses"), \
+            patch.object(pc, "STARTER_DIR", tmp / "none"):
+        ch = by["on_type_change"].fn
+        out = ch(pc.TYPE_COMP, "", "xinsir_openpose_sdxl_1.0")
+        s, mdl, v1, v2, v3, lab1, prev, lab2, btn, dl = out
+        assert (s["minimum"], s["maximum"], s["value"]) == (0.4, 0.8, 0.5) and mdl["choices"] == ["xinsir_depth_sdxl_1.0"] and mdl["value"] == "xinsir_depth_sdxl_1.0", (s, mdl)
+        assert v1["visible"] is False and v2["visible"] is False and v3["visible"] is False and "depth" in lab1["label"].lower() and "Depth" in prev["label"] and "Depth estimator" in dl["value"], out
+        out = ch(pc.TYPE_POSE, "", "xinsir_depth_sdxl_1.0")
+        assert (out[0]["minimum"], out[0]["maximum"], out[0]["value"]) == (0.4, 1.0, 0.8) and out[1]["value"] == "xinsir_openpose_sdxl_1.0" and out[2]["visible"] is True and out[9]["value"].startswith("DWPose"), out
+        ex, dl, rf = by["on_pose_extract"].fn, by["on_pose_download"].fn, by["on_pose_refresh"].fn
+        assert "Upload a picture" in ex(None, False, pc.TYPE_COMP)[2]
+        img = Image.new("RGB", (64, 96), (200, 100, 50))
+        r = ex(img, False, pc.TYPE_COMP)
+        assert "depth estimator file is missing" in r[2] and not C.has_current(), r[2]                                           # no estimator: said, nothing saved
+        r = ex(Image.fromarray((np.arange(64 * 96) % 250).astype(np.uint8).reshape(96, 64), "L"), True, pc.TYPE_COMP)       # 'already a depth map': used as it is, no estimator needed
+        assert "Depth map ready" in r[2] and C.has_current() and r[0].size[0] <= 384 and r[1] == {"__type__": "update"}
+        assert not list((tmp / "poses").glob("*")) and pc.list_poses() == []                                                 # saved poses and starters are untouched
+        with patch.object(C, "depth_map", lambda im: Image.new("L", im.size, 128)):
+            (tmp / "depth").mkdir()
+            r = ex(img, False, pc.TYPE_COMP)
+            assert "Depth map ready" in r[2] and C.load_current().size == (64, 96)
+        with patch.object(C, "depth_map", lambda im: (_ for _ in ()).throw(RuntimeError("boom"))):
+            assert "Could not make a depth map: boom" in ex(img, False, pc.TYPE_COMP)[2]
+        with patch.object(C, "download_estimator", lambda say=None: "Depth estimator ready (Apache-2.0)."):
+            from backend import ui_pose as _up
+            r = dl([c for c in _up._download_choices() if c.startswith("Depth estimator")][0], pc.TYPE_COMP)
+            assert "Depth estimator ready" in r[0] and r[1]["choices"] == ["xinsir_depth_sdxl_1.0"], r
+        assert rf(pc.TYPE_COMP)[1]["choices"] == ["xinsir_depth_sdxl_1.0"] and rf(pc.TYPE_POSE)[1]["choices"] == ["xinsir_openpose_sdxl_1.0"]
+        choices = _up._download_choices()
+        assert any(c.startswith("Depth estimator") and "Apache-2.0" in c for c in choices) and any(c.startswith("xinsir_depth_sdxl_1.0") for c in choices)
+    # Polish Auto's '— hands' under pose control stays a skeleton-mode rule
+    two = by["on_polish_pose"].fn
+    skel = two("Auto", "1girl, cowboy shot", True, pc.TYPE_POSE)
+    comp_ = two("Auto", "1girl, cowboy shot", True, pc.TYPE_COMP)
+    assert "hands" in skel[-1] and "hands" not in comp_[-1], (skel[-1], comp_[-1])
 
 
 @test("Stop that lands after an image's sampler (post pass) still ends the outfit batch and the X/Y grid")
@@ -5180,8 +5473,8 @@ def _():
     assert "Max detail: 2× Real-ESRGAN" in txt and "Eye detail: denoise 0.4" in txt, txt
     m_rec = meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1")                       # the record (exact restore)
     plan = _app._restore_plan(m_rec)
-    assert plan["max_detail"] and _app._plan_extra_updates(plan)[-7] is True and "max detail" in _app._plan_summary(plan), plan
-    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-7] is False and _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-6] == 1.0
+    assert plan["max_detail"] and _app._plan_extra_updates(plan)[-8] is True and "max detail" in _app._plan_summary(plan), plan
+    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-8] is False and _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-7] == 1.0
     m_txt = meta_of(parameters="1girl\nSteps: 12, Seed: 1, Max detail: 2× Real-ESRGAN, Eye detail: denoise 0.4")   # the A1111 text alone
     assert m_txt.get("max_detail") == {"scale": 2, "method": "Real-ESRGAN (ONNX)"}, m_txt
     # the pass: twice the size per picture (the Real-ESRGAN call is replaced by a resize), the session is released, > 64 MP refused
@@ -5246,8 +5539,8 @@ def _():
                 return read_png_info(im)
     m_rec = meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1")
     plan = _app._restore_plan(m_rec)
-    assert plan["colour"] == {"strength": 0.8, "method": "lab-chroma"} and _app._plan_extra_updates(plan)[-6] == 0.8 and "colour strength 0.8" in _app._plan_summary(plan), plan
-    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-6] == 1.0
+    assert plan["colour"] == {"strength": 0.8, "method": "lab-chroma"} and _app._plan_extra_updates(plan)[-7] == 0.8 and "colour strength 0.8" in _app._plan_summary(plan), plan
+    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-7] == 1.0
     m_txt = meta_of(parameters="1girl\nSteps: 12, Seed: 1, Colour strength: 0.7")                                       # the A1111 text alone
     assert m_txt.get("colour") == {"strength": 0.7, "method": "lab-chroma"}, m_txt
     from backend.png_info import format_png_info_html
@@ -6249,7 +6542,7 @@ def _():
         ids = []
         for key, m in importlib.import_module("backend.pose_models_private").PRIVATE_MODELS.items():
             ids += [key.lower(), m["repo"].lower(), m["repo"].split("/")[0].lower()]
-        for rel in ("pose_control.py", "ui_pose.py", "help_content.py", "records.py", "png_info.py", "sampling.py", "../app.py", "../README.md", "../run_tests.py"):
+        for rel in ("pose_control.py", "composition.py", "ui_pose.py", "help_content.py", "records.py", "png_info.py", "sampling.py", "../app.py", "../README.md", "../run_tests.py"):
             text = (here / rel).read_text(encoding="utf-8").lower()
             assert not [i for i in ids if i in text], (rel, ids)
 
@@ -6296,26 +6589,26 @@ def _():
         plan = _app._restore_plan(meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1"))
         assert plan["pose_control"]["model"] == "xinsir_openpose_sdxl_1.0" and "pose control" in _app._plan_summary(plan)
         ups = _app._plan_extra_updates(plan)
-        name = ups[-4]["value"]
-        assert ups[-5] is True and name.startswith("restored_") and name in ups[-4]["choices"] and ups[-3] == 0.7 and ups[-2] == "xinsir_openpose_sdxl_1.0" and ups[-1] is True, ups[-5:]
+        name = ups[-5]["value"]
+        assert ups[-6] is True and name.startswith("restored_") and name in ups[-5]["choices"] and ups[-4] == 0.7 and ups[-3] == "xinsir_openpose_sdxl_1.0" and ups[-2] is True and ups[-1] == pc.TYPE_POSE, ups[-6:]
         assert pc.load_pose(name)["body"] == body                                                                  # the pose came back from the record's keypoints
         ups_text = _app._plan_extra_updates(_app._restore_plan(m_txt))                                              # no keypoints: switches it on, keeps the pose
-        assert ups_text[-5] is True and ups_text[-4] == {"__type__": "update"} and ups_text[-3] == 0.6
+        assert ups_text[-6] is True and ups_text[-5] == {"__type__": "update"} and ups_text[-4] == 0.6
         ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
-        assert ups0[-5] is False and all(u == {"__type__": "update"} for u in ups0[-4:]), ups0[-5:]               # a record without pose control switches it off and leaves the rest
+        assert ups0[-6] is False and all(u == {"__type__": "update"} for u in ups0[-5:]), ups0[-6:]               # a record without pose control switches it off and leaves the rest
     # the Generate-side endpoints: the same five controls, last (X/Y: right before the axis inputs), the restore outputs too
     b = _app.build_app()
     by = {}
     for f in b.fns:
         by.setdefault(getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"), f)
-    labels = ["Use pose control", "Pose", "Pose strength", "ControlNet model", "Hide legs"]
+    labels = ["Use pose / composition control", "Pose", "Pose / composition strength", "ControlNet model", "Hide legs", "Control type"]
     lab = lambda comps: [getattr(c, "label", None) for c in comps]
     for fn in ("do_generate_ui", "do_autoloop", "do_card_batch", "do_save_settings"):
-        assert lab(by[fn].inputs[-5:]) == labels, (fn, lab(by[fn].inputs[-7:]))
-    assert lab(by["do_xy_grid"].inputs[-9:-4]) == labels, lab(by["do_xy_grid"].inputs[-10:])
-    assert lab(by["on_i2i_drop"].outputs[-6:-1]) == labels, lab(by["on_i2i_drop"].outputs[-7:])
-    assert lab(by["do_load_settings"].outputs[-6:-1]) == labels, lab(by["do_load_settings"].outputs[-7:])
-    assert lab(by["do_send_to_gen"].outputs[-5:]) == labels, lab(by["do_send_to_gen"].outputs[-6:])
+        assert lab(by[fn].inputs[-6:]) == labels, (fn, lab(by[fn].inputs[-8:]))
+    assert lab(by["do_xy_grid"].inputs[-10:-4]) == labels, lab(by["do_xy_grid"].inputs[-11:])
+    assert lab(by["on_i2i_drop"].outputs[-7:-1]) == labels, lab(by["on_i2i_drop"].outputs[-8:])
+    assert lab(by["do_load_settings"].outputs[-7:-1]) == labels, lab(by["do_load_settings"].outputs[-8:])
+    assert lab(by["do_send_to_gen"].outputs[-6:]) == labels, lab(by["do_send_to_gen"].outputs[-7:])
 
 
 @test("🧍 Pose control (round 34) in a real Generate run: PAG is forced to 0 and recorded as 0, the txt2img pass gets the skeleton at the picture's size, refusals (SD 1.5, no pose, no model, no GPU) say why, img2img ignores it, the off path is unchanged")

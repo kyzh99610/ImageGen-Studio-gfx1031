@@ -38,6 +38,7 @@ CONTROLNET_DIR = MODELS_DIR / "controlnet"
 DETECTOR_DIR = MODELS_DIR / "detectors"
 
 DEFAULT_MODEL = "xinsir_openpose_sdxl_1.0"
+TYPE_POSE, TYPE_COMP = "Pose (skeleton)", "Composition (depth)"      # the values of the 🧍 box's Control type radio (= the extra key pc_type)
 STRENGTH_MIN, STRENGTH_MAX, STRENGTH_DEFAULT = 0.4, 1.0, 0.8
 CURRENT = "(uploaded picture)"          # the label of the pose made from the picture in the upload box (stored as _current)
 _CURRENT_FILE = "_current"
@@ -53,10 +54,15 @@ DWPOSE = {
 }
 # folder name -> repo, licence, files {local name: (repo file name, sha256)}
 MODELS = {
-    DEFAULT_MODEL: dict(repo="xinsir/controlnet-openpose-sdxl-1.0", license="Apache-2.0", mb=2386,
+    DEFAULT_MODEL: dict(repo="xinsir/controlnet-openpose-sdxl-1.0", license="Apache-2.0", mb=2386, kind="pose",
                         files={"config.json": ("config.json", "b5b8f9a7619c9452f19407ef73a01ce3f061fcf932de43ddbaca336d12d02801"),
                                "diffusion_pytorch_model.safetensors": ("diffusion_pytorch_model.safetensors",
                                                                        "b8524e557a7df60d081f5d4a0eb109967d107df217943bf88c2d99b9ebcc06c5")}),
+    # round 37: the public depth ControlNet of the 🧍 Composition mode (same author and licence as the default pose model)
+    "xinsir_depth_sdxl_1.0": dict(repo="xinsir/controlnet-depth-sdxl-1.0", license="Apache-2.0", mb=2386, kind="depth",
+                                  files={"config.json": ("config.json", "b5b8f9a7619c9452f19407ef73a01ce3f061fcf932de43ddbaca336d12d02801"),
+                                         "diffusion_pytorch_model.safetensors": ("diffusion_pytorch_model.safetensors",
+                                                                                 "ea3770af4c33ea8ba8dccc0106ec5d5c5c6e504eb382119a3ccac3c9d973d344")}),
 }
 # PRIVATE-ONLY: models without a stated licence are listed by backend/pose_models_private.py, which the public port deletes (this block stays harmless without it).
 try:                                                       # pragma: no cover - present only in the private repo
@@ -69,6 +75,11 @@ _SESSIONS: dict = {}
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+def clean_type(v) -> str:
+    """The 🧍 control type: Composition (depth) for anything that starts with 'comp', else Pose (skeleton)."""
+    return TYPE_COMP if str(v or "").strip().lower().startswith("comp") else TYPE_POSE
+
+
 def clamp_strength(v) -> float:
     try:
         x = float(v)
@@ -340,16 +351,28 @@ def dwpose_available() -> bool:
     return not missing_dwpose()
 
 
-def list_models() -> list[str]:
-    """Folders of models/controlnet/ that hold a config.json and a .safetensors file (the default one first)."""
+def kind_of(name: str) -> str:
+    """What a ControlNet folder is for: 'pose', 'depth', or 'any' (an unknown model is offered for both). A registered model says so; a local folder by its name."""
+    m = MODELS.get(str(name or ""))
+    if m and m.get("kind"):
+        return m["kind"]
+    n = str(name or "").lower()
+    return "depth" if "depth" in n else "pose" if "pose" in n else "any"
+
+
+def list_models(kind: str | None = None) -> list[str]:
+    """Folders of models/controlnet/ that hold a config.json and a .safetensors file (the default one first). `kind` ('pose' / 'depth') keeps the ones for that use
+    (plus the unclassified ones)."""
     out = []
     try:
         for d in sorted(CONTROLNET_DIR.iterdir(), key=lambda p: p.name.lower()):
             if d.is_dir() and (d / "config.json").is_file() and any(d.glob("*.safetensors")):
-                out.append(d.name)
+                if kind is None or kind_of(d.name) in (kind, "any"):
+                    out.append(d.name)
     except OSError:
         pass
-    return sorted(out, key=lambda n: (n != DEFAULT_MODEL, n.lower()))
+    first = {"depth": "xinsir_depth_sdxl_1.0"}.get(kind or "", DEFAULT_MODEL)
+    return sorted(out, key=lambda n: (n != first, n.lower()))
 
 
 def model_path(name: str) -> Path | None:
@@ -401,7 +424,7 @@ def download_dwpose(say=lambda t: None) -> str:
 def download_model(key: str = DEFAULT_MODEL, say=lambda t: None) -> str:
     m = MODELS.get(key)
     if m is None:
-        raise ValueError(f"Unknown pose model '{key}'.")
+        raise ValueError(f"Unknown ControlNet model '{key}'.")
     for local, (repo_file, sha) in m["files"].items():
         dest = CONTROLNET_DIR / key / local
         if dest.is_file():
@@ -564,6 +587,8 @@ def build_control(ex: dict, width: int, height: int) -> tuple[dict | None, dict 
         return None, None, ("Pose control is on but no pose is chosen — pick a saved pose or upload a picture in the 🧍 Pose control box." if not name
                             else f"Pose control: the pose '{name}' was not found (settings/poses).")
     mdl_name = (ex.get("pc_model") or "").strip() or DEFAULT_MODEL
+    if kind_of(mdl_name) == "depth":
+        return None, None, f"Pose control: '{mdl_name}' is a depth model — pick an OpenPose model, or switch the control type to Composition (depth)."
     mdl = model_path(mdl_name)
     if mdl is None:
         have = missing_downloads()
