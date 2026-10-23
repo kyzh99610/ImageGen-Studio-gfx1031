@@ -500,6 +500,38 @@ def confirmed_hands(image: Image.Image, boxes) -> list:
     return keep
 
 
+# round 48: a judge for 'this hand looks broken'. The hand detector's own score on the hand's crop (box + 0.6 x its side): a mitten fist / blob / tangle is not recognised as a hand.
+# Measured on 908 + 350 blind-rated SDXL hand crops: AUC 0.81-0.92 per source; at < 0.7 precision 0.75-0.91, recall 0.53-0.68, false alarms 3-10 % (a note, never a star);
+# it did NOT help to order or retry 🖐 tries (the tries of one hand share their fate: any good try exists for only 66 % of the hands, a best-first pick adds 4 points of 6).
+HAND_JUDGE_BELOW = 0.7
+
+
+def hand_scores(image: Image.Image, boxes=None) -> list[float]:
+    """The detector's score on the crop of each (confirmed) hand box, in box order; [] when the detector isn't available."""
+    try:
+        if boxes is None:
+            boxes = confirmed_hands(image, detect_hands(image))
+        sess = _hand_session()
+        if sess is None:
+            return []
+        im = image.convert("RGB")
+        out = []
+        for x1, y1, x2, y2 in boxes:
+            half = max(x2 - x1, y2 - y1) * 1.1
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            crop = im.crop((max(0, int(cx - half)), max(0, int(cy - half)), min(im.width, int(cx + half)), min(im.height, int(cy + half))))
+            out.append(max([float(s) for _b, s in _yolo_run(sess, crop, 0.2)] or [0.0]))
+        return out
+    except Exception:
+        return []
+
+
+def hands_look_off(image: Image.Image, boxes=None) -> tuple[int, int]:
+    """(hands whose crop scores below HAND_JUDGE_BELOW, hands judged)."""
+    sc = hand_scores(image, boxes)
+    return sum(1 for v in sc if v < HAND_JUDGE_BELOW), len(sc)
+
+
 def hand_detail(sdp, image: Image.Image, prompt: str, negative: str = "", *, denoise: float = 0.35,
                 steps: int = 20, cfg: float = 7.0, seed: int = -1, scheduler: str = "DPM++ 2M Karras",
                 clip_skip: int = 1, hand_prompt: str = "", max_hands: int = 6, confirm: bool = True,

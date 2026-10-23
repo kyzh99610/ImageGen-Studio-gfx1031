@@ -25,6 +25,7 @@ ACCESSORY_WORDS = ("hair ornament", "hairclip", "hair clip", "hairpin", "hair pi
 ACCESSORY_THRESHOLD = 0.5          # WD14 probability on the head crop under which the pin counts as missing
 SPECK_LIMIT = 0.0005               # share of specks in the picture above which the colour-specks note is written
 SPECK_NOTE = "colour specks — lace, fur or noise? look"
+HAND_NOTE = "a hand may be broken — look, or 🖐 Re-draw hand"      # round 48: the hand detector's score on the hand crop (detail_tools.hands_look_off); a note, never a star
 HEAD_SCALE = 2.4                   # head crop = this many face widths
 
 
@@ -90,7 +91,7 @@ def available() -> dict:
 
 
 def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=None, speck_fn=colour_specks,
-                 identity=None, feature_fn=None, pause=None, identity_z=None) -> list[dict]:
+                 identity=None, feature_fn=None, pause=None, identity_z=None, judge_fn=None) -> list[dict]:
     """Per image {'stars': 1..5, 'flags': ['no face found', 'grey hair 0.12', 'no butterfly hair ornament 0.31', …]} (+ 'notes': [SPECK_NOTE] when the specks check fired: no star).
     The detectors default to the app's own, used only for the checks `available()` reports; pass the *_fn arguments to
     replace them (tests). A check that can't run is simply skipped. `identity` = a card's identity (backend/identity_score):
@@ -107,8 +108,10 @@ def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=No
         from backend.detail_tools import detect_faces
         faces_fn = lambda im: detect_faces(im, "anime")
     if hands_fn is None and can["hands"]:
-        from backend.detail_tools import detect_hands
+        from backend.detail_tools import detect_hands, hands_look_off
         hands_fn = detect_hands
+        if judge_fn is None:
+            judge_fn = hands_look_off
     traits, acc = ic.traits(tags), accessories(tags)
     out, images = [], list(images)
     for k, im in enumerate(images):
@@ -151,8 +154,17 @@ def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=No
                 stars -= 1
                 flags.append(f"not her? face {res['cos']:.2f} (her pictures {res['mean']:.2f})")
         res_ = {"stars": max(1, stars), "flags": flags}
+        notes = []
         if speck_fn and speck_fn(im) > SPECK_LIMIT:
-            res_["notes"] = [SPECK_NOTE]
+            notes.append(SPECK_NOTE)
+        if judge_fn:
+            try:
+                if judge_fn(im)[0]:
+                    notes.append(HAND_NOTE)
+            except Exception:
+                pass
+        if notes:
+            res_["notes"] = notes
         out.append(res_)
     return out
 
