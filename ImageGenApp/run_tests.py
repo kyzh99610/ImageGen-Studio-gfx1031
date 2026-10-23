@@ -6961,6 +6961,40 @@ def _():
 # ══════════════════════════════════════════════════════════════════════════
 # Summary
 # ══════════════════════════════════════════════════════════════════════════
+
+@test("✋ Hand judge (round 48): the detector's score on the hand crop flags a hand below 0.7, the ⭐ rating adds a note (never a star) and the outfit-batch line counts only that note")
+def _():
+    from PIL import Image
+    from backend import detail_tools as D
+    from backend import image_score as S
+    import app as _app
+    im = Image.new("RGB", (400, 600), (180, 170, 160))
+    box = (100, 200, 200, 300)
+    seen = []
+    old = (D._hand_session, D._yolo_run, D.confirmed_hands, D.detect_hands)
+    try:
+        D._hand_session = lambda: object()
+        D.detect_hands = lambda image, *a, **k: [box]
+        D.confirmed_hands = lambda image, boxes: list(boxes)
+        for score, want in ((0.9, (0, 1)), (0.55, (1, 1)), (None, (1, 1))):            # no detection at all in the crop = 0.0 = flagged
+            D._yolo_run = lambda sess, crop, conf, side=640, s=score: seen.append(crop.size) or ([(((0, 0, 5, 5)), s)] if s is not None else [])
+            assert D.hands_look_off(im) == want, (score, D.hands_look_off(im))
+        assert abs(seen[0][0] - 220) <= 1 and abs(seen[0][1] - 220) <= 1, seen[0]                                         # box + 0.6 x its side, as measured
+        D._hand_session = lambda: None
+        assert D.hand_scores(im) == [] and D.hands_look_off(im) == (0, 0)             # no detector: no judgement, no crash
+    finally:
+        D._hand_session, D._yolo_run, D.confirmed_hands, D.detect_hands = old
+    good = {"grey": 0.9}
+    r = S.score_images([im], "", probs_fn=lambda c: good, faces_fn=lambda i: [(150, 50, 250, 150)], hands_fn=lambda i: [box], speck_fn=None, judge_fn=lambda i: (1, 1))[0]
+    assert r["stars"] == 5 and r["notes"] == [S.HAND_NOTE], r                          # a note, no star
+    r = S.score_images([im], "", probs_fn=lambda c: good, faces_fn=lambda i: [(150, 50, 250, 150)], hands_fn=lambda i: [box], speck_fn=None)[0]
+    assert "notes" not in r, r                                                         # hands_fn supplied by a caller and no judge: nothing runs
+    rows = [{"stars": 5, "flags": [], "notes": [S.HAND_NOTE]}, {"stars": 5, "flags": [], "notes": [S.SPECK_NOTE]}, {"stars": 5, "flags": []}]
+    assert "1 picture(s)" in _app._hand_note(rows) and "colour specks" not in _app._hand_note(rows)
+    assert "colour specks in 1 picture" in _app._speck_note(rows) and "hand may be broken" not in _app._speck_note(rows)
+    assert _app._hand_note([{"stars": 5, "flags": []}]) == ""
+
+
 print("\n" + "=" * 70)
 print(f"RESULTS: {PASS} passed, {FAIL} failed, {SKIP} skipped, {PASS + FAIL + SKIP} total")
 print("=" * 70)
@@ -6974,3 +7008,4 @@ else:
     print("\n🎉 All tests passed"
           + (f" ({SKIP} skipped — hardware not present)" if SKIP else "!"))
     sys.exit(0)
+

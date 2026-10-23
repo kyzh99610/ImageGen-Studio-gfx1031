@@ -1212,11 +1212,22 @@ def _identity_margins(card: dict, outfits, n_seeds: int, n: int) -> list:
 
 def _speck_note(scored) -> str:
     """The outfit batch's line for the colour-specks note (round 14: a note, not a star): how many pictures have it, or ''."""
-    n = sum(1 for r in scored if r.get("notes"))
+    from backend.image_score import SPECK_NOTE
+    n = sum(1 for r in scored if SPECK_NOTE in (r.get("notes") or []))
     if not n:
         return ""
     return (f'<br><span style="color:#bac2de;">📝 colour specks in {n} picture(s) — white lace, fur or (rarely) sampler noise: look at '
             f'{"it" if n == 1 else "them"}; no star was taken</span>')
+
+
+def _hand_note(scored) -> str:
+    """The outfit batch's line for the 'hand may be broken' note (round 48: the hand detector's score on the hand crop; a note, no star), or ''."""
+    from backend.image_score import HAND_NOTE
+    n = sum(1 for r in scored if HAND_NOTE in (r.get("notes") or []))
+    if not n:
+        return ""
+    return (f'<br><span style="color:#bac2de;">📝 a hand may be broken in {n} picture(s) — look at {"it" if n == 1 else "them"}, or 🖐 Re-draw hand; '
+            f'when this fires it is right about 9 times in 10, but it sees only about half of the broken hands; no star was taken</span>')
 
 
 def _flag_text(card: dict, outfit: str, flags) -> str:
@@ -2167,6 +2178,14 @@ def _build_generate_tab():
         note = (f'<br>{icon} {label} detail: {sum(found)} {what}(s) re-drawn '
                 f'({", ".join(str(n) for n in found)}) · denoise {den:g} · {time.time() - t0:.1f}s'
                 if sum(found) else f'<br>{icon} {label} detail: no {what}s found' if not errors else '')
+        if kind == "hand" and sum(found):
+            try:      # round 48: the judge on the finished pictures
+                from backend.detail_tools import hands_look_off
+                _off = sum(hands_look_off(r_)[0] for r_ in out)
+                if _off:
+                    note += f' · ⚠ {_off} hand(s) still look off — 🖐 Re-draw hand may help'
+            except Exception:
+                pass
         if kind == "hand" and not sum(found) and not errors:
             from backend.detail_tools import hand_detector_available
             if not hand_detector_available():
@@ -4158,7 +4177,7 @@ def _build_generate_tab():
                 ident += f"<br>✅ hair / eye colours match the card in all {n_real} image(s) (WD14)"
             elif face_checked:
                 ident += f"<br>✅ faces match the card in all {n_real} image(s) (CCIP)"
-            ident += _speck_note(scored)
+            ident += _speck_note(scored) + _hand_note(scored)
             if score_pause.waited[0] >= 1:
                 ident += f"<br>🌡 the rating paused {score_pause.waited[0]:.0f} s while the laptop cooled down"
         msg = (f'<p style="color:#a6e3a1;font-size:13px;">🎴 {html.escape(card["name"])}: {made} new + {reused} '
