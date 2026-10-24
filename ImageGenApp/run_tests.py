@@ -2666,9 +2666,9 @@ def _():
         Image.new("RGB", (8, 8)).save(f, pnginfo=info)
         meta = read_image_metadata(f)
     assert meta["hand_detail"] == {"denoise": 0.45}, meta.get("hand_detail")
-    ups = _app._plan_extra_updates(_app._restore_plan(meta))
+    ups = _app._plan_extra_updates(_app._restore_plan(meta))[:-1]
     assert ups[-12:-10] == [True, 0.45] and ups[8] is True, ups           # the six pose / composition values (rounds 34, 37) and the colour strength (round 25) come last
-    ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
+    ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[:-1]
     assert ups0[-12] is False
 
 
@@ -2966,7 +2966,7 @@ def _():
         Image.new("RGB", (8, 8)).save(f, pnginfo=info)
         meta = read_image_metadata(f)
     assert meta["eye_detail"] == {"denoise": 0.3}, meta.get("eye_detail")
-    ups = _app._plan_extra_updates(_app._restore_plan(meta))
+    ups = _app._plan_extra_updates(_app._restore_plan(meta))[:-1]
     assert ups[-10:-8] == [True, 0.3] and ups[-12:-10] == [True, 0.45] and ups[-8] is False and ups[-7] == 1.0, ups
     assert "eye detail" in _app._plan_summary(_app._restore_plan(meta))
 
@@ -4554,7 +4554,7 @@ class _BatchEnv:
     def run_xy(self, x_axis, x_vals, pose=""):
         args = ["x.safetensors", "none", "none", 0.7, "none", 0.7, "none", 0.7, False, "1girl", "bad", "Euler a", 4, 6.0,
                 64, 64, 1, 5, None, 0.5, False, 1, -1, 0.0, False, 1.5, 0.45, 14, "Lanczos", False, 0.35, "auto", "",
-                0.0, False, 0.0, False, 0.35, False, 0.35, False, 1.0, False, pose, 0.8, "", False, "Pose (skeleton)", x_axis, x_vals, "none", ""]
+                0.0, False, 0.0, False, 0.35, False, 0.35, False, 1.0, False, pose, 0.8, "", False, "Pose (skeleton)", "(off)", x_axis, x_vals, "none", ""]
         return self.xy(*args, progress=lambda *a, **k: None)
 
 
@@ -4889,13 +4889,13 @@ def _():
     rec8 = dict(rec, composition_control=dict(rec["composition_control"], levels=8))
     assert not any("flattened" in n for n in _app._restore_plan(meta_of(imagegen=_j.dumps(rec8), parameters="1girl\nSteps: 12, Seed: 1"))["notes"])
     assert "composition control" in _app._plan_summary(plan)
-    ups = _app._plan_extra_updates(plan)
+    ups = _app._plan_extra_updates(plan)[:-1]
     assert ups[-6] is True and ups[-5] == {"__type__": "update"} and ups[-4] == 0.5 and ups[-3] == "xinsir_depth_sdxl_1.0" and ups[-2] == {"__type__": "update"} and ups[-1] == pc.TYPE_COMP, ups[-6:]
-    ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
+    ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[:-1]
     assert ups0[-6] is False and all(u == {"__type__": "update"} for u in ups0[-5:]), ups0[-6:]                               # no control in the record: switched off, the rest stays
     pose_plan = _app._restore_plan(meta_of(imagegen=_j.dumps(dict(rec, composition_control=None, pose_control={"model": "xinsir_openpose_sdxl_1.0", "strength": 0.8, "pose": "p", "legs": "shown"})),
                                          parameters="1girl"))
-    assert _app._plan_extra_updates(pose_plan)[-1] == pc.TYPE_POSE and not any("upload the source" in n for n in pose_plan["notes"])
+    assert _app._plan_extra_updates(pose_plan)[:-1][-1] == pc.TYPE_POSE and not any("upload the source" in n for n in pose_plan["notes"])
     # the A1111 text names the composition control only when it ran
     assert "Composition control: xinsir_depth_sdxl_1.0, 0.5" in _app._params_text(rec) and "Pose control" not in _app._params_text(rec)
     # the Generate-side endpoints carry the control type last
@@ -4905,13 +4905,13 @@ def _():
         by.setdefault(getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"), f)
     lab = lambda comps: [getattr(c, "label", None) for c in comps]
     for fn in ("do_generate_ui", "do_autoloop", "do_card_batch", "do_save_settings"):
-        assert lab(by[fn].inputs[-1:]) == ["Control type"], fn
-    assert lab(by["do_xy_grid"].inputs[-5:-4]) == ["Control type"]
+        assert lab(by[fn].inputs[-2:-1]) == ["Control type"], fn
+    assert lab(by["do_xy_grid"].inputs[-6:-5]) == ["Control type"]
     # X/Y: the Pose axis (skeleton names) is refused in this mode, the strength axis needs a picture
     with _BatchEnv() as E, patch.object(C, "COMP_DIR", tmp / "nocomp"):
         args = ["x.safetensors", "none", "none", 0.7, "none", 0.7, "none", 0.7, False, "1girl", "bad", "Euler a", 4, 6.0,
                 64, 64, 1, 5, None, 0.5, False, 1, -1, 0.0, False, 1.5, 0.45, 14, "Lanczos", False, 0.35, "auto", "",
-                0.0, False, 0.0, False, 0.35, False, 0.35, False, 1.0, False, "", 0.5, "", False, pc.TYPE_COMP]
+                0.0, False, 0.0, False, 0.35, False, 0.35, False, 1.0, False, "", 0.5, "", False, pc.TYPE_COMP, "(off)"]
         r = E.xy(*args, "Pose", "waving, none", "none", "", progress=lambda *a, **k: None)
         assert not E.calls and "skeleton poses" in str(r[1]), r[1]
         r = E.xy(*args, "Pose strength", "0.4, 0.5, 0.7", "none", "", progress=lambda *a, **k: None)
@@ -5487,8 +5487,8 @@ def _():
     assert "Max detail: 2× Real-ESRGAN" in txt and "Eye detail: denoise 0.4" in txt, txt
     m_rec = meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1")                       # the record (exact restore)
     plan = _app._restore_plan(m_rec)
-    assert plan["max_detail"] and _app._plan_extra_updates(plan)[-8] is True and "max detail" in _app._plan_summary(plan), plan
-    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-8] is False and _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-7] == 1.0
+    assert plan["max_detail"] and _app._plan_extra_updates(plan)[:-1][-8] is True and "max detail" in _app._plan_summary(plan), plan
+    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[:-1][-8] is False and _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[:-1][-7] == 1.0
     m_txt = meta_of(parameters="1girl\nSteps: 12, Seed: 1, Max detail: 2× Real-ESRGAN, Eye detail: denoise 0.4")   # the A1111 text alone
     assert m_txt.get("max_detail") == {"scale": 2, "method": "Real-ESRGAN (ONNX)"}, m_txt
     # the pass: twice the size per picture (the Real-ESRGAN call is replaced by a resize), the session is released, > 64 MP refused
@@ -5553,8 +5553,8 @@ def _():
                 return read_png_info(im)
     m_rec = meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1")
     plan = _app._restore_plan(m_rec)
-    assert plan["colour"] == {"strength": 0.8, "method": "lab-chroma"} and _app._plan_extra_updates(plan)[-7] == 0.8 and "colour strength 0.8" in _app._plan_summary(plan), plan
-    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-7] == 1.0
+    assert plan["colour"] == {"strength": 0.8, "method": "lab-chroma"} and _app._plan_extra_updates(plan)[:-1][-7] == 0.8 and "colour strength 0.8" in _app._plan_summary(plan), plan
+    assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[:-1][-7] == 1.0
     m_txt = meta_of(parameters="1girl\nSteps: 12, Seed: 1, Colour strength: 0.7")                                       # the A1111 text alone
     assert m_txt.get("colour") == {"strength": 0.7, "method": "lab-chroma"}, m_txt
     from backend.png_info import format_png_info_html
@@ -6602,13 +6602,13 @@ def _():
     with patch.object(pc, "POSES_DIR", tmp / "poses"), patch.object(pc, "STARTER_DIR", tmp / "no_starters"):
         plan = _app._restore_plan(meta_of(imagegen=_j.dumps(rec), parameters="1girl\nSteps: 12, Seed: 1"))
         assert plan["pose_control"]["model"] == "xinsir_openpose_sdxl_1.0" and "pose control" in _app._plan_summary(plan)
-        ups = _app._plan_extra_updates(plan)
+        ups = _app._plan_extra_updates(plan)[:-1]
         name = ups[-5]["value"]
         assert ups[-6] is True and name.startswith("restored_") and name in ups[-5]["choices"] and ups[-4] == 0.7 and ups[-3] == "xinsir_openpose_sdxl_1.0" and ups[-2] is True and ups[-1] == pc.TYPE_POSE, ups[-6:]
         assert pc.load_pose(name)["body"] == body                                                                  # the pose came back from the record's keypoints
-        ups_text = _app._plan_extra_updates(_app._restore_plan(m_txt))                                              # no keypoints: switches it on, keeps the pose
+        ups_text = _app._plan_extra_updates(_app._restore_plan(m_txt))[:-1]                                              # no keypoints: switches it on, keeps the pose
         assert ups_text[-6] is True and ups_text[-5] == {"__type__": "update"} and ups_text[-4] == 0.6
-        ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))
+        ups0 = _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[:-1]
         assert ups0[-6] is False and all(u == {"__type__": "update"} for u in ups0[-5:]), ups0[-6:]               # a record without pose control switches it off and leaves the rest
     # the Generate-side endpoints: the same five controls, last (X/Y: right before the axis inputs), the restore outputs too
     b = _app.build_app()
@@ -6618,11 +6618,11 @@ def _():
     labels = ["Use pose / composition control", "Pose", "Pose / composition strength", "ControlNet model", "Hide legs", "Control type"]
     lab = lambda comps: [getattr(c, "label", None) for c in comps]
     for fn in ("do_generate_ui", "do_autoloop", "do_card_batch", "do_save_settings"):
-        assert lab(by[fn].inputs[-6:]) == labels, (fn, lab(by[fn].inputs[-8:]))
-    assert lab(by["do_xy_grid"].inputs[-10:-4]) == labels, lab(by["do_xy_grid"].inputs[-11:])
-    assert lab(by["on_i2i_drop"].outputs[-7:-1]) == labels, lab(by["on_i2i_drop"].outputs[-8:])
-    assert lab(by["do_load_settings"].outputs[-7:-1]) == labels, lab(by["do_load_settings"].outputs[-8:])
-    assert lab(by["do_send_to_gen"].outputs[-6:]) == labels, lab(by["do_send_to_gen"].outputs[-7:])
+        assert lab(by[fn].inputs[-7:-1]) == labels, (fn, lab(by[fn].inputs[-9:]))
+    assert lab(by["do_xy_grid"].inputs[-11:-5]) == labels, lab(by["do_xy_grid"].inputs[-12:])
+    assert lab(by["on_i2i_drop"].outputs[-8:-2]) == labels, lab(by["on_i2i_drop"].outputs[-9:])
+    assert lab(by["do_load_settings"].outputs[-8:-2]) == labels, lab(by["do_load_settings"].outputs[-9:])
+    assert lab(by["do_send_to_gen"].outputs[-7:-1]) == labels, lab(by["do_send_to_gen"].outputs[-8:])
 
 
 @test("🧍 Pose control (round 34) in a real Generate run: PAG is forced to 0 and recorded as 0, the txt2img pass gets the skeleton at the picture's size, refusals (SD 1.5, no pose, no model, no GPU) say why, img2img ignores it, the off path is unchanged")
@@ -6993,6 +6993,123 @@ def _():
     assert "1 picture(s)" in _app._hand_note(rows) and "colour specks" not in _app._hand_note(rows)
     assert "colour specks in 1 picture" in _app._speck_note(rows) and "hand may be broken" not in _app._speck_note(rows)
     assert _app._hand_note([{"stars": 5, "flags": []}]) == ""
+
+
+@test("✨ Polish remembered + Auto per picture (round 50): the dropdown is the extra key `polish` (saved settings, last session, restore), Auto picks the recipe of EACH picture's own resolved prompt inside do_generate (a pose adds '— hands'), the record / A1111 text / PNG Info name it")
+def _():
+    import json as _j
+    from PIL import Image
+    from unittest.mock import patch
+    import app as _app
+    from backend import polish as PL, wildcards as WC
+    from backend.png_info import read_png_info, format_png_info_html
+    # the value is a known entry or (off)
+    assert PL.clean_choice("Auto") == "Auto" and PL.clean_choice("Full body — hands") == "Full body — hands" and PL.clean_choice("nonsense") == "(off)" and PL.clean_choice(None) == "(off)"
+    assert _app._clean_extra({})["polish"] == "(off)" and _app._clean_extra({"polish": "Auto"})["polish"] == "Auto" and _app._clean_extra({"polish": 7})["polish"] == "(off)"
+    # _apply_polish_auto: the recipe of the prompt, replaces the pass settings; a pose / a gesture adds '— hands'; (off) and fixed entries are left alone
+    ex = _app._clean_extra({"polish": "Auto", "hires_on": True, "fd_on": True, "hd_on": False, "ed_on": False})
+    e1, n1 = _app._apply_polish_auto(ex, "1girl, full body, standing")
+    assert n1 == "Full body" and e1["hires_on"] and e1["hires_steps"] == 8 and e1["ed_on"] and not e1["fd_on"] and not e1["hd_on"], (n1, e1)
+    e2, n2 = _app._apply_polish_auto(ex, "1girl, cowboy shot, smile")
+    assert n2 == "Cowboy shot" and not e2["hires_on"] and e2["ed_on"] and not e2["fd_on"], (n2, e2)
+    e3, n3 = _app._apply_polish_auto(ex, "1girl, portrait, upper body")
+    assert n3 == "Portrait" and not e3["hires_on"] and e3["ed_on"]
+    e4, n4 = _app._apply_polish_auto(dict(ex, pc_on=True), "1girl, cowboy shot")
+    assert n4 == "Cowboy shot — hands" and e4["hd_on"] and e4["hd_denoise"] == 0.7, (n4, e4)           # under skeleton pose control
+    e5, n5 = _app._apply_polish_auto(dict(ex, pc_on=True, pc_type=_app._pose.TYPE_COMP), "1girl, cowboy shot")
+    assert n5 == "Cowboy shot" and not e5["hd_on"]                                                      # composition mode: not measured with the hand pass
+    e6, n6 = _app._apply_polish_auto(dict(ex), "1girl, cowboy shot, peace sign")
+    assert n6 == "Cowboy shot — hands"
+    off = _app._clean_extra({"polish": "(off)", "hires_on": True})
+    assert _app._apply_polish_auto(off, "full body") == (off, None)
+    fixed = _app._clean_extra({"polish": "Full body", "hires_on": False})
+    assert _app._apply_polish_auto(fixed, "full body") == (fixed, None)                                 # a fixed entry only filled the controls when it was picked
+    # a real do_generate run with a dynamic prompt: every picture gets the recipe of its own resolved prompt
+    P = "1girl, {cowboy shot|full body|portrait, upper body}, smile"
+    base = next(b for b in range(100, 400) if [PL.shot_type(WC.resolve(P, b + i)) for i in range(4)].count("Full body") == 1
+                and [PL.shot_type(WC.resolve(P, b + i)) for i in range(4)].count("Portrait") >= 1)
+    want = [PL.shot_type(WC.resolve(P, base + i)) for i in range(4)]
+    with _BatchEnv() as E:
+        cl = dict(zip(E.xy.__code__.co_freevars, E.xy.__closure__))
+        dg = cl["do_generate"].cell_contents
+        gcl = dict(zip(dg.__code__.co_freevars, dg.__closure__))
+        ran = []
+        gcl["_hires_pass"].cell_contents = lambda imgs, seeds, prompt, neg, cfg, sched, ex, progress: (ran.append(("hires", prompt, ex["hires_steps"])) or (imgs, "<br>hires"))
+        gcl["_detail_pass"].cell_contents = lambda kind, imgs, seeds, prompt, neg, steps, cfg, sched, ex, progress: (ran.append((kind, prompt)) or (imgs, "<br>" + kind))
+        out = E._app.OUTPUTS_DIR
+
+        def run(polish, **kw):
+            ran.clear()
+            for f in out.glob("*.png"):
+                f.unlink()
+            extra = dict(polish=polish, hires_on=False, ed_on=False, fd_on=False, hd_on=False, **kw)
+            imgs, info, _ = dg(P, "bad", "Euler a", 4, 6.0, 64, 64, 4, base, None, 0.5, False, extra=extra, progress=lambda *a, **k: None)
+            recs = []
+            for f in sorted(out.glob("*.png"), key=lambda p: _j.loads(Image.open(p).info["imagegen"])["seed"]):
+                im = Image.open(f); im.load()
+                recs.append((_j.loads(im.info["imagegen"]), im.info["parameters"], im))
+            return imgs, info, recs
+        imgs, info, recs = run("Auto")
+        assert len(recs) == 4 and [r["polish"]["recipe"] for r, _, _ in recs] == want and all(r["polish"]["auto"] is True for r, _, _ in recs), [r.get("polish") for r, _, _ in recs]
+        assert [("hires" in r) for r, _, _ in recs] == [w == "Full body" for w in want], want                  # full-body lines got hires, the rest did not
+        assert [x[0] for x in ran].count("eye") == 4 and "hand" not in [x[0] for x in ran] and [x[0] for x in ran].count("hires") == want.count("Full body")
+        assert all(f"Polish: {w} (auto)" in t for (r, t, _), w in zip(recs, want)), [t for _, t, _ in recs]
+        assert all("prompt_template" in r for r, _, _ in recs) and "Polish Auto → Full body" in info
+        # PNG Info reads it back (the A1111 text alone too) and the badge names it
+        full = next(im for (r, _, im), w in zip(recs, want) if w == "Full body")
+        meta = read_png_info(full)
+        assert meta["polish"] == {"recipe": "Full body", "auto": True} and "✨ Polish: <b>Full body (auto)</b>" in format_png_info_html(meta)
+        from PIL.PngImagePlugin import PngInfo
+        pi = PngInfo()
+        pi.add_text("parameters", "1girl\nSteps: 12, Seed: 1, Polish: Cowboy shot — hands (auto)")
+        tf = Path(_tf.mkdtemp()) / "t.png"
+        Image.new("RGB", (8, 8)).save(tf, pnginfo=pi)
+        with Image.open(tf) as im_t:
+            assert read_png_info(im_t)["polish"] == {"recipe": "Cowboy shot — hands", "auto": True}            # the A1111 text alone
+        # restore: a picture made with Auto restores Auto, any other picture restores (off) (its own controls must run, not an Auto pick)
+        assert _app._plan_extra_updates(_app._restore_plan(meta))[-1] == "Auto"
+        assert _app._plan_extra_updates(_app._restore_plan({"prompt": "x"}))[-1] == "(off)"
+        # (off) and a fixed entry: the controls as given, no recipe in the record
+        _, _, recs0 = run("(off)")
+        assert all("polish" not in r and "hires" not in r for r, _, _ in recs0) and not ran
+        _, _, recs1 = run("Full body")
+        assert all("polish" not in r for r, _, _ in recs1) and not ran                                       # a fixed entry only fills the controls when it is picked
+        # a static prompt: Auto is applied too (once)
+        ran.clear()
+        for f in out.glob("*.png"):
+            f.unlink()
+        imgs, info, _ = dg("1girl, full body", "bad", "Euler a", 4, 6.0, 64, 64, 1, 5, None, 0.5, False, extra=dict(polish="Auto"), progress=lambda *a, **k: None)
+        r = _j.loads(Image.open(next(out.glob("*.png"))).info["imagegen"])
+        assert r["polish"] == {"recipe": "Full body", "auto": True} and r.get("hires") and [x[0] for x in ran] == ["hires", "eye"], (r.get("polish"), ran)
+    # the settings: saved with the file (a fresh file says (off)) and loaded back into the dropdown; the last session fills it at start; junk falls back to (off)
+    tmp = Path(_tf.mkdtemp())
+    old = _app.SETTINGS_DIR
+    try:
+        _app.SETTINGS_DIR = tmp
+        assert _app._save_generation_settings("p", "n", "DPM++ 2M AYS", 12, 6, 832, 1216, 1, 42, "pol set", model="C:/m/ck.safetensors", vae="none",
+                                              lora_slots=[("none", 0.7)] * 3, auto_quality=True, extra=dict(polish="Auto")).startswith("✅")
+        assert _j.loads((tmp / "pol set.json").read_text(encoding="utf-8"))["extra"]["polish"] == "Auto"
+        b = _app.build_app()
+        by = {}
+        for f in b.fns:
+            by.setdefault(getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"), f)
+        lab = lambda comps: [getattr(c, "label", None) for c in comps]
+        pol_label = by["do_generate_ui"].inputs[-1].label
+        assert pol_label.startswith("✨ Polish")
+        for fn in ("do_generate_ui", "do_autoloop", "do_card_batch", "do_save_settings"):
+            assert by[fn].inputs[-1].label == pol_label, fn
+        assert by["do_xy_grid"].inputs[-5].label == pol_label
+        assert by["do_load_settings"].outputs[-2].label == pol_label and by["on_i2i_drop"].outputs[-2].label == pol_label and by["do_send_to_gen"].outputs[-1].label == pol_label
+        loaded = by["do_load_settings"].fn("pol set")
+        assert loaded[-2] == "Auto", loaded[-3:]
+        dd = next(c for c in b.blocks.values() if getattr(c, "label", "") == pol_label)
+        assert dd.value == "(off)" and dd.choices[0][0] == "(off)"
+        for ls, want_v in (({"polish": "Auto"}, "Auto"), ({"polish": "Full body"}, "Full body"), ({"polish": "junk"}, "(off)")):
+            with patch.object(_app, "_read_last_session", lambda ls=ls: dict(ls)):
+                dd2 = next(c for c in _app.build_app().blocks.values() if getattr(c, "label", "") == pol_label)
+            assert dd2.value == want_v, (ls, dd2.value)
+    finally:
+        _app.SETTINGS_DIR = old
 
 
 print("\n" + "=" * 70)

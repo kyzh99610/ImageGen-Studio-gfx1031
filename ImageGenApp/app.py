@@ -744,6 +744,16 @@ def _clean_extra(extra: dict | None) -> dict:
     return _records.clean_extra(extra, upscaler.available_methods)
 
 
+def _apply_polish_auto(ex: dict, prompt: str) -> tuple[dict, str | None]:
+    """✨ Polish = Auto (round 50): the recipe of THIS picture, chosen from its own (resolved) prompt — the framing tags, a gesture pose, 🧍 pose control (the skeleton mode) —
+    replaces the hires / face / hand / eye settings of `ex`. Returns (extra, the recipe's name), or (ex, None) when Polish is not Auto."""
+    if ex.get("polish") != "Auto":
+        return ex, None
+    from backend import polish as _pl
+    name = _pl.shot_type(prompt or "", pose=bool(ex.get("pc_on")) and ex.get("pc_type") == _pose.TYPE_POSE)
+    return _clean_extra(dict(ex, **_pl.recipe(name))), name
+
+
 # LMS / PNDM filled SDXL pictures with iridescent colour noise until 2026-10-02 (4th-order Adams–Bashforth is unstable on
 # SDXL-family models — backend/sampling lowers the order at the end and caps it at 2 there). PNDM and Heun are clean since,
 # but leave more grain in smooth areas than DPM++ / Euler (measured, 3 seeds: chroma high-pass 0.63 / 0.65 vs 0.52–0.56) —
@@ -1619,10 +1629,11 @@ def _build_generate_tab():
                         from backend import polish as _polish
                         with gr.Row():
                             polish_dd = gr.Dropdown(
-                                ["(off)", "Auto"] + list(_polish.SHOTS), value="(off)", scale=3,
+                                list(_polish.CHOICES), value=_polish.clean_choice(_ls.get("polish")), scale=3,
                                 label="✨ Polish — fill hires fix / face / hand / eye detail for this kind of picture",
                                 info="Sets the controls below to the recipe measured for the framing (Help → ✨ Polish). "
-                                     "Auto reads the framing tags in the prompt. Change anything afterwards.")
+                                     "Auto reads the framing tags of each picture's own prompt when it is made (so a wildcard file can mix portrait / cowboy / full-body lines) "
+                                     "and replaces the hires / face / hand / eye settings; pick a fixed entry to change them by hand.")
                             polish_note = gr.HTML("")
                         with gr.Accordion("🔍 Hires fix — generate small, then refine at a higher resolution",
                                           open=bool(_ls.get("hires_on"))):
@@ -2263,6 +2274,12 @@ def _build_generate_tab():
             fixes.append("img2img is on but no image is loaded — made a new image from the prompt instead")
         prompt, neg_prompt = prompt or "", neg_prompt or ""
         ex = _clean_extra(extra)
+        # ✨ Polish = Auto: the recipe comes from this picture's own prompt. A dynamic prompt is split below into one call per picture (each with its resolved prompt, extra["polish"] still Auto), so it is applied there.
+        polish_name = None
+        if ex["polish"] == "Auto":
+            from backend import wildcards as _wc_p
+            if template is not None or not (_wc_p.is_dynamic(prompt) or _wc_p.is_dynamic(neg_prompt)):
+                ex, polish_name = _apply_polish_auto(ex, prompt)
         # 🧍 Pose control (round 34): the skeleton is drawn at this picture's size; PAG is forced to 0 while it is on (the pair did not fit the card)
         pc_ctl = pc_rec = None
         pc_note = ""
@@ -2464,9 +2481,10 @@ def _build_generate_tab():
                     cs_note = f'<br>🎨 Colour strength {ex["cs"]:g}'
                 except Exception as e:
                     print(f"[Colour] scale failed: {e}")
+            polish_note_html = f'<br>✨ Polish Auto → {polish_name}' if polish_name else ""
             halt_note = (f'<br><span style="color:#fab387;">{halted} — saved the images from before it.</span>'
                          if halted else "")
-            info_html = (f'<p style="color:#a6adc8;font-size:13px;">{info}{hires_note}{hd_note}{fd_note}{md_note}{ed_note}{ed_skip}{cs_note}{pc_note}'
+            info_html = (f'<p style="color:#a6adc8;font-size:13px;">{info}{polish_note_html}{hires_note}{hd_note}{fd_note}{md_note}{ed_note}{ed_skip}{cs_note}{pc_note}'
                          f'{"<br>🌡 Paused " + _fmt_elapsed(cool_wait[0]) + " to let the laptop cool" if cool_wait[0] >= 1 else ""}'
                          f'{halt_note}{tags_note}</p>')
             if use_i2i and init_img is not None and imgs:
@@ -2489,6 +2507,7 @@ def _build_generate_tab():
                 **({"hand_detail": {"denoise": ex["hd_denoise"]}} if hd_note else {}),
                 **({"max_detail": {"scale": 2, "method": "Real-ESRGAN (ONNX)"}} if md_note else {}),
                 **({"colour": {"strength": ex["cs"], "method": _colour.METHOD}} if cs_note else {}),
+                **({"polish": {"recipe": polish_name, "auto": True}} if polish_name else {}),          # round 50: the recipe that actually ran (Auto only)
                 **({pc_key: pc_rec} if pc_ctl else {}),
                 **({"eye_detail": {"denoise": ex["ed_denoise"], **({"style": "natural"} if _eye_style_now() == "natural" else {})}} if ed_note else {}),
                 **({"strength": strength, "source_image": Path(src).name if src else None} if i2i else {}),
@@ -2546,14 +2565,14 @@ def _build_generate_tab():
         clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
         hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
         fd_on=False, fd_denoise=0.4, fd_mode="auto", fd_prompt="",
-        pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35, ed_on=False, ed_denoise=0.4, md_on=False, cs=1.0, pc_on=False, pc_pose="", pc_strength=0.8, pc_model="", pc_legs=False, pc_type=_pose.TYPE_POSE,
+        pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35, ed_on=False, ed_denoise=0.4, md_on=False, cs=1.0, pc_on=False, pc_pose="", pc_strength=0.8, pc_model="", pc_legs=False, pc_type=_pose.TYPE_POSE, polish="(off)",
     ):
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
                                   hires_on=hires_on, hires_scale=hires_scale, hires_denoise=hires_denoise,
                                   hires_steps=hires_steps, hires_upscaler=hires_upscaler, fd_on=fd_on,
                                   fd_denoise=fd_denoise, fd_mode=fd_mode, fd_prompt=fd_prompt,
                                   pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale,
-                                  hd_on=hd_on, hd_denoise=hd_denoise, ed_on=ed_on, ed_denoise=ed_denoise, md_on=md_on, cs=cs, pc_on=pc_on, pc_pose=pc_pose, pc_strength=pc_strength, pc_model=pc_model, pc_legs=pc_legs, pc_type=pc_type))
+                                  hd_on=hd_on, hd_denoise=hd_denoise, ed_on=ed_on, ed_denoise=ed_denoise, md_on=md_on, cs=cs, pc_on=pc_on, pc_pose=pc_pose, pc_strength=pc_strength, pc_model=pc_model, pc_legs=pc_legs, pc_type=pc_type, polish=polish))
         import random
         # Guard against double-start
         if _autoloop_active.is_set():
@@ -2975,7 +2994,7 @@ def _build_generate_tab():
     _EXTRA_KEYS = ["clip_skip", "var_seed", "var_strength", "hires_on", "hires_scale", "hires_denoise", "hires_steps",
                    "hires_upscaler", "fd_on", "fd_denoise", "fd_mode", "fd_prompt", "pag_scale", "freeu", "cfg_rescale",
                    "hd_on", "hd_denoise", "ed_on", "ed_denoise", "md_on", "cs",
-                   "pc_on", "pc_pose", "pc_strength", "pc_model", "pc_legs", "pc_type"]
+                   "pc_on", "pc_pose", "pc_strength", "pc_model", "pc_legs", "pc_type", "polish"]
 
     def do_save_settings(prompt, neg, sched, steps, cfg, w, h, batch, seed, name,
                          model, vae, l1, w1, l2, w2, l3, w3, auto_q, sel_img, imgs, *extras):
@@ -3057,7 +3076,7 @@ def _build_generate_tab():
 
     _settings_extra = [clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
                        hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
-                       pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, md_cb, cs_sl, pc_cb, pc_pose_dd, pc_str_sl, pc_model_dd, pc_legs_cb, pc_type_rd]
+                       pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, md_cb, cs_sl, pc_cb, pc_pose_dd, pc_str_sl, pc_model_dd, pc_legs_cb, pc_type_rd, polish_dd]
     settings_save_btn.click(
         do_save_settings,
         [prompt_txt, neg_prompt_txt, scheduler_dd, steps_sl, cfg_sl,
@@ -3227,7 +3246,7 @@ def _build_generate_tab():
                        clip_skip=1, var_seed=-1, var_strength=0, hires_on=False, hires_scale=1.5,
                        hires_denoise=0.45, hires_steps=15, hires_upscaler="Lanczos",
                        fd_on=False, fd_denoise=0.4, fd_mode="auto", fd_prompt="",
-                       pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35, ed_on=False, ed_denoise=0.4, md_on=False, cs=1.0, pc_on=False, pc_pose="", pc_strength=0.8, pc_model="", pc_legs=False, pc_type=_pose.TYPE_POSE,
+                       pag_scale=0.0, freeu=False, cfg_rescale=0.0, hd_on=False, hd_denoise=0.35, ed_on=False, ed_denoise=0.4, md_on=False, cs=1.0, pc_on=False, pc_pose="", pc_strength=0.8, pc_model="", pc_legs=False, pc_type=_pose.TYPE_POSE, polish="(off)",
                        progress=gr.Progress()):
         _generation_abort.clear()          # a new run starts; Stop from here on counts
         extra = _clean_extra(dict(clip_skip=clip_skip, var_seed=var_seed, var_strength=var_strength,
@@ -3235,7 +3254,7 @@ def _build_generate_tab():
                                   hires_steps=hires_steps, hires_upscaler=hires_upscaler, fd_on=fd_on,
                                   fd_denoise=fd_denoise, fd_mode=fd_mode, fd_prompt=fd_prompt,
                                   pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale,
-                                  hd_on=hd_on, hd_denoise=hd_denoise, ed_on=ed_on, ed_denoise=ed_denoise, md_on=md_on, cs=cs, pc_on=pc_on, pc_pose=pc_pose, pc_strength=pc_strength, pc_model=pc_model, pc_legs=pc_legs, pc_type=pc_type))
+                                  hd_on=hd_on, hd_denoise=hd_denoise, ed_on=ed_on, ed_denoise=ed_denoise, md_on=md_on, cs=cs, pc_on=pc_on, pc_pose=pc_pose, pc_strength=pc_strength, pc_model=pc_model, pc_legs=pc_legs, pc_type=pc_type, polish=polish))
         w1, w2, w3 = (_num(w, 0.8) for w in (w1, w2, w3))
         ok, status = _ensure_model(model_path, vae_path, progress)
         if _generation_abort.is_set():
@@ -3266,7 +3285,7 @@ def _build_generate_tab():
             pag_scale=extra["pag_scale"], freeu=extra["freeu"], cfg_rescale=extra["cfg_rescale"],
             hd_on=extra["hd_on"], hd_denoise=extra["hd_denoise"],
             ed_on=extra["ed_on"], ed_denoise=extra["ed_denoise"], md_on=extra["md_on"], cs=extra["cs"],
-            pc_on=extra["pc_on"], pc_pose=extra["pc_pose"], pc_strength=extra["pc_strength"], pc_model=extra["pc_model"], pc_legs=extra["pc_legs"], pc_type=extra["pc_type"],
+            pc_on=extra["pc_on"], pc_pose=extra["pc_pose"], pc_strength=extra["pc_strength"], pc_model=extra["pc_model"], pc_legs=extra["pc_legs"], pc_type=extra["pc_type"], polish=extra["polish"],
         ))
         seeds = getattr(sd, "last_seeds", None) or []
         return (imgs, info_html, last, status, (list(seeds) if imgs else gr.update()),
@@ -3280,7 +3299,7 @@ def _build_generate_tab():
         init_image, strength_sl, use_i2i_cb,
         clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
         hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
-        pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, md_cb, cs_sl, pc_cb, pc_pose_dd, pc_str_sl, pc_model_dd, pc_legs_cb, pc_type_rd,
+        pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, md_cb, cs_sl, pc_cb, pc_pose_dd, pc_str_sl, pc_model_dd, pc_legs_cb, pc_type_rd, polish_dd,
     ]
     gen_event = generate_btn.click(
         lambda: (None, 0), None, [selected_gallery_image, selected_idx_state],
@@ -3297,7 +3316,7 @@ def _build_generate_tab():
                    scheduler, steps, cfg, width, height, batch, seed, init_img, strength, use_i2i,
                    clip_skip, var_seed, var_strength, hires_on, hires_scale, hires_denoise, hires_steps,
                    hires_upscaler, fd_on, fd_denoise, fd_mode, fd_prompt, pag_scale, freeu, cfg_rescale,
-                   hd_on, hd_denoise, ed_on, ed_denoise, md_on, cs, pc_on, pc_pose, pc_strength, pc_model, pc_legs, pc_type, x_axis, x_text, y_axis, y_text,
+                   hd_on, hd_denoise, ed_on, ed_denoise, md_on, cs, pc_on, pc_pose, pc_strength, pc_model, pc_legs, pc_type, polish, x_axis, x_text, y_axis, y_text,
                    progress=gr.Progress()):
         import random
         _generation_abort.clear()
@@ -3330,7 +3349,7 @@ def _build_generate_tab():
                           hires_scale=hires_scale, hires_denoise=hires_denoise, hires_steps=hires_steps,
                           hires_upscaler=hires_upscaler, fd_on=fd_on, fd_denoise=fd_denoise, fd_mode=fd_mode,
                           fd_prompt=fd_prompt, pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale,
-                          hd_on=hd_on, hd_denoise=hd_denoise, ed_on=ed_on, ed_denoise=ed_denoise, md_on=md_on, cs=cs, pc_on=pc_on, pc_pose=pc_pose, pc_strength=pc_strength, pc_model=pc_model, pc_legs=pc_legs, pc_type=pc_type)
+                          hd_on=hd_on, hd_denoise=hd_denoise, ed_on=ed_on, ed_denoise=ed_denoise, md_on=md_on, cs=cs, pc_on=pc_on, pc_pose=pc_pose, pc_strength=pc_strength, pc_model=pc_model, pc_legs=pc_legs, pc_type=pc_type, polish=polish)
         cells, t0, lora_w_now, model_now = [], time.time(), None, model_path
         cell_seeds = []
         total = len(xs) * len(ys)
@@ -3348,10 +3367,10 @@ def _build_generate_tab():
                         elif axis == "Seed": p["seed"] = v
                         elif axis == "LoRA 1 weight": p["lw"] = v
                         elif axis == "CLIP skip": p["extra"]["clip_skip"] = v
-                        elif axis == "Hires denoise": p["extra"].update(hires_on=True, hires_denoise=v)
-                        elif axis == "Face denoise": p["extra"].update(fd_on=True, fd_denoise=v)
-                        elif axis == "Hand denoise": p["extra"].update(hd_on=True, hd_denoise=v)
-                        elif axis == "Eye denoise": p["extra"].update(ed_on=True, ed_denoise=v)
+                        elif axis == "Hires denoise": p["extra"].update(hires_on=True, hires_denoise=v, polish="(off)")
+                        elif axis == "Face denoise": p["extra"].update(fd_on=True, fd_denoise=v, polish="(off)")
+                        elif axis == "Hand denoise": p["extra"].update(hd_on=True, hd_denoise=v, polish="(off)")
+                        elif axis == "Eye denoise": p["extra"].update(ed_on=True, ed_denoise=v, polish="(off)")
                         elif axis == "PAG scale": p["extra"]["pag_scale"] = v
                         elif axis == "CFG rescale": p["extra"]["cfg_rescale"] = v
                         elif axis == "Colour strength": p["extra"]["cs"] = v
@@ -3501,13 +3520,18 @@ def _build_generate_tab():
 
     def on_polish(choice, prompt, pose_on=False):
         from backend import polish as _pl
+        from backend import wildcards as _wc_n
+        if choice == "Auto" and _wc_n.is_dynamic(prompt or ""):
+            # round 50: a dynamic prompt has no framing yet — every picture gets the recipe of its own resolved prompt when it is made; the controls stay as they are
+            return [gr.update()] * len(_polish_outs) + ['<p style="color:#a6e3a1;font-size:13px;">✨ Auto: each picture gets the recipe for its own prompt (framing tags, a gesture pose, 🧍 pose control) when it is made — the recipe that ran is named under the picture and in its record.</p>']
         name = _pl.shot_type(prompt, pose=pose_on) if choice == "Auto" else choice
         r = _pl.recipe(name)
         if not r:
             return [gr.update()] * len(_polish_outs) + [""]
+        again = " Auto picks again for every picture when it is made." if choice == "Auto" else ""
         return ([gr.update(value=r[k]) if k in r else gr.update() for k in _polish_keys]
                 + [f'<p style="color:#a6e3a1;font-size:13px;">✨ {html.escape(name)}: {html.escape(_pl.summary(name))} '
-                   f'— about {_pl.time_factor(name):g}× the time of the plain picture.</p>'])
+                   f'— about {_pl.time_factor(name):g}× the time of the plain picture.{again}</p>'])
     _polish_evt = polish_dd.input(on_polish, [polish_dd, prompt_txt], _polish_outs + [polish_note])
 
     # round 36: with 🧍 pose control on, Auto also takes the '— hands' recipe (cowboy / full body). on_polish's inputs are API (unchanged), so this is a second, API-less listener that sees the checkbox:
@@ -3552,11 +3576,11 @@ def _build_generate_tab():
                         lora_dd3, lora_weight3, strength_sl, use_i2i_cb, i2i_restore_html,
                         clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl,
                         hires_denoise_sl, hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb,
-                        fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, md_cb, cs_sl, pc_cb, pc_pose_dd, pc_str_sl, pc_model_dd, pc_legs_cb, pc_type_rd, recreate_btn]
+                        fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, md_cb, cs_sl, pc_cb, pc_pose_dd, pc_str_sl, pc_model_dd, pc_legs_cb, pc_type_rd, polish_dd, recreate_btn]
 
     def on_i2i_drop(img, restore):
         keep = [gr.update()] * 18
-        tail = [gr.update()] * 26 + [gr.update(visible=False)]
+        tail = [gr.update()] * 27 + [gr.update(visible=False)]
         if img is None:
             return (*keep, gr.update(), "", *tail)
         if not restore:
@@ -3673,7 +3697,7 @@ def _build_generate_tab():
             loop_max_batches, loop_delay,
             clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl, hires_denoise_sl,
             hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb, fd_prompt_txt,
-            pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, md_cb, cs_sl, pc_cb, pc_pose_dd, pc_str_sl, pc_model_dd, pc_legs_cb, pc_type_rd,
+            pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, md_cb, cs_sl, pc_cb, pc_pose_dd, pc_str_sl, pc_model_dd, pc_legs_cb, pc_type_rd, polish_dd,
         ],
         [output_gallery, gen_info, loop_status, last_generated_images, last_seed_state],
     )
@@ -4028,7 +4052,7 @@ def _build_generate_tab():
                       auto_quality, prompt, neg_prompt, scheduler, steps, cfg, width, height, batch, seed, init_img,
                       strength, use_i2i, clip_skip, var_seed, var_strength, hires_on, hires_scale, hires_denoise,
                       hires_steps, hires_upscaler, fd_on, fd_denoise, fd_mode, fd_prompt, pag_scale, freeu,
-                      cfg_rescale, hd_on, hd_denoise, ed_on=False, ed_denoise=0.4, md_on=False, cs=1.0, pc_on=False, pc_pose="", pc_strength=0.8, pc_model="", pc_legs=False, pc_type=_pose.TYPE_POSE, progress=gr.Progress()):
+                      cfg_rescale, hd_on, hd_denoise, ed_on=False, ed_denoise=0.4, md_on=False, cs=1.0, pc_on=False, pc_pose="", pc_strength=0.8, pc_model="", pc_legs=False, pc_type=_pose.TYPE_POSE, polish="(off)", progress=gr.Progress()):
         """Generate every outfit of the card with the current settings (after 🎴 Load) and the same seeds for
         each outfit, then a labelled contact sheet. Finished outfit/seed pairs are remembered per card
         (outputs/card_batches/<card>.json) and skipped next time while the settings are unchanged."""
@@ -4062,7 +4086,7 @@ def _build_generate_tab():
                                   hires_scale=hires_scale, hires_denoise=hires_denoise, hires_steps=hires_steps,
                                   hires_upscaler=hires_upscaler, fd_on=fd_on, fd_denoise=fd_denoise, fd_mode=fd_mode,
                                   fd_prompt=fd_prompt, pag_scale=pag_scale, freeu=freeu, cfg_rescale=cfg_rescale,
-                                  hd_on=hd_on, hd_denoise=hd_denoise, ed_on=ed_on, ed_denoise=ed_denoise, md_on=md_on, cs=cs, pc_on=pc_on, pc_pose=pc_pose, pc_strength=pc_strength, pc_model=pc_model, pc_legs=pc_legs, pc_type=pc_type))
+                                  hd_on=hd_on, hd_denoise=hd_denoise, ed_on=ed_on, ed_denoise=ed_denoise, md_on=md_on, cs=cs, pc_on=pc_on, pc_pose=pc_pose, pc_strength=pc_strength, pc_model=pc_model, pc_legs=pc_legs, pc_type=pc_type, polish=polish))
         idx_path = OUTPUTS_DIR / "card_batches" / f"{safe_name(card['name']) or 'card'}.json"
         try:
             index = _json.loads(idx_path.read_text(encoding="utf-8")) if idx_path.exists() else {}
@@ -4197,7 +4221,7 @@ def _build_generate_tab():
         "vae": vae_dd,
         "extra": [clip_skip_rb, var_seed_num, var_strength_sl, hires_cb, hires_scale_sl,
                   hires_denoise_sl, hires_steps_sl, hires_up_dd, fd_cb, fd_denoise_sl, fd_mode_rb,
-                  fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, md_cb, cs_sl, pc_cb, pc_pose_dd, pc_str_sl, pc_model_dd, pc_legs_cb, pc_type_rd],
+                  fd_prompt_txt, pag_sl, freeu_cb, cfg_rescale_sl, hd_cb, hd_denoise_sl, ed_cb, ed_denoise_sl, md_cb, cs_sl, pc_cb, pc_pose_dd, pc_str_sl, pc_model_dd, pc_legs_cb, pc_type_rd, polish_dd],
         "lora_dd1": lora_dd,
         "lora_w1": lora_weight,
         "lora_w2": lora_weight2,
@@ -6628,7 +6652,7 @@ def _plan_extra_updates(plan: dict) -> list:
             plan = dict(plan, pose_control=dict(pcr, pose=name))
     out = _records.plan_extra_updates(plan, _clean_extra, gr.update())
     if name:
-        out[-5] = gr.update(choices=_pose.list_poses(), value=name)        # the pose dropdown: the choices must list the restored pose too
+        out[-6] = gr.update(choices=_pose.list_poses(), value=name)        # the pose dropdown: the choices must list the restored pose too
     return out
 
 
@@ -6828,6 +6852,8 @@ def _params_text(rec: dict) -> str:
         parts.append(f"Hand detail: denoise {_num(rec['hand_detail']['denoise'], 0.35):g}")
     if isinstance(rec.get("max_detail"), dict):
         parts.append("Max detail: 2× Real-ESRGAN")
+    if isinstance(rec.get("polish"), dict) and rec["polish"].get("auto") and rec["polish"].get("recipe"):
+        parts.append(f"Polish: {rec['polish']['recipe']} (auto)")
     if isinstance(rec.get("colour"), dict) and rec["colour"].get("strength") is not None:
         parts.append(f"Colour strength: {_num(rec['colour']['strength'], 1.0):g}")
     if isinstance(rec.get("composition_control"), dict) and rec["composition_control"].get("model"):
