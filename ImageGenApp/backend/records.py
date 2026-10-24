@@ -11,6 +11,7 @@ from pathlib import Path
 from backend import colour as _colour
 from backend import composition as _comp
 from backend import pose_control as _pose
+from backend import polish as _polish
 
 LORA_TAG = re.compile(r"<lora:([^:>]+)(?::([-\d.]+))?[^>]*>", re.I)       # A1111 <lora:name:weight>
 
@@ -62,6 +63,7 @@ def clean_extra(extra: dict | None, available_methods) -> dict:
         "pc_model": re.sub(r"[\x00-\x1f]", "", str(e.get("pc_model") or "")).strip()[:80],
         "pc_legs": bool(e.get("pc_legs")),
         "pc_type": _pose.clean_type(e.get("pc_type")),                       # round 37: Pose (skeleton) / Composition (depth) — off by default like the rest
+        "polish": _polish.clean_choice(e.get("polish")),                     # round 50: the ✨ Polish dropdown; "Auto" = the recipe is chosen per picture from its own prompt
     }
 
 
@@ -167,6 +169,7 @@ def restore_plan(meta: dict, *, list_checkpoints, list_vaes, list_loras, schedul
     plan["eye_detail"] = meta.get("eye_detail") if isinstance(meta.get("eye_detail"), dict) else None
     plan["max_detail"] = meta.get("max_detail") if isinstance(meta.get("max_detail"), dict) else None
     plan["colour"] = meta.get("colour") if isinstance(meta.get("colour"), dict) else None
+    plan["polish"] = meta.get("polish") if isinstance(meta.get("polish"), dict) else None          # round 50: {recipe, auto} — only a picture made with Auto names its recipe
     plan["pose_control"] = meta.get("pose_control") if isinstance(meta.get("pose_control"), dict) else None
     plan["composition_control"] = meta.get("composition_control") if isinstance(meta.get("composition_control"), dict) else None
     if plan["composition_control"]:
@@ -220,7 +223,8 @@ def plan_extra_updates(plan: dict, clean_extra, keep) -> list:
                               (_pose.clamp_strength(pc.get("strength")) if pc else _comp.clamp_strength(cc.get("strength"))) if (pc or cc) else keep,
                               (str((pc or cc).get("model") or "") or keep) if (pc or cc) else keep,
                               (pc.get("legs") == "hidden") if pc else keep,
-                              _pose.TYPE_COMP if cc else (_pose.TYPE_POSE if pc else keep)])(plan.get("pose_control") or {}, plan.get("composition_control") or {})]
+                              _pose.TYPE_COMP if cc else (_pose.TYPE_POSE if pc else keep)])(plan.get("pose_control") or {}, plan.get("composition_control") or {}),
+            "Auto" if (plan.get("polish") or {}).get("auto") else "(off)"]            # round 50: a picture made with Auto restores Auto, any other one (off): its own controls must run, not an Auto pick
 
 
 def gen_record(pipe, **settings) -> dict:

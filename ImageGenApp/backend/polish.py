@@ -16,6 +16,13 @@ from __future__ import annotations
 import re
 
 SHOTS = ("Portrait", "Cowboy shot", "Full body", "Wide shot", "Full body — max detail", "Wide shot — max detail", "Cowboy shot — hands", "Full body — hands")
+# the values of the Generate tab's ✨ Polish dropdown (the extra key `polish`: saved settings, the last session, every batch loop)
+CHOICES = ("(off)", "Auto") + SHOTS
+
+
+def clean_choice(v) -> str:
+    """The Polish dropdown's value made safe (saved settings, sessions and records can hold anything): a known entry, else '(off)'."""
+    return v if isinstance(v, str) and v in CHOICES else "(off)"
 
 # extra-settings keys of app._clean_extra that a recipe may set; anything not listed is left as the user has it
 _KEYS = ("hires_on", "hires_scale", "hires_denoise", "hires_steps", "hires_upscaler", "fd_on", "fd_denoise", "hd_on", "hd_denoise",
