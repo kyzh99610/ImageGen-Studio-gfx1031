@@ -1226,7 +1226,7 @@ def _hand_note(scored) -> str:
     n = sum(1 for r in scored if HAND_NOTE in (r.get("notes") or []))
     if not n:
         return ""
-    return (f'<br><span style="color:#bac2de;">📝 a hand may be broken in {n} picture(s) — look at {"it" if n == 1 else "them"}, or 🖐 Re-draw hand; '
+    return (f'<br><span style="color:#bac2de;">📝 a hand may be broken in {n} picture(s) — look at {"it" if n == 1 else "them"}; '
             f'when this fires it is right about 9 times in 10, but it sees only about half of the broken hands; no star was taken</span>')
 
 
@@ -2183,7 +2183,7 @@ def _build_generate_tab():
                 from backend.detail_tools import hands_look_off
                 _off = sum(hands_look_off(r_)[0] for r_ in out)
                 if _off:
-                    note += f' · ⚠ {_off} hand(s) still look off — 🖐 Re-draw hand may help'
+                    note += f' · ⚠ {_off} hand(s) still look off'
             except Exception:
                 pass
         if kind == "hand" and not sum(found) and not errors:
