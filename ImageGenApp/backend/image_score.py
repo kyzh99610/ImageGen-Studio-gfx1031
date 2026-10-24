@@ -25,7 +25,7 @@ ACCESSORY_WORDS = ("hair ornament", "hairclip", "hair clip", "hairpin", "hair pi
 ACCESSORY_THRESHOLD = 0.5          # WD14 probability on the head crop under which the pin counts as missing
 SPECK_LIMIT = 0.0005               # share of specks in the picture above which the colour-specks note is written
 SPECK_NOTE = "colour specks — lace, fur or noise? look"
-HAND_NOTE = "a hand may be broken — look, or 🖐 Re-draw hand"      # round 48: the hand detector's score on the hand crop (detail_tools.hands_look_off); a note, never a star
+HAND_NOTE = "a hand may be broken — look at it"      # round 48: the hand detector's score on the hand crop (detail_tools.hands_look_off); a note, never a star
 HEAD_SCALE = 2.4                   # head crop = this many face widths
 
 
