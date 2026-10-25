@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-SHOTS = ("Portrait", "Cowboy shot", "Full body", "Wide shot", "Full body — max detail", "Wide shot — max detail", "Cowboy shot — hands", "Full body — hands")
+SHOTS = ("Portrait", "Cowboy shot", "Cowboy shot — hires", "Full body", "Wide shot", "Full body — max detail", "Wide shot — max detail", "Cowboy shot — hands", "Full body — hands")
 # the values of the Generate tab's ✨ Polish dropdown (the extra key `polish`: saved settings, the last session, every batch loop)
 CHOICES = ("(off)", "Auto") + SHOTS
 
@@ -34,6 +34,11 @@ RECIPES: dict[str, dict] = {
     # a cowboy shot at 832x1216 puts the face at 24-28 % of the width: the face pass measured no gain there (+0.006 CCIP, -9 % face
     # sharpness), so eyes only, like Portrait (the user's call after round 5; a smaller face still gets the face pass under Full body / Wide)
     "Cowboy shot": dict(hires_on=False, fd_on=False, hd_on=False, ed_on=True, ed_denoise=0.4),
+    # round 52 (an SDXL Illustrious checkpoint with a character LoRA, 16 scenes, rated blind pairwise against the plain recipe above): hires 1.5x with Real-ESRGAN at denoise 0.42,
+    # 12 steps, then the eyes: preferred in 15 of 16 scenes (fitted to screen and at 100 % on the face); the face 215 -> 322 px wide (the picture 1248x1824);
+    # CCIP 0.957 -> 0.953; ~139 s against ~35 s net per picture (home Manual 30 W). What made the fork's pictures look 'more hi-res' was this pass.
+    "Cowboy shot — hires": dict(hires_on=True, hires_scale=1.5, hires_denoise=0.42, hires_steps=12, hires_upscaler="Real-ESRGAN (ONNX)",
+                                fd_on=False, hd_on=False, ed_on=True, ed_denoise=0.4),
     # face ~11-14 %: hires 1.5x alone rescues it (+1.2 identity, stacking the face pass adds nothing); more pixels for the eyes. 8 hires steps, not 14 (round 8, 4 pictures: CCIP -0.001, pin +-0.00,
     # face sharpness x0.98, eye energy x0.98, nothing by eye; hires denoise 0.40 instead of 0.45 was slightly worse at both step counts: CCIP -0.004, sharpness -6 to -8 %)
     "Full body":   dict(hires_on=True, hires_scale=1.5, hires_denoise=0.45, hires_steps=8, hires_upscaler="Lanczos",
@@ -65,7 +70,7 @@ RECIPES: dict[str, dict] = {
 # hires 1.5x ~80 s at 14 steps (round 8: 8 steps give the same picture, ~46 s), face pass ~20 s, eye pass ~13 s at 10 steps (8 steps ~10 s) (laptop heat-soaked: a cool one is faster).
 # Round 8, stage seconds under cool 1.5 (Turbo, 1 plain base = 60 s): the Full body chain 222 s with 14 + 10 steps, 168 s with hires 8 (0.76x), 165 s with hires 10 + eyes 8.
 # Round 9 (Manual / AC, cool 1.5), whole chain / the plain base of the same seed: Full body 8 + 8 steps 2.7x (hassakuXL's round-8 chain 2.8x), 14 + 10 steps 3.8x; Wide shot 8 + 8 3.25-3.57x, 14 hires + 8 eye steps 4.1-4.6x (mean 4.35).
-TIME_FACTOR = {"Portrait": 1.3, "Cowboy shot": 1.3, "Full body": 3.0, "Wide shot": 4.5, "Full body — max detail": 4.5, "Wide shot — max detail": 5.8, "Cowboy shot — hands": 2.0, "Full body — hands": 3.7}
+TIME_FACTOR = {"Portrait": 1.3, "Cowboy shot": 1.3, "Cowboy shot — hires": 4.3, "Full body": 3.0, "Wide shot": 4.5, "Full body — max detail": 4.5, "Wide shot — max detail": 5.8, "Cowboy shot — hands": 2.0, "Full body — hands": 3.7}
 
 # framing tags, widest first (a prompt with several takes the widest); no tag at all → the middle recipe
 _FRAMES = (
@@ -91,7 +96,8 @@ def shot_type(prompt: str, pose: bool = False) -> str:
     hands = f"{name} — hands"
     if hands in RECIPES and (_GESTURE.search(p) or pose):
         return hands
-    return name
+    # round 52: a cowboy shot (and a prompt with no framing tag) gets the hires recipe under Auto; plain "Cowboy shot" stays a choice for speed
+    return "Cowboy shot — hires" if name == "Cowboy shot" else name
 
 
 def recipe(name: str) -> dict:

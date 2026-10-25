@@ -384,7 +384,7 @@ def parameters_html() -> str:
              "The dropdown above Hires fix — Portrait / Cowboy shot / Full body / Wide shot, or Auto (reads the framing tags in the prompt) — "
              "fills hires fix, face detail and eye detail with the recipe for that framing: eyes only for a portrait or cowboy shot (the face is "
              "≥ ~24 % of the width, where face detail changes nothing), hires 1.5× + eyes for a full body, hires 1.5× + face + eyes for a wide shot. "
-             "The note shows how many times the plain picture's time it costs (≈ 1.3× / 1.3× / 3.0× / 4.5×). The eye pass runs 8 steps (against 10: no difference on identical pictures) and a Full body's hires fix 8 (against 14: identity unchanged, "
+             "The note shows how many times the plain picture's time it costs (≈ 1.3× / 1.3× / 3.0× / 4.5×). <b>Cowboy shot — hires</b> (round 52) adds hires 1.5× with Real-ESRGAN (denoise 0.42, 12 steps) before the eyes: in a blind test of 16 scenes it was preferred over the eyes-only recipe in 15, with the face drawn on about 1.5× the pixels and identity unchanged, at about 4.3× the plain picture's time. Auto picks it for cowboy shots and for prompts with no framing tag; choose Cowboy shot for the fast eyes-only version. The eye pass runs 8 steps (against 10: no difference on identical pictures) and a Full body's hires fix 8 (against 14: identity unchanged, "
              "about a quarter cheaper; eye detail ×0.82–0.98 on three anime checkpoints, nothing visible by eye). The Wide shot keeps 14 hires steps: with 8 its small faces' eyes came out about 25 % softer, "
              "visibly so in 2 of 3 pictures (identity unchanged). Hires denoise 0.40 instead of 0.45 was slightly worse, "
              "a 10-step base instead of 12 or no PAG are not free (identity −0.02 / hair pin −0.09 resp. −0.19). "
@@ -404,7 +404,7 @@ def parameters_html() -> str:
              "<b>Wide shot — max detail</b> (round 15) is the Wide shot chain plus the same 2× pass (3648×2496, ≈ 10 MB): a wide shot's eyes are ~20 px each, so the plain chain leaves them blurred. Measured on hassakuXL, "
              "3 seeds, faces 107–129 px: eye detail ×8.5, face sharpness ×3, identity up (CCIP +0.02), the hair clip intact by eye, ×1.29 the time of the plain Wide shot.",
              _cn("高清修复上方的下拉框：人像 / 牛仔镜头 / 全身 / 远景（或“自动”，读取提示词里的构图标签）按构图一键填好高清修复、脸部与眼部重绘："
-                 "人像和牛仔镜头只重绘眼睛（脸宽 ≥ 约 24%，脸部重绘无效），全身 高清修复 1.5×+眼，远景 高清修复 1.5×+脸+眼；提示条显示约为普通出图的几倍时间（约 1.3× / 1.3× / 3.0× / 4.5×）。眼部重绘用 8 步（与 10 步相比，同一张图上没有差别），全身的高清修复用 8 步（与 14 步相比：身份不变，约省四分之一时间；"
+                 "人像和牛仔镜头只重绘眼睛（脸宽 ≥ 约 24%，脸部重绘无效），全身 高清修复 1.5×+眼，远景 高清修复 1.5×+脸+眼；提示条显示约为普通出图的几倍时间（约 1.3× / 1.3× / 3.0× / 4.5×）。<b>Cowboy shot — hires</b>（第 52 轮）在眼部重绘前加一次 Real-ESRGAN 高清修复 1.5×（重绘幅度 0.42，12 步）：16 个场景的盲测中有 15 个更受青睐，脸部像素约为 1.5 倍，身份不变，耗时约为普通出图的 4.3 倍。Auto 对牛仔镜头和没有构图标签的提示会选它；想要快速的只修眼版本请选 Cowboy shot。眼部重绘用 8 步（与 10 步相比，同一张图上没有差别），全身的高清修复用 8 步（与 14 步相比：身份不变，约省四分之一时间；"
                  "眼部细节在三个动漫模型上 ×0.82–0.98，肉眼看不出）。远景仍用 14 步高清修复：8 步时小脸的眼睛约软 25%（3 张图里有 2 张肉眼可见，身份不变）。"
                  "高清修复降噪 0.40 略差于 0.45，底图 10 步或关闭 PAG 并不是免费的（身份 −0.02 / 发饰 −0.09～−0.19）。"
                  "第 50 轮：下拉框的选择会随“💾 保存设置”和上次会话一起保存并在读取时恢复。选“自动”时，每张图在生成时按它自己的提示词（通配符已展开：构图标签、手势姿势、🧍 骨架姿势控制）选择方案，并替换高清修复 / 脸 / 手 / 眼的设置——"
