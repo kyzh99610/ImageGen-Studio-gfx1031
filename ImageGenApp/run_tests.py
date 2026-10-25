@@ -7112,6 +7112,65 @@ def _():
         _app.SETTINGS_DIR = old
 
 
+@test("🔁 Studio Loop: the plan is cleaned, every picture gets a verdict with reasons (blocked / artifact tags, face count, stars, hands), failing settings are parked, starred ones get more, the stop rules hold, and a saved setting still fills every Generate input but img2img's three")
+def _():
+    import datetime as _dtm
+    from backend import loop_plan as LP
+    p = LP.clean_plan({"presets": ["a", {"settings": "b", "count": 12, "prompt_suffix": " night "}, {"x": 1}, ""], "per_round": 3,
+                       "stop_at": "07:00", "max_hours": -5, "gate": {"block_tags": ["Explicit"], "faces": 1, "park_after": 2}, "junk": 1})
+    assert [q["settings"] for q in p["presets"]] == ["a", "b"] and p["presets"][0]["count"] == 3 and p["presets"][1]["count"] == 8
+    assert p["presets"][1]["prompt_suffix"] == "night" and p["max_hours"] == 0.05 and "junk" not in p and p["gate"]["block_tags"] == ["explicit"]
+    for bad in ({}, {"presets": []}, {"presets": ["a"], "stop_at": "7pm"}, []):
+        try:
+            LP.clean_plan(bad)
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+    g = LP.clean_plan({"presets": ["a"]})["gate"]
+    assert "explicit" in g["block_tags"] and "watermark" in g["artifact_tags"]
+    assert LP.verdict({"stars": 5, "flags": []}, {"explicit": 0.8}, 1, g)[0] == "reject"
+    assert LP.verdict({"stars": 5, "flags": []}, {"smile": 0.9, "explicit": 0.2}, 1, g)[0] == "best"     # under the threshold
+    assert LP.verdict({"stars": 5, "flags": []}, {"text": 0.7}, 1, g) == ("reject", ["artifact: text"])
+    assert LP.verdict({"stars": 5, "flags": []}, {}, 2, g) == ("reject", ["2 faces"])
+    assert LP.verdict({"stars": 5, "flags": []}, {}, 1, g) == ("best", [])
+    assert LP.verdict({"stars": 4, "flags": ["no butterfly 0.3"]}, {}, 1, g)[0] == "ok"
+    assert LP.verdict({"stars": 3, "flags": ["not her?"]}, {}, 1, g) == ("review", ["not her?"])
+    assert LP.verdict({"stars": 5, "flags": []}, {}, 1, g, hands_off=1) == ("review", ["1 hand(s) look off"])
+    recs = [dict(file=f"x{i}.png", settings=s, round=r, verdict=v, why=w, stars=st, favourite=fav) for i, (s, r, v, w, st, fav) in enumerate([
+        ("a", 1, "reject", ["artifact: text"], 5, False), ("a", 2, "review", ["2 hand(s) look off"], 4, False),
+        ("b", 1, "best", [], 5, True), ("b", 2, "ok", [], 4, False)])]
+    st = LP.preset_stats(recs)
+    assert st["a"]["last_rounds_kept"] == [0, 0] and st["b"]["keep_rate"] == 1.0 and st["a"]["reasons"]["artifact"] == 1
+    assert st["a"]["reasons"]["hand(s) look off"] == 1                                    # the count in the reason is not part of the key
+    assert LP.reason_key("1 hand(s) look off") == LP.reason_key("2 hand(s) look off") == "hand(s) look off"
+    assert LP.reason_key("grey hair 0.12") == "grey hair" and LP.reason_key("not her? face 0.91 (her pictures 0.96)") == "not her? face"
+    assert LP.reason_key("2 faces") == "faces" and LP.reason_key("artifact: text") == "artifact" and LP.reason_key("9") == "9"
+    pl = LP.clean_plan({"presets": ["a", "b"], "per_round": 2})
+    assert LP.next_counts(pl, st) == {"a": 0, "b": 3}                                    # a parked after 2 empty rounds, b +1 for its star
+    t0 = _dtm.datetime(2026, 1, 1, 23, 0)
+    stop = LP.clean_plan({"presets": ["a"], "stop_at": "07:00", "rounds": 3, "max_hours": 12})
+    assert LP.should_stop(stop, t0, t0.replace(hour=23, minute=30), 1, {"a": 1}) == ""
+    assert "stop time" in LP.should_stop(stop, t0, t0 + _dtm.timedelta(hours=8, minutes=1), 2, {"a": 1})
+    assert "budget" in LP.should_stop(LP.clean_plan({"presets": ["a"], "max_hours": 2}), t0, t0 + _dtm.timedelta(hours=2), 1, {"a": 1})
+    assert "round" in LP.should_stop(stop, t0, t0, 4, {"a": 1}) and "parked" in LP.should_stop(stop, t0, t0, 2, {"a": 0})
+    md = LP.report_md(pl, recs, "stop time 07:00 reached", 61)
+    assert "| b | 2 | 1 | 1 | 0 | 0 |" in md and "- a: kept nothing" in md and "x2.png" in md
+    import json as _json
+    ex = _json.loads((Path(__file__).parent / "loop_example.json").read_text(encoding="utf-8"))
+    assert LP.clean_plan(ex)["presets"]
+    # the runner maps by component id: loading a saved setting must keep filling every Generate input except img2img's three
+    import app as _app
+    cfg = _app.build_app().get_config_file()
+    comp = {c["id"]: c for c in cfg["components"]}
+    dep = {d["api_name"]: d for d in cfg["dependencies"] if d.get("api_name")}
+    left = [comp[i]["props"].get("label") for i in dep["do_generate_ui"]["inputs"] if i not in set(dep["do_load_settings"]["outputs"])]
+    assert sorted(left) == sorted(["Input Image", "Denoise Strength", "Use img2img mode"]), left
+    labels = [str(comp[i]["props"].get("label") or "") for i in dep["do_generate_ui"]["inputs"]]
+    for key in ("Batch Size", "Prompt"):
+        assert labels.count(key) == 1, key                                               # the loop's exact overrides
+    assert sum(l.startswith("Seed") for l in labels) == 1 and sum(l.startswith("✨ Polish") for l in labels) == 1
+
+
 print("\n" + "=" * 70)
 print(f"RESULTS: {PASS} passed, {FAIL} failed, {SKIP} skipped, {PASS + FAIL + SKIP} total")
 print("=" * 70)
