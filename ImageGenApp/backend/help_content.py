@@ -432,6 +432,26 @@ def parameters_html() -> str:
              _cn("LMS、PNDM 以前会在 SDXL 上产生彩色噪点（四阶多步法在 SDXL 上不稳定）；在 SDXL 系列模型（SDXL / Pony / "
                  "Illustrious / NoobAI）上它们现在按二阶运行，已正常。"
                  "PNDM 和 Heun 在天空/背景处仍比 DPM++ 2M Karras / AYS 或 Euler 略多颗粒。")],
+            ["🔁 Studio Loop (unattended rounds)",
+             "studio_loop.bat <plan> renders your saved settings (the 💾 Saved Settings list) round after round without anyone at the computer — "
+             "for example overnight — exactly as 💾 Load + ✨ Generate would, so Polish, the detail passes, colour strength and pose control all apply. "
+             "Every picture is scored on the CPU (one face, hands that look off, the card's hair / eye colours and identity when the plan names a card, "
+             "WD14 tags) and filed under outputs\\loop\\<run>\\ in best / ok / review / reject; a picture with an exposure tag or an artifact "
+             "(text, watermark, border, several views, a second girl) is rejected. Between rounds a setting that kept nothing for two rounds is parked "
+             "(the report lists it under “needs a prompt fix”) and one whose pictures you ⭐ in the History tab gets more pictures. "
+             "A plan is a JSON file in settings\\loop\\ (copy loop_example.json next to the app): the saved settings, pictures per round, a stop "
+             "time (HH:MM) or an hour budget, an optional character card, and the tags that reject a picture. The loop starts its own app (close "
+             "yours first: two apps on one GPU run out of memory) or uses a running one with --attach URL; the app's cool mode / pause while hot "
+             "apply to every picture; a file named STOP in the run folder ends it after the current picture; your Generate tab's last session is put "
+             "back at the end. Read report.html in the run folder in the morning — or ask an assistant to read report.md and adjust the prompts.",
+             _cn("studio_loop.bat <计划> 会在无人值守时（例如整夜）一轮又一轮地渲染你的已保存设置（💾 已保存设置列表），效果与 💾 加载 + ✨ 生成完全相同，"
+                 "Polish、细节重绘、颜色强度、姿势控制都会生效。每张图都在 CPU 上评分（单张脸、看起来不对的手、计划指定角色卡时的发色/瞳色与身份、WD14 标签），"
+                 "并按 best / ok / review / reject 存入 outputs\\loop\\<运行>\\；带有暴露标签或瑕疵（文字、水印、边框、多视图、第二个女孩）的图会被拒绝。"
+                 "每轮之间，连续两轮没有留下好图的设置会被暂停（报告里列在“需要修改提示词”下），你在历史标签页加 ⭐ 的设置会多出图。"
+                 "计划是 settings\\loop\\ 里的 JSON 文件（复制程序旁的 loop_example.json）：已保存设置、每轮张数、停止时间（HH:MM）或小时数、可选的角色卡、"
+                 "以及会拒绝图片的标签。循环会自己启动程序（请先关掉你的：同一张显卡上开两个程序会爆显存），或用 --attach URL 连接已运行的程序；"
+                 "程序的降温模式/过热暂停对每张图都有效；在运行文件夹里放一个名为 STOP 的文件，会在当前这张图完成后结束；结束时会恢复你生成标签页的上次会话。"
+                 "早上打开运行文件夹里的 report.html 查看——或者让助手读 report.md 来调整提示词。")],
             ["🎴 Every outfit of a card",
              "Character cards → “🎴▶ Generate every outfit”: each outfit × N seeds (the same seeds for every outfit) "
              "with the current settings, then a labelled contact sheet. Pairs already made with the same settings "

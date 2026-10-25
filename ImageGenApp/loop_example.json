@@ -1,0 +1,23 @@
+{
+ "_help": "Copy to settings\\loop\\<name>.json. presets = names of your saved settings (the Saved Settings list). per_round = pictures per setting per round (1-8). Stops at stop_at (HH:MM), after max_hours, after rounds (0 = no limit), or when a file named STOP appears in the run folder. card = a character card whose identity scores the faces (optional). polish = a Polish choice to force (e.g. Auto), empty = what each saved setting has. gate.block_tags / artifact_tags = WD14 tags that reject a picture; park_after = rounds with no keeper before a setting is parked.",
+ "presets": [
+  "my portrait setting",
+  {
+   "settings": "my outfit setting",
+   "count": 3,
+   "prompt_suffix": "night, city lights"
+  }
+ ],
+ "per_round": 2,
+ "rounds": 0,
+ "stop_at": "07:00",
+ "max_hours": 8,
+ "card": "",
+ "polish": "",
+ "gate": {
+  "tag_threshold": 0.5,
+  "faces": 1,
+  "min_stars_ok": 4,
+  "park_after": 2
+ }
+}
