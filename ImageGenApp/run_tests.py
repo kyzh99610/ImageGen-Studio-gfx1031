@@ -2810,7 +2810,7 @@ def _():
         # Auto: a gesture pose on a cowboy / full-body framing takes the '— hands' variant; portrait / wide and other poses don't
         for prompt, want in (("1girl, v, peace sign, cowboy shot", "Cowboy shot — hands"), ("1girl, (reaching towards viewer:1.1), full body", "Full body — hands"),
                              ("1girl, arms up, smile", "Cowboy shot — hands"), ("1girl, peace sign, portrait", "Portrait"), ("1girl, waving, wide shot", "Wide shot"),
-                             ("1girl, hands on hips, full body", "Full body"), ("1girl, v-neck, cowboy shot", "Cowboy shot"), ("1girl, arms up stretching", "Cowboy shot")):
+                             ("1girl, hands on hips, full body", "Full body"), ("1girl, v-neck, cowboy shot", "Cowboy shot — hires"), ("1girl, arms up stretching", "Cowboy shot — hires")):
             assert P.shot_type(prompt) == want, (prompt, P.shot_type(prompt), want)
     finally:
         dt._hand_session, dt._yolo_run, dt.detect_hands, dt.inpaint_region, dt._face_model_cached = orig
@@ -4719,7 +4719,7 @@ def _():
 def _():
     import app as _app
     from backend import polish as P
-    assert P.shot_type("1girl, cowboy shot, standing") == "Cowboy shot" and P.shot_type("1girl, cowboy shot, standing", pose=True) == "Cowboy shot — hands"
+    assert P.shot_type("1girl, cowboy shot, standing") == "Cowboy shot — hires" and P.shot_type("1girl, cowboy shot, standing", pose=True) == "Cowboy shot — hands"
     assert P.shot_type("1girl, full body", pose=True) == "Full body — hands" and P.shot_type("", pose=True) == "Cowboy shot — hands"            # no framing tag = the middle recipe
     for prompt in ("1girl, portrait, close-up", "1girl, very wide shot, full body"):
         assert P.shot_type(prompt, pose=True) == P.shot_type(prompt), prompt                                                                    # portrait and wide shot: unchanged
@@ -5844,9 +5844,9 @@ def _():
     r = P.recipe("Wide shot"); r["hires_on"] = False
     assert P.recipe("Wide shot")["hires_on"] is True                                   # recipe() hands out copies
     framing = {"1girl, portrait, close-up, face focus": "Portrait", "1girl, upper body, looking at viewer, standing": "Portrait",
-               "1girl, cowboy shot, standing, night, city lights": "Cowboy shot", "1girl, (full body:1.2), standing": "Full body",
-               "1girl, very wide shot, from far away, full body, standing": "Wide shot", "1girl, white dress, simple background": "Cowboy shot",
-               "": "Cowboy shot", "1girl, close up, full-body": "Full body", "1girl, <lora:x:1>, thigh up": "Cowboy shot"}
+               "1girl, cowboy shot, standing, night, city lights": "Cowboy shot — hires", "1girl, (full body:1.2), standing": "Full body",
+               "1girl, very wide shot, from far away, full body, standing": "Wide shot", "1girl, white dress, simple background": "Cowboy shot — hires",
+               "": "Cowboy shot — hires", "1girl, close up, full-body": "Full body", "1girl, <lora:x:1>, thigh up": "Cowboy shot — hires"}
     for prompt, want in framing.items():
         assert P.shot_type(prompt) == want, (prompt, P.shot_type(prompt), want)
     by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
@@ -7011,13 +7011,13 @@ def _():
     e1, n1 = _app._apply_polish_auto(ex, "1girl, full body, standing")
     assert n1 == "Full body" and e1["hires_on"] and e1["hires_steps"] == 8 and e1["ed_on"] and not e1["fd_on"] and not e1["hd_on"], (n1, e1)
     e2, n2 = _app._apply_polish_auto(ex, "1girl, cowboy shot, smile")
-    assert n2 == "Cowboy shot" and not e2["hires_on"] and e2["ed_on"] and not e2["fd_on"], (n2, e2)
+    assert n2 == "Cowboy shot — hires" and e2["hires_on"] and e2["hires_upscaler"] == PL.recipe("Cowboy shot — hires")["hires_upscaler"] and e2["hires_steps"] == 12 and e2["ed_on"] and not e2["fd_on"], (n2, e2)   # round 52
     e3, n3 = _app._apply_polish_auto(ex, "1girl, portrait, upper body")
     assert n3 == "Portrait" and not e3["hires_on"] and e3["ed_on"]
     e4, n4 = _app._apply_polish_auto(dict(ex, pc_on=True), "1girl, cowboy shot")
     assert n4 == "Cowboy shot — hands" and e4["hd_on"] and e4["hd_denoise"] == 0.7, (n4, e4)           # under skeleton pose control
     e5, n5 = _app._apply_polish_auto(dict(ex, pc_on=True, pc_type=_app._pose.TYPE_COMP), "1girl, cowboy shot")
-    assert n5 == "Cowboy shot" and not e5["hd_on"]                                                      # composition mode: not measured with the hand pass
+    assert n5 == "Cowboy shot — hires" and not e5["hd_on"]                                                      # composition mode: not measured with the hand pass
     e6, n6 = _app._apply_polish_auto(dict(ex), "1girl, cowboy shot, peace sign")
     assert n6 == "Cowboy shot — hands"
     off = _app._clean_extra({"polish": "(off)", "hires_on": True})
@@ -7051,8 +7051,8 @@ def _():
             return imgs, info, recs
         imgs, info, recs = run("Auto")
         assert len(recs) == 4 and [r["polish"]["recipe"] for r, _, _ in recs] == want and all(r["polish"]["auto"] is True for r, _, _ in recs), [r.get("polish") for r, _, _ in recs]
-        assert [("hires" in r) for r, _, _ in recs] == [w == "Full body" for w in want], want                  # full-body lines got hires, the rest did not
-        assert [x[0] for x in ran].count("eye") == 4 and "hand" not in [x[0] for x in ran] and [x[0] for x in ran].count("hires") == want.count("Full body")
+        assert [("hires" in r) for r, _, _ in recs] == [w in ("Full body", "Cowboy shot — hires") for w in want], want     # full-body and cowboy lines got hires (round 52), portraits did not
+        assert [x[0] for x in ran].count("eye") == 4 and "hand" not in [x[0] for x in ran] and [x[0] for x in ran].count("hires") == want.count("Full body") + want.count("Cowboy shot — hires")
         assert all(f"Polish: {w} (auto)" in t for (r, t, _), w in zip(recs, want)), [t for _, t, _ in recs]
         assert all("prompt_template" in r for r, _, _ in recs) and "Polish Auto → Full body" in info
         # PNG Info reads it back (the A1111 text alone too) and the badge names it
@@ -7103,7 +7103,7 @@ def _():
         loaded = by["do_load_settings"].fn("pol set")
         assert loaded[-2] == "Auto", loaded[-3:]
         dd = next(c for c in b.blocks.values() if getattr(c, "label", "") == pol_label)
-        assert dd.value == "(off)" and dd.choices[0][0] == "(off)"
+        assert dd.value == PL.clean_choice((_app._read_last_session() or {}).get("polish")) and dd.choices[0][0] == "(off)"   # the live last session decides the start value
         for ls, want_v in (({"polish": "Auto"}, "Auto"), ({"polish": "Full body"}, "Full body"), ({"polish": "junk"}, "(off)")):
             with patch.object(_app, "_read_last_session", lambda ls=ls: dict(ls)):
                 dd2 = next(c for c in _app.build_app().blocks.values() if getattr(c, "label", "") == pol_label)
