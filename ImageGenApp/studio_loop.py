@@ -34,6 +34,7 @@ from pathlib import Path
 APP = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP))
 os.environ.setdefault("IMAGEGEN_LOOP", "1")
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"      # the loop only scores on the CPU: never open a second GPU context next to the app
 
 from backend import loop_plan as LP  # noqa: E402  (pure, no torch)
 
@@ -201,6 +202,7 @@ def main(argv=None):
     ap.add_argument("plan")
     ap.add_argument("--attach", default="", help="URL of an app that is already running")
     ap.add_argument("--port", type=int, default=0)
+    ap.add_argument("--raw", default="", help="with --attach: the folder the app saves to (its outputs folder)")
     a = ap.parse_args(argv)
 
     pp = Path(a.plan)
@@ -212,7 +214,9 @@ def main(argv=None):
         raise SystemExit(f"saved settings not found: {', '.join(missing)}")
 
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
-    run = APP / "outputs" / "loop" / f"{pp.stem}_{stamp}"
+    # attached to an app (the 🔁 tab does it, with --raw = that app's outputs folder): the run folder sits in that folder, where the tab looks for it
+    loop_root = (Path(a.raw) if (a.attach and a.raw) else APP / "outputs") / "loop"
+    run = loop_root / f"{pp.stem}_{stamp}"
     for v in LP.VERDICTS:
         (run / v).mkdir(parents=True, exist_ok=True)
     (run / "plan.json").write_text(json.dumps(plan, indent=1, ensure_ascii=False), encoding="utf-8")
@@ -225,7 +229,7 @@ def main(argv=None):
 
     proc = None
     if a.attach:
-        url, raw = a.attach.rstrip("/"), APP / "outputs"
+        url, raw = a.attach.rstrip("/"), (Path(a.raw) if a.raw else APP / "outputs")
     else:
         other = running_app()
         if other:
@@ -269,12 +273,14 @@ def main(argv=None):
                     ov["✨ Polish*"] = plan["polish"]
                 t0 = time.time()
                 try:
-                    api.generate(vals, ov)
+                    res = api.generate(vals, ov)
                 except Exception as e:
                     log(f"⚠ {p['settings']}: generate failed: {e}")
                     continue
-                new = sorted(f for f in raw.glob("*.png") if f.stat().st_mtime >= t0 - 1)
+                new = LP.own_files(raw, res, t0, bool(a.attach))
                 log(f"{p['settings']}: {len(new)} picture(s) in {time.time() - t0:.0f} s")
+                if a.attach and not new:
+                    log(f"⚠ {p['settings']}: the app's result names no picture in {raw} (is --raw its outputs folder?)")
                 from PIL import Image
                 favs = favourites()
                 for f in new:

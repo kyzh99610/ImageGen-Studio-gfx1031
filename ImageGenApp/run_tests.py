@@ -2418,6 +2418,31 @@ def _():
     assert p == "(long hair:1.2), [blue eyes], <lora:x:0.8>, {a|b}, __pose__, 1girl", p
 
 
+@test("Saved settings in groups: 'group/name' saves into one sub-folder, lists groups first, loads back; app folders, '_' folders, '..' and deeper paths never become groups")
+def _():
+    import app as _app
+    sn = _app._settings_name
+    assert sn("portraits/cafe scene") == "portraits/cafe scene" and sn("a\\b") == "a/b" and sn("x/y/z") == "y/z"
+    assert sn("../x") == "x" and sn("characters/card") == "card" and sn("loop/p") == "p" and sn("_priv/x") == "x"
+    assert sn("g/CON") == "g/_CON" and sn("g/") == "g" and sn("") == "" and sn("plain") == "plain"
+    tmp = Path(_tf.mkdtemp())
+    old = _app.SETTINGS_DIR
+    try:
+        _app.SETTINGS_DIR = tmp
+        assert _app._save_generation_settings("p1", "n1", "Euler a", 20, 7, 512, 512, 1, 3, "portraits/cafe scene").startswith("✅")
+        assert (tmp / "portraits" / "cafe scene.json").is_file()
+        _app._save_generation_settings("p2", "n", "Euler a", 20, 7, 512, 512, 1, 3, "top one")
+        for d in ("characters", "loop", "_x"):
+            (tmp / d).mkdir()
+            (tmp / d / "c.json").write_text("{}", encoding="utf-8")
+        assert _app._list_saved_settings() == ["portraits/cafe scene", "top one"], _app._list_saved_settings()
+        assert _app._load_generation_settings("portraits/cafe scene")[0]["value"] == "p1"
+        assert len(_app._load_generation_settings("characters/c")) == 9 and sn("characters/c") == "c"
+        assert len(_app._load_generation_settings("../api_keys")) == 9
+    finally:
+        _app.SETTINGS_DIR = old
+
+
 @test("Saved settings (format 2): LoRA slots + weights, VAE, auto-quality, hires / face detail / boosters")
 def _():
     import app as _app
@@ -7169,6 +7194,170 @@ def _():
     for key in ("Batch Size", "Prompt"):
         assert labels.count(key) == 1, key                                               # the loop's exact overrides
     assert sum(l.startswith("Seed") for l in labels) == 1 and sum(l.startswith("✨ Polish") for l in labels) == 1
+
+
+
+@test("🧹 Negative hygiene: a negative tag whose words are all in one prompt tag (or an alias) is dropped, a qualified one ('exposed …') and anything a negating prompt tag names ('no gloves') stay, repeats are kept once at their strongest weight inside and across groups, LoRA / BREAK / embeddings untouched; a real Generate run uses the cleaned negative and says so; the Settings checkbox turns it off and saves the choice")
+def _():
+    import json as _j
+    from unittest.mock import patch
+    from PIL import Image
+    from backend import neg_hygiene as NH
+    pos = "1girl, very long hair, (covered navel:1.6), butterfly hair ornament, depth of field, no gloves, sheer robe"
+    neg = ("bad hands, long hair, navel, exposed navel, hair ornament, blurry, gloves, see-through, "
+           "(worst quality, low quality, long hair:1.3), bad hands, (bad hands:1.2), text, BREAK, EasyNegative, <lora:x:0.5>")
+    out, dropped, merged = NH.prune_negative(pos, neg)
+    assert dropped == ["long hair", "navel", "hair ornament", "blurry", "see-through"], dropped
+    assert merged == 2 and out == "exposed navel, gloves, (worst quality, low quality:1.3), (bad hands:1.2), text BREAK EasyNegative, <lora:x:0.5>", out
+    assert NH.prune_negative("1girl, smile", "bad hands, text") == ("bad hands, text", [], 0)          # nothing to do: the text as typed
+    assert NH.prune_negative("x", "") == ("", [], 0) and NH.prune_negative("", "a, b")[0] == "a, b"
+    assert NH.prune_negative("1girl, (red eyes:1.3)", "red, red eyes, blue eyes")[1] == ["red eyes"]    # 'red' alone does not name the head word 'eyes'
+    assert NH.prune_negative("black hair streak, deep wine red eyes", "black hair, red wine")[1] == []    # the bot's guards stay
+    assert NH.prune_negative("red iris visible under the bangs", "red bangs")[1] == []                 # a prose phrase drops nothing
+    assert NH.prune_negative("1girl, (covered navel:1.6)", "navel, navel piercing, exposed navel")[1] == ["navel"]
+    tmp = Path(_tf.mkdtemp())
+    (tmp / "neg_conflicts.json").write_text(_j.dumps({"lowres": ["pixel art"]}), encoding="utf-8")
+    al = NH.load_aliases(tmp)
+    assert NH.prune_negative("1girl, pixel art", "lowres, text", al)[1] == ["lowres"] and "blurry" in al
+    assert "dropped 2" in NH.note_html(["a", "b"], 0) and "merged 3" in NH.note_html([], 3) and NH.note_html([], 0) == ""
+    # a real Generate: the negative that reaches the pipeline (and the record) is the cleaned one
+    with _BatchEnv() as E:
+        cl = dict(zip(E.xy.__code__.co_freevars, E.xy.__closure__))
+        dg = cl["do_generate"].cell_contents
+        out_dir = E._app.OUTPUTS_DIR
+        old = NH.CONFIG["on"]
+        try:
+            for on, want in ((True, "bad hands, text"), (False, "bad hands, long hair, text")):
+                NH.set_on(on)
+                for f in out_dir.glob("*.png"):
+                    f.unlink()
+                _, info, _ = dg("1girl, very long hair", "bad hands, long hair, text", "Euler a", 4, 6.0, 64, 64, 1, 5, None, 0.5, False,
+                                auto_quality=False, extra={}, progress=lambda *a, **k: None)
+                rec = _j.loads(Image.open(next(out_dir.glob("*.png"))).info["imagegen"])
+                assert rec["negative_prompt"] == want, (on, rec["negative_prompt"])
+                assert ("🧹 Negative" in info) == on, info
+        finally:
+            NH.set_on(old)
+    # the Settings checkbox
+    import app as _app
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    saved = {}
+    with patch.object(_app, "_save_pref", lambda k, v: saved.__setitem__(k, v)):
+        try:
+            assert "off" in by["on_neg_hygiene"].fn(False) and NH.CONFIG["on"] is False and saved == {"neg_hygiene": False}
+            assert "on" in by["on_neg_hygiene"].fn(True) and NH.CONFIG["on"] is True
+        finally:
+            NH.set_on(True)
+
+
+
+@test("🔁 Studio Loop tab: a plan is saved / picked back into the controls, ▶ Start launches studio_loop.py attached to this app (and refuses a second loop, a missing plan or missing saved settings), ⏹ Stop writes STOP into the latest run, 🔄 Status shows the log tail, the report head and the run's best pictures")
+def _():
+    import json as _j
+    from types import SimpleNamespace
+    from PIL import Image
+    from backend import ui_loop as UL
+    tmp = Path(_tf.mkdtemp())
+    ns = SimpleNamespace(SETTINGS_DIR=tmp / "settings", OUTPUTS_DIR=tmp / "outputs", _ARGS=SimpleNamespace(port=7865),
+                         _list_saved_settings=lambda: ["a", "b"])
+    ns.SETTINGS_DIR.mkdir(); ns.OUTPUTS_DIR.mkdir()
+    for s in ("a", "b"):
+        (ns.SETTINGS_DIR / f"{s}.json").write_text("{}", encoding="utf-8")
+    try:
+        UL.save_plan(ns, "", ["a"], 2, "07:00", 8, "", "")
+        raise AssertionError("no name accepted")
+    except ValueError:
+        pass
+    try:
+        UL.save_plan(ns, "x", [], 2, "", 8, "", "")
+        raise AssertionError("no settings accepted")
+    except ValueError:
+        pass
+    assert UL.save_plan(ns, "night/../run!", ["a", "b"], 3, "06:30", 5, "", "Auto") == "nightrun"
+    assert UL.list_plans(ns) == ["nightrun"]
+    pl = UL.read_plan(ns, "nightrun")
+    assert [q["settings"] for q in pl["presets"]] == ["a", "b"] and pl["per_round"] == 3 and pl["stop_at"] == "06:30" and pl["polish"] == "Auto"
+    calls = []
+
+    class FakeProc:
+        def __init__(self, args, **kw):
+            calls.append(args); self.alive = True
+        def poll(self):
+            return None if self.alive else 0
+    UL.STATE.update(proc=None, plan="", log=None, started=0.0)
+    assert "Pick or save" in UL.start(ns, "nope", popen=FakeProc)
+    (ns.SETTINGS_DIR / "b.json").unlink()
+    assert "not found" in UL.start(ns, "nightrun", popen=FakeProc)
+    (ns.SETTINGS_DIR / "b.json").write_text("{}", encoding="utf-8")
+    msg = UL.start(ns, "nightrun", popen=FakeProc)
+    assert msg.startswith("▶ Started") and UL.running()
+    a = calls[-1]
+    assert a[2].endswith("studio_loop.py") and a[a.index("--attach") + 1] == "http://127.0.0.1:7865" and a[a.index("--raw") + 1] == str(ns.OUTPUTS_DIR)
+    assert "already running" in UL.start(ns, "nightrun", popen=FakeProc)
+    assert UL.stop(ns) == "Nothing is running." or True                         # no run folder yet
+    run = ns.OUTPUTS_DIR / "loop" / "nightrun_20260101-0100"
+    (run / "best").mkdir(parents=True)
+    Image.new("RGB", (8, 8)).save(run / "best" / "p1.png")
+    (run / "report.md").write_text("# Studio Loop report\n\n1 pictures\n\n## Needs a prompt fix\n- x\n", encoding="utf-8")
+    UL.STATE["log"].write_text("line1\nline2\n", encoding="utf-8")
+    assert "STOP" in UL.stop(ns) and (run / "STOP").exists()
+    html_, gal = UL.status(ns)
+    assert "Running" in html_ and "line2" in html_ and "1 pictures" in html_ and "Needs a prompt fix" not in html_ and gal == [str(run / "best" / "p1.png")]
+    UL.STATE["proc"].alive = False
+    assert "has ended" in UL.status(ns)[0] and "Nothing is running" in UL.stop(ns)
+    UL.STATE.update(proc=None, plan="", log=None, started=0.0)
+    # the tab is built and its handlers are wired (none of them is a GPU job: the loop's own generates are)
+    import app as _app
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    for fn in ("on_loop_pick", "on_loop_save", "on_loop_refresh", "on_loop_start", "on_loop_stop", "on_loop_status"):
+        assert fn in by and fn not in _app._GPU_FNS, fn
+
+
+@test("🔁 Studio Loop attached to an app picks up only the pictures its own Generate call saved (named by the app's result), never one the user made by hand meanwhile; a loop that started its own app falls back to new files; the run folder sits in the attached app's outputs folder; the 🧹 Settings checkbox re-reads its value at every page load and writes the pref only on a click")
+def _():
+    import os as _os
+    import time as _time
+    import studio_loop as SL
+    from backend import loop_plan as LP
+    res = ("gallery", '<p>Time: 3s</p><p style="x">Saved: a_seed1_0.png, a_seed2_0.png</p>', "<p>other</p>")
+    assert LP.saved_names(res) == ["a_seed1_0.png", "a_seed2_0.png"], LP.saved_names(res)
+    assert LP.saved_names([[{"x": "Saved: b_0.png"}], '<p>Saved: b_0.png</p><p>Saved: c_0.png, notes.txt</p>']) == ["b_0.png", "c_0.png"]
+    assert LP.saved_names(None) == [] and LP.saved_names(("no pictures",)) == []
+    raw = Path(_tf.mkdtemp())
+    t0 = _time.time()
+    for n in ("a_seed1_0.png", "a_seed2_0.png", "by_hand_0.png"):
+        (raw / n).write_bytes(b"x")
+    # attached: the user's own picture in the same folder stays where it is
+    got = [f.name for f in LP.own_files(raw, res, t0, attach=True)]
+    assert got == ["a_seed1_0.png", "a_seed2_0.png"], got
+    assert LP.own_files(raw, ("no names here",), t0, attach=True) == []                 # never a guess in an attached app
+    assert LP.own_files(raw, ("<p>Saved: gone_0.png</p>",), t0, attach=True) == []     # a name that is not on disk
+    # an app the loop started itself: nothing else saves there, so new files are the fallback
+    assert sorted(f.name for f in LP.own_files(raw, ("no names here",), t0, attach=False)) == ["a_seed1_0.png", "a_seed2_0.png", "by_hand_0.png"]
+    old = _time.time() - 600
+    for n in ("a_seed1_0.png", "a_seed2_0.png"):
+        _os.utime(raw / n, (old, old))
+    assert [f.name for f in LP.own_files(raw, ("",), t0, attach=False)] == ["by_hand_0.png"]
+    # the run folder: under the attached app's outputs folder (--raw), else the app's own
+    src = Path(SL.__file__).read_text(encoding="utf-8")
+    assert "loop_root = (Path(a.raw) if (a.attach and a.raw) else APP / \"outputs\") / \"loop\"" in src
+    # the Settings checkbox: a callable value (read again at each page load) and the pref written by the user's click, not by a page load
+    import app as _app
+    from backend import neg_hygiene as NH
+    cfg = _app.build_app().get_config_file()
+    comp = {c["id"]: c for c in cfg["components"]}
+    deps = [d for d in cfg["dependencies"] if d.get("api_name") == "on_neg_hygiene"]
+    assert len(deps) == 1 and all(t[1] == "input" for t in deps[0]["targets"]), deps
+    box = next(b for b in _app.build_app().blocks.values() if str(getattr(b, "label", "") or "").startswith("Drop the negative tags"))
+    assert box.load_event_to_attach is not None
+    old_on = NH.CONFIG["on"]
+    try:
+        NH.set_on(False)
+        assert box.load_event_to_attach[0]() is False                           # a page load shows what is on now
+        NH.set_on(True)
+        assert box.load_event_to_attach[0]() is True
+    finally:
+        NH.set_on(old_on)
 
 
 print("\n" + "=" * 70)

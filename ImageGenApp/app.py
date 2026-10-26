@@ -166,6 +166,12 @@ try:                                   # Settings → Eye style (saved choice)
         _set_eye_style(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("eye_style", "round"))
 except Exception:
     pass
+try:                                   # Settings → Negative hygiene (saved choice; default on)
+    from backend import neg_hygiene as _nh0
+    if not os.environ.get("IMAGEGEN_TESTS"):
+        _nh0.set_on(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("neg_hygiene", True))
+except Exception:
+    pass
 try:                                   # Settings → Cool mode / pause while hot (saved choices)
     from backend import sampling as _smp0, thermal as _thm0
     _thm0.apply_saved(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")), _smp0)
@@ -550,7 +556,7 @@ def _save_generation_settings(prompt, neg_prompt, scheduler, steps, cfg,
                               lora_slots=None, auto_quality=None, extra=None, example=None) -> str:
     """Save all current generation settings to a JSON file (format 2: + checkpoint / VAE /
     LoRA slots with weights / auto-quality / hires, face detail, boosters… as set in the UI)."""
-    sname = _safe_name(name) or "last_settings"
+    sname = _settings_name(name) or "last_settings"
     # casefold: Windows file names aren't case-sensitive, so "API_KEYS" is api_keys.json
     if sname.casefold() in _RESERVED_SETTINGS or sname.startswith("_"):
         return f"❌ '{sname}' is a reserved name — choose another."
@@ -580,6 +586,7 @@ def _save_generation_settings(prompt, neg_prompt, scheduler, steps, cfg,
     if example:
         data["example_image"] = Path(str(example)).name
     f = SETTINGS_DIR / f"{sname}.json"
+    f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return f"✅ Settings saved as '{sname}'"
 
@@ -588,10 +595,34 @@ def _save_generation_settings(prompt, neg_prompt, scheduler, steps, cfg,
 _RESERVED_SETTINGS = {"api_keys"}
 
 
+# a saved setting may sit in ONE level of sub-folder ("fanservice/white bikini"); these folders are the app's own
+_RESERVED_SETTING_DIRS = {"characters", "loop", "poses", "composition", "cache", "temp", "wildcards"}
+
+
+def _setting_group_ok(group: str) -> bool:
+    return bool(group) and not group.startswith((".", "_")) and group.casefold() not in _RESERVED_SETTING_DIRS
+
+
+def _settings_name(name) -> str:
+    """A saved-setting name: 'name' or 'group/name' (one folder level, each part made safe by _safe_name).
+    '../x', reserved folders and deeper paths fall back to the last part."""
+    import re
+    parts = [p for p in re.split(r"[\\/]+", str(name or "")) if p.strip()]
+    if not parts:
+        return ""
+    leaf = _safe_name(parts[-1])
+    raw = parts[-2].strip() if len(parts) > 1 else ""
+    group = _safe_name(raw) if _setting_group_ok(raw) else ""
+    return f"{group}/{leaf}" if leaf and _setting_group_ok(group) else leaf
+
+
 def _list_saved_settings() -> list[str]:
-    return sorted(p.stem for p in SETTINGS_DIR.glob("*.json")
-                  if p.is_file() and p.stem.casefold() not in _RESERVED_SETTINGS
-                  and not p.stem.startswith("_"))
+    top = sorted(p.stem for p in SETTINGS_DIR.glob("*.json")
+                 if p.is_file() and p.stem.casefold() not in _RESERVED_SETTINGS
+                 and not p.stem.startswith("_"))
+    grouped = sorted(f"{d.name}/{p.stem}" for d in SETTINGS_DIR.iterdir() if d.is_dir() and _setting_group_ok(d.name)
+                     for p in d.glob("*.json") if p.is_file() and not p.stem.startswith("_"))
+    return grouped + top
 
 
 # ── Last session (restored on startup) ──────────────────────────────────────
@@ -1323,7 +1354,7 @@ def _fit_init_image(img, max_side: int = 2048, min_side: int = 64):
 
 def _load_generation_settings(name: str):
     """Load saved settings. Returns tuple for all Gradio outputs or None."""
-    name = _safe_name(name)
+    name = _settings_name(name)
     if not name or name.casefold() in _RESERVED_SETTINGS:
         return [gr.update()] * 9
     f = SETTINGS_DIR / f"{name}.json"
@@ -1967,7 +1998,7 @@ def _build_generate_tab():
                             with gr.Row():
                                 settings_name_txt = gr.Textbox(
                                     label="Settings name",
-                                    placeholder="e.g. my_portrait_setup",
+                                    placeholder="e.g. cafe scene, or portraits/cafe scene (a folder groups them)",
                                     scale=3,
                                 )
                                 settings_save_btn = gr.Button("💾 Save Settings", size="sm", scale=1)
@@ -2347,6 +2378,11 @@ def _build_generate_tab():
         tags_note = ((f'<br><span style="color:#9399b2;">Auto-added quality tags: <code>{added_tags}</code>'
                       + (f' · negative: <code>{added_neg}</code>' if added_neg else "") + '</span>')
                      if (added_tags or added_neg) else "") + fixes_note
+        # ── 🧹 Negative hygiene: drop the negative tags the prompt asks for, keep repeats once (Settings) ─
+        from backend import neg_hygiene as _nh
+        if _nh.CONFIG["on"]:
+            neg_prompt, _nh_dropped, _nh_merged = _nh.prune_negative(prompt, neg_prompt, _nh.load_aliases(SETTINGS_DIR))
+            tags_note += _nh.note_html(_nh_dropped, _nh_merged)
 
         try:
             # ── SmartSplit path ────────────────────────────────────────────────
@@ -3007,7 +3043,7 @@ def _build_generate_tab():
         if status.startswith("❌"):
             return gr.update(), status
         new_choices = _list_saved_settings()
-        sname = _safe_name(name.strip() or "last_settings")   # the file's real name (Load looks it up)
+        sname = _settings_name(name.strip() or "last_settings")   # the file's real name (Load looks it up)
         return gr.update(choices=new_choices, value=sname), status
 
     def do_load_settings(name):
@@ -3016,7 +3052,7 @@ def _build_generate_tab():
             return updates + [gr.update()] * (1 + 6 + 2 + len(_EXTRA_KEYS)) + [""]
         model_upd, notes = gr.update(), []
         try:
-            d = _json.loads((SETTINGS_DIR / f"{_safe_name(name)}.json").read_text(encoding="utf-8"))
+            d = _json.loads((SETTINGS_DIR / f"{_settings_name(name)}.json").read_text(encoding="utf-8"))
         except Exception:
             d = {}
         saved_model = d.get("model") or ""
@@ -3089,7 +3125,7 @@ def _build_generate_tab():
     def on_settings_pick(name):
         """Thumbnail of the image a saved setting made (its "example_image" in outputs/)."""
         try:
-            d = _json.loads((SETTINGS_DIR / f"{_safe_name(name)}.json").read_text(encoding="utf-8")) if name else {}
+            d = _json.loads((SETTINGS_DIR / f"{_settings_name(name)}.json").read_text(encoding="utf-8")) if name else {}
         except Exception:
             d = {}
         ex = Path(str(d.get("example_image") or "")).name if isinstance(d, dict) else ""
@@ -7087,6 +7123,8 @@ def build_app() -> gr.Blocks:
                                (_gen_ctrl["lora_dd2"], _gen_ctrl["lora_dd3"]))
             _build_train_tab((_gen_lora_dd, _gen_ctrl["lora_dd2"], _gen_ctrl["lora_dd3"]))
             _hist_btns = _build_history_tab(_gen_ctrl, _up_input, _png_btns["input"])
+            from backend import ui_loop as _ui_loop
+            _ui_loop.build_tab(sys.modules[__name__])
             _build_settings_tab()
             build_help_tab()
 

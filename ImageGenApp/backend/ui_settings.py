@@ -56,6 +56,22 @@ def build_prefs_section(ns) -> None:
         ns._save_pref("eye_style", mode)
         return f'<p style="color:#a6e3a1;font-size:13px;">✅ Eye style: {mode}</p>'
     eye_rb.change(on_eye_style, [eye_rb], [eye_status])
+    from backend import neg_hygiene as _nh
+    gr.Markdown("### 🧹 Negative hygiene")
+    nh_cb = gr.Checkbox(
+        value=lambda: _nh.CONFIG["on"], label="Drop the negative tags the prompt asks for, keep repeated negative tags once",   # a callable: read again at every page load
+        info="Before each picture: a negative tag whose words are all in one prompt tag is left out (\"long hair\" when the prompt says "
+             "\"very long hair\"; \"exposed …\" stays when the prompt says \"covered …\"), so are a few aliases (\"blurry\" against "
+             "\"depth of field\" / \"bokeh\"; more in settings/neg_conflicts.json), and a tag written twice is kept once at its strongest "
+             "weight. Prompt tags that negate (\"no gloves\") never drop anything. The result line lists what was dropped; the picture's "
+             "record holds the negative that ran. Saved for the next start.")
+    nh_status = gr.HTML("")
+
+    def on_neg_hygiene(v):
+        on = _nh.set_on(v)
+        ns._save_pref("neg_hygiene", on)
+        return (f'<p style="color:#a6e3a1;font-size:13px;">✅ Negative hygiene {"on" if on else "off"}</p>')
+    nh_cb.input(on_neg_hygiene, [nh_cb], [nh_status])      # .input: the user's click only (a page load refreshing the value must not write the pref)
     from backend import sampling as _smp
     from backend import thermal as _thm
     gr.Markdown("### 🌡 Power profile")

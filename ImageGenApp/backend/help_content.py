@@ -418,6 +418,26 @@ def parameters_html() -> str:
                  "仅用 Lanczos 2× 再重绘眼睛免费但只有 ×2，2× 加分块 SD 细节 0.3 慢 2.7 倍且更软。复选框在“脸与手细节”里眼部控件下方；PNG 约大 4 倍（约 6 MB，原 1.5 MB）。"
                  "“远景 — 最大细节”（第 15 轮）= 远景方案 + 同样的 2× 步骤（3648×2496，约 10 MB）：远景里每只眼睛只有约 20 像素，普通方案会把眼睛留得很糊。"
                  "实测（hassakuXL，3 个种子，脸宽 107–129 像素）：眼部细节 ×8.5，脸部清晰度 ×3，相似度提高（CCIP +0.02），发饰肉眼完好，耗时为普通远景的 1.29 倍。")],
+            ["🧹 Negative hygiene",
+             "Settings → Negative hygiene (on by default) cleans the negative against the prompt before each picture (after wildcards are resolved). "
+             "A negative tag whose words are all in one prompt tag and that names that tag's head word is left out: \"long hair\" when the prompt says "
+             "\"very long hair\", \"hair ornament\" against \"butterfly hair ornament\". A qualified tag stays: \"exposed …\" when the prompt says "
+             "\"covered …\", \"black hair\" against \"black hair streak\". A few aliases count too: \"blurry\" against \"depth of field\" / \"bokeh\", "
+             "\"see-through\" against \"sheer\"; add your own in settings/neg_conflicts.json as {\"negative tag\": [\"prompt tag\", …]}. "
+             "A tag written twice is kept once at its strongest weight, inside weighted groups too. Prompt tags that negate (\"no gloves\") and long "
+             "prose phrases never drop anything; LoRA tags, BREAK and embeddings are left alone. The result line lists what was dropped; the picture's "
+             "record holds the negative that ran. Why: long negatives gather tags from presets, cards and pasted prompts, and a tag that names what the "
+             "prompt asks for works against it — on 60 long community prompts \"blurry\" fought the prompt's own depth of field in 38. "
+             "Merging repeats alone already changes the details of a picture (same pose and outfit): a picture saved before this, or with hygiene "
+             "off, whose negative had repeats or a conflicting tag regenerates differently with it on — turn it off to repeat such a picture exactly.",
+             _cn("设置 → Negative hygiene（默认开启）会在每张图之前、通配符展开之后，按正向提示清理负面提示："
+                 "负面标签的所有词都包含在某个正向标签里、且包含该标签的中心词时会被去掉——例如正向写 \"very long hair\" 时去掉负面的 \"long hair\"，"
+                 "正向写 \"butterfly hair ornament\" 时去掉 \"hair ornament\"。带限定词的会保留：正向写 \"covered …\" 时保留负面的 \"exposed …\"，"
+                 "\"black hair streak\" 不会去掉 \"black hair\"。少量同义项也算冲突：\"blurry\" 对 \"depth of field\" / \"bokeh\"，\"see-through\" 对 \"sheer\"；"
+                 "可在 settings/neg_conflicts.json 里自行添加 {\"负面标签\": [\"正向标签\", …]}。重复的负面标签只保留权重最强的一个（权重分组内也一样）。"
+                 "否定形式的正向标签（\"no gloves\"）和较长的描述句不会去掉任何东西；LoRA 标签、BREAK 和嵌入不受影响。结果行会列出去掉了什么，"
+                 "图片记录里保存实际使用的负面提示。仅合并重复标签就会改变画面细节（姿势和服装不变）：之前保存、或在关闭时生成、且负面提示含重复或冲突标签的图片，"
+                 "开启后重新生成会不同——要完全复现这类图片请先关闭此项。")],
             ["⚖️ Prompt weights & colour bleeding",
              "(tag:1.3) works like A1111 now (Settings → Prompt weights): the app used to apply weights 2–5× harder, so "
              "weighted background / lighting / colour tags flooded their colour onto the character. If a scene colour "
@@ -433,7 +453,7 @@ def parameters_html() -> str:
                  "Illustrious / NoobAI）上它们现在按二阶运行，已正常。"
                  "PNDM 和 Heun 在天空/背景处仍比 DPM++ 2M Karras / AYS 或 Euler 略多颗粒。")],
             ["🔁 Studio Loop (unattended rounds)",
-             "studio_loop.bat <plan> renders your saved settings (the 💾 Saved Settings list) round after round without anyone at the computer — "
+             "The 🔁 Studio Loop tab (or studio_loop.bat <plan>) renders your saved settings (the 💾 Saved Settings list) round after round without anyone at the computer — "
              "for example overnight — exactly as 💾 Load + ✨ Generate would, so Polish, the detail passes, colour strength and pose control all apply. "
              "Every picture is scored on the CPU (one face, hands that look off, the card's hair / eye colours and identity when the plan names a card, "
              "WD14 tags) and filed under outputs\\loop\\<run>\\ in best / ok / review / reject; a picture with an exposure tag or an artifact "
@@ -443,8 +463,9 @@ def parameters_html() -> str:
              "time (HH:MM) or an hour budget, an optional character card, and the tags that reject a picture. The loop starts its own app (close "
              "yours first: two apps on one GPU run out of memory) or uses a running one with --attach URL; the app's cool mode / pause while hot "
              "apply to every picture; a file named STOP in the run folder ends it after the current picture; your Generate tab's last session is put "
-             "back at the end. Read report.html in the run folder in the morning — or ask an assistant to read report.md and adjust the prompts.",
-             _cn("studio_loop.bat <计划> 会在无人值守时（例如整夜）一轮又一轮地渲染你的已保存设置（💾 已保存设置列表），效果与 💾 加载 + ✨ 生成完全相同，"
+             "back at the end. In the tab: make or pick a plan (saved settings, pictures per round, stop time, hour budget, an optional card for the face check), ▶ Start runs it on this app (your own Generate waits its turn between its pictures), ⏹ Stop ends it after the current setting, 🔄 Status shows the log, the report and the best pictures. Read report.html in the run folder in the morning — or ask an assistant to read report.md and adjust the prompts.",
+             _cn("在 🔁 Studio Loop 标签页里可以新建/选择计划，▶ 开始在当前程序上运行（你自己的生成会在它的两张图之间排队），⏹ 在当前设置完成后停止，🔄 状态显示日志、报告和最佳图片。"
+                 "该标签页（或 studio_loop.bat <计划>）会在无人值守时（例如整夜）一轮又一轮地渲染你的已保存设置（💾 已保存设置列表），效果与 💾 加载 + ✨ 生成完全相同，"
                  "Polish、细节重绘、颜色强度、姿势控制都会生效。每张图都在 CPU 上评分（单张脸、看起来不对的手、计划指定角色卡时的发色/瞳色与身份、WD14 标签），"
                  "并按 best / ok / review / reject 存入 outputs\\loop\\<运行>\\；带有暴露标签或瑕疵（文字、水印、边框、多视图、第二个女孩）的图会被拒绝。"
                  "每轮之间，连续两轮没有留下好图的设置会被暂停（报告里列在“需要修改提示词”下），你在历史标签页加 ⭐ 的设置会多出图。"
