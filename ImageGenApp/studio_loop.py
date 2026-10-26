@@ -274,43 +274,56 @@ def main(argv=None):
                     ov["Prompt"] = (lambda suf: (lambda v: (str(v or "").rstrip(", ") + ", " + suf)))(p["prompt_suffix"])
                 if plan["polish"]:
                     ov["✨ Polish*"] = plan["polish"]
-                t0 = time.time()
-                try:
-                    res = api.generate(vals, ov)
-                    fails = 0
-                except Exception as e:
-                    log(f"⚠ {p['settings']}: generate failed: {e}")
-                    fails += 1
-                    if fails >= MAX_FAILS:            # the app is gone or broken: stop instead of spinning until morning
-                        stopped = f"{fails} generates in a row failed (last: {str(e)[:120]})"
-                        break
-                    continue
-                new = LP.own_files(raw, res, t0, bool(a.attach))
-                secs = time.time() - t0
-                log(f"{p['settings']}: {len(new)} picture(s) in {secs:.0f} s")
-                if a.attach and not new:
-                    log(f"⚠ {p['settings']}: the app's result names no picture in {raw} (is --raw its outputs folder?)")
-                from PIL import Image
-                favs = favourites()
-                for f in new:
-                    scorer.wait_cool()
-                    with Image.open(f) as im:
-                        im.load()
-                        info = dict(im.info)
-                    rec = json.loads(info.get("imagegen") or "{}")
+                # explore around the keepers (plan "explore"): from round 2 a share of the pictures are close relatives of this setting's best
+                # picture so far — its seed (so the same wildcard picks) + a random variation seed at EXPLORE_STRENGTH, one call each
+                n_new, n_exp = LP.explore_split(n, plan["explore"]) if rnd > 1 else (n, 0)
+                seed_b = LP.best_seed(records, p["settings"]) if n_exp else None
+                if seed_b is None:
+                    n_new, n_exp = n, 0
+                jobs = ([(dict(ov, **{"Batch Size": n_new}), False)] if n_new else []) + [
+                    (dict(ov, **{"Batch Size": 1, "Seed*": seed_b, "Variation seed*": -1, "Variation strength": LP.EXPLORE_STRENGTH}), True)
+                    for _ in range(n_exp)]
+                for ov_j, exploring in jobs:
+                    t0 = time.time()
                     try:
-                        s = scorer.score(im.convert("RGB"), rec.get("prompt", ""))
-                        v, why = LP.verdict(s, s["tags"], s["faces"], plan["gate"], s["hands_off"])
+                        res = api.generate(vals, ov_j)
+                        fails = 0
                     except Exception as e:
-                        s, v, why = {}, "review", [f"scoring failed: {e}"]
-                    dest = run / v / f.name
-                    shutil.move(str(f), str(dest))
-                    r = dict(file=str(dest), settings=p["settings"], round=rnd, seed=rec.get("seed"), verdict=v, why=why,
-                             stars=s.get("stars"), faces=s.get("faces"), hands_off=s.get("hands_off"),
-                             favourite=f.name in favs, secs=round(secs / max(1, len(new)), 1))
-                    records.append(r)
-                    with open(run / "records.jsonl", "a", encoding="utf-8") as fh:
-                        fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+                        log(f"⚠ {p['settings']}: generate failed: {e}")
+                        fails += 1
+                        if fails >= MAX_FAILS:            # the app is gone or broken: stop instead of spinning until morning
+                            stopped = f"{fails} generates in a row failed (last: {str(e)[:120]})"
+                            break
+                        continue
+                    new = LP.own_files(raw, res, t0, bool(a.attach))
+                    secs = time.time() - t0
+                    log(f"{p['settings']}: {len(new)} picture(s) in {secs:.0f} s" + (f" (variation of seed {seed_b})" if exploring else ""))
+                    if a.attach and not new:
+                        log(f"⚠ {p['settings']}: the app's result names no picture in {raw} (is --raw its outputs folder?)")
+                    from PIL import Image
+                    favs = favourites()
+                    for f in new:
+                        scorer.wait_cool()
+                        with Image.open(f) as im:
+                            im.load()
+                            info = dict(im.info)
+                        rec = json.loads(info.get("imagegen") or "{}")
+                        try:
+                            s = scorer.score(im.convert("RGB"), rec.get("prompt", ""))
+                            v, why = LP.verdict(s, s["tags"], s["faces"], plan["gate"], s["hands_off"])
+                        except Exception as e:
+                            s, v, why = {}, "review", [f"scoring failed: {e}"]
+                        dest = run / v / f.name
+                        shutil.move(str(f), str(dest))
+                        r = dict(file=str(dest), settings=p["settings"], round=rnd, seed=rec.get("seed"), verdict=v, why=why,
+                                 stars=s.get("stars"), faces=s.get("faces"), hands_off=s.get("hands_off"),
+                                 favourite=f.name in favs, secs=round(secs / max(1, len(new)), 1),
+                                 prompt=str(rec.get("prompt") or "")[:3000], **({"explore": True} if exploring else {}))
+                        records.append(r)
+                        with open(run / "records.jsonl", "a", encoding="utf-8") as fh:
+                            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+                if stopped:
+                    break
                 write_reports(run, plan, records, "", (dt.datetime.now() - started).total_seconds() / 60)
             if stopped:
                 break

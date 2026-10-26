@@ -1771,8 +1771,9 @@ def _build_generate_tab():
                         # img2img toggle
                         with gr.Accordion("🖼 Image-to-Image (optional)", open=False) as i2i_acc:
                             init_image  = gr.Image(label="Input Image", type="pil")
-                            strength_sl = gr.Slider(0.1, 1.0, value=0.75, step=0.05, label="Denoise Strength",
-                                                    info="How much to change the input: 0.3 subtle · 0.5 restyle · 0.8+ mostly new. "
+                            strength_sl = gr.Slider(0.05, 1.0, value=0.75, step=0.05, label="Denoise Strength",
+                                                    info="How much to change the input: 0.05–0.2 touch-up · 0.3 subtle · 0.5 restyle · 0.8+ mostly new. "
+                                                         "Batch Size N = N variations (seed, seed + 1, …). "
                                                          "Karras / AYS samplers change less at the same value (+0.15). "
                                                          "Recolouring an outfit: same seed + edited prompt; 🖌 Inpaint for small things (pin, expression).")
                             use_i2i_cb  = gr.Checkbox(label="Use img2img mode", value=False,
@@ -2332,7 +2333,7 @@ def _build_generate_tab():
             if seed < 0:
                 import random
                 seed = random.randint(0, 2**32 - 1 - batch)
-            n = 1 if (use_i2i and init_img is not None) else batch
+            n = batch                     # img2img too: one variation of the input per seed
             all_imgs, infos, seeds_used, missing = [], [], [], []
             for i in range(n):
                 s_i = (seed + i) % 2**32
@@ -2437,10 +2438,27 @@ def _build_generate_tab():
                 progress(step / total, desc=f"Step {step}/{total}")
 
             if use_i2i and init_img is not None:
-                imgs, info = sd.img2img(
-                    init_img, prompt, neg_prompt, strength, steps, cfg, seed, scheduler,
-                    step_callback=_std_progress, clip_skip=ex["clip_skip"],
-                )
+                # Batch Size N = N variations of the input (seed, seed + 1, …); the pipelines draw one picture per call
+                if seed < 0 and batch > 1:
+                    import random
+                    seed = random.randint(0, 2**32 - 1 - batch)
+                imgs, info, i2i_seeds = [], "", []
+                for k in range(batch):
+                    if _generation_abort.is_set():
+                        break
+                    im_k, info = sd.img2img(
+                        init_img, prompt, neg_prompt, strength, steps, cfg, (seed + k) % 2**32 if seed >= 0 else seed, scheduler,
+                        step_callback=_std_progress, clip_skip=ex["clip_skip"],
+                    )
+                    if not im_k:
+                        break
+                    imgs += im_k
+                    i2i_seeds += list(getattr(sd, "last_seeds", None) or [(seed + k) % 2**32])
+                if i2i_seeds:
+                    sd.last_seeds = i2i_seeds
+                if len(i2i_seeds) > 1:
+                    info += f" | {len(i2i_seeds)} variations, seeds {i2i_seeds[0]}–{i2i_seeds[-1]}"
+                i2i_size = imgs[0].size if imgs else None      # the record's size: before any later pass (max detail doubles it)
             else:
                 sd.control = pc_ctl            # only the txt2img pass is controlled (hires / detail passes draw on the finished picture)
                 try:
@@ -2453,7 +2471,7 @@ def _build_generate_tab():
                     sd.control = None
             seeds = list(getattr(sd, "last_seeds", None) or [seed])
             var_seeds = list(getattr(sd, "last_var_seeds", None) or []) if ex["var_strength"] > 0 else []
-            hires_note = fd_note = hd_note = ed_note = md_note = ""
+            hires_note = fd_note = hd_note = ed_note = md_note = i2i_note = ""
             # Stop / an error during a later pass keeps the images of the last finished stage (they
             # used to be thrown away with the whole run — a 25 s base image lost to a hires OOM).
             halted = ""
@@ -2481,6 +2499,8 @@ def _build_generate_tab():
                     sd.last_seeds = seeds        # the img2img passes overwrite them
                 return ""
 
+            if ex["hires_on"] and imgs and use_i2i and init_img is not None:
+                i2i_note = ("<br>🔍 Hires fix skipped: img2img keeps the input picture's size (upscale it first, or use 🔬 Max detail).")
             if ex["hires_on"] and imgs and not (use_i2i and init_img is not None):
                 # PAG shapes the composition in the first pass; in the hires pass it only cost time
                 # (1248×1824: ~130 s instead of ~75) and VRAM (peak 10.9 of 12 GB, batch 3)
@@ -2500,7 +2520,7 @@ def _build_generate_tab():
                 fd_note = _post_pass("face detail", lambda: _detail_pass(
                     "face", imgs, seeds, prompt, neg_prompt, steps, cfg, scheduler, ex, progress))
             # max detail: 2× the finished picture so the eye pass has pixels to draw on (round 14)
-            if ex["md_on"] and imgs and not halted and not (use_i2i and init_img is not None):
+            if ex["md_on"] and imgs and not halted:
                 md_note = _post_pass("max detail", lambda: _max_detail_pass(imgs, progress))
             # eyes last: the face pass would otherwise redraw them again at its lower resolution
             ed_skip = ""
@@ -2521,11 +2541,11 @@ def _build_generate_tab():
             polish_note_html = f'<br>✨ Polish Auto → {polish_name}' if polish_name else ""
             halt_note = (f'<br><span style="color:#fab387;">{halted} — saved the images from before it.</span>'
                          if halted else "")
-            info_html = (f'<p style="color:#a6adc8;font-size:13px;">{info}{polish_note_html}{hires_note}{hd_note}{fd_note}{md_note}{ed_note}{ed_skip}{cs_note}{pc_note}'
+            info_html = (f'<p style="color:#a6adc8;font-size:13px;">{info}{polish_note_html}{hires_note}{i2i_note}{hd_note}{fd_note}{md_note}{ed_note}{ed_skip}{cs_note}{pc_note}'
                          f'{"<br>🌡 Paused " + _fmt_elapsed(cool_wait[0]) + " to let the laptop cool" if cool_wait[0] >= 1 else ""}'
                          f'{halt_note}{tags_note}</p>')
             if use_i2i and init_img is not None and imgs:
-                width, height = imgs[0].size   # img2img keeps the input's size
+                width, height = i2i_size or imgs[0].size   # img2img keeps the input's size
             i2i = bool(use_i2i and init_img is not None)
             src = (getattr(init_img, "info", None) or {}).get("saved_path") if i2i else None
             from backend.sampling import ran_as
@@ -3629,7 +3649,9 @@ def _build_generate_tab():
 
     def on_i2i_drop(img, restore):
         keep = [gr.update()] * 18
-        tail = [gr.update()] * 27 + [gr.update(visible=False)]
+        # the extras between the note and the Recreate button: derived, not counted by hand (a hand-kept 27 missed the Polish control of round 50,
+        # so every drop of a picture without settings errored)
+        tail = [gr.update()] * (len(_restore_outputs) - 21) + [gr.update(visible=False)]
         if img is None:
             return (*keep, gr.update(), "", *tail)
         if not restore:
@@ -3641,7 +3663,10 @@ def _build_generate_tab():
         if not (meta.get("prompt") or meta.get("imagegen")):
             return (*keep, True, '<p style="font-size:13px;color:#a6adc8;">No generation settings in this image '
                                   '— img2img mode is on; write a prompt for it.</p>', *tail)
-        plan = _restore_plan(meta)
+        return _i2i_restore_outputs(_restore_plan(meta))
+
+    def _i2i_restore_outputs(plan, source_note="", strength_value=None):
+        """The _restore_outputs values for a restore plan (a dropped picture's own record, or a run manifest's record)."""
         u = lambda v: gr.update() if v is None else v
         lora_ups = [gr.update()] * 6
         if plan["loras"] is not None:
@@ -3656,11 +3681,13 @@ def _build_generate_tab():
             how = ("<b>To recreate it exactly:</b> untick “Use img2img mode” and press Generate. "
                    "Keep it ticked to make variations of it (strength 0.3–0.5 keeps the composition); ")
         note = ('<p style="font-size:13px;color:#a6e3a1;margin:4px 0;">📋 Restored '
-                + ("exactly (ImageGen Studio record)" if plan["exact"] else "from its A1111-style parameters")
+                + (source_note or ("exactly (ImageGen Studio record)" if plan["exact"] else "from its A1111-style parameters"))
                 + ": " + _plan_summary(plan) + '</p><p style="font-size:13px;color:#a6adc8;margin:2px 0;">'
                 + how + "batch size was set to 1 so the seed matches.</p>")
         strength = gr.update()
-        if plan["mode"] not in ("img2img", "inpaint"):
+        if strength_value is not None:
+            strength = strength_value
+        elif plan["mode"] not in ("img2img", "inpaint"):
             strength = gr.update()                      # keep the user's variation strength
         elif plan.get("strength") is not None:
             strength = min(1.0, max(0.1, float(plan["strength"])))
@@ -3669,7 +3696,39 @@ def _build_generate_tab():
                 u(plan["model"]), u(plan["vae"]), *lora_ups, strength, True, note,
                 *_plan_extra_updates(plan), gr.update(visible=plan["mode"] not in ("img2img", "inpaint")))
 
-    init_image.upload(on_i2i_drop, [init_image, restore_cb], _restore_outputs)
+    def on_i2i_manifest(img, name, restore):
+        """A dropped picture with no parameters of its own, made by a run that lists its recipes in manifest files (Settings → Run
+        manifest folders; backend/run_manifests.py): restore that run's txt2img settings, suggest what a 12 GB card should change,
+        put img2img at 0.4 (close to it) and offer the save name for keeping it as a base. Everything unchanged when nothing matches."""
+        none = [gr.update()] * (len(_restore_outputs) + 1)
+        if img is None or not restore:
+            return none
+        hit = _manifest_hit(img, name)              # None for a picture with its own parameters (on_i2i_drop restored those)
+        if not hit:
+            return none
+        rec = hit["record"]
+        meta, adv = _manifest_advice(hit)
+        plan = _restore_plan(meta)
+        src = (f"from its run's manifest (<code>{html.escape(hit['run'].name)}</code>, {html.escape(hit['name'])}"
+               + (", matched by its pixels" if hit["how"].startswith("pixels") else "")
+               + (" — a different version of that scene" if "differs" in hit["how"] else "") + ")")
+        outs = list(_i2i_restore_outputs(plan, source_note=src, strength_value=0.4))
+        extra = ('<p style="font-size:13px;color:#cba6f7;margin:2px 0;">🧭 img2img is on at 0.4 (close to it: 0.2–0.3 closer, 0.5+ looser; Batch Size N = N variations). '
+                 "🔁 Recreate runs its txt2img settings with its seed (another GPU and runtime: close, not identical). "
+                 "💾 Save Settings under the name below keeps it as a base for txt2img and the Studio Loop.</p>"
+                 + "".join(f'<p style="font-size:13px;color:#f9e2af;margin:2px 0;">⚠ {html.escape(a)}</p>' for a in adv))
+        i_note = _restore_outputs.index(i2i_restore_html)
+        outs[i_note] = outs[i_note] + extra
+        scene = re.sub(r"[^\w\- ]+", " ", str(rec.get("scene") or hit["name"])).strip().replace("_", " ")[:50]
+        return outs + [f"fork/{scene}" if scene else gr.update()]
+
+    i2i_name_tb = gr.Textbox(visible=False)
+    # the dropped file's own name lives only in the browser (Gradio's PIL value has lost it): the js runs before on_i2i_manifest
+    # and hands it over as the second input (a js-only step does not trigger a following .then in Gradio 4.19)
+    init_image.upload(on_i2i_drop, [init_image, restore_cb], _restore_outputs).then(
+        on_i2i_manifest, [init_image, i2i_name_tb, restore_cb], _restore_outputs + [settings_name_txt], api_name=False,
+        js="(im, name, r) => { let n = ''; if (im) { n = im.orig_name || ''; if (!n) { const s = String(im.path || ''); "
+           "n = s.substring(Math.max(s.lastIndexOf('/'), s.lastIndexOf(String.fromCharCode(92))) + 1); } } return [im, n, r]; }")
 
     def on_model_pick(model_path, w, h):
         """Switching between SD 1.5 and SDXL-class models: move the size to that
@@ -4881,6 +4940,7 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
         with gr.Row():
             with gr.Column(scale=1):
                 png_input = gr.Image(label="Source Image", type="pil", sources=["upload", "clipboard"], height=420)
+                png_name_tb = gr.Textbox(visible=False)
                 with gr.Row():
                     send_gen_btn = gr.Button("🚀 Send to Generate", variant="primary")
                     send_i2i_btn = gr.Button("🖼 Send to img2img", variant="secondary")
@@ -4900,20 +4960,41 @@ def _build_png_info_tab(gen_controls: dict, up_input: gr.Image):
             html = format_png_info_html(meta)
             return html, meta.get("raw_text") or "No parameters chunk found."
 
-        png_input.change(on_image_change, [png_input], [png_details_html, png_raw_text])
+        def on_png_manifest(img, name):
+            """PNG Info for a picture whose recipe sits in its run's manifest: show it (Send to Generate then uses it)."""
+            hit = _manifest_hit(img, name)
+            if not hit:
+                return gr.update(), gr.update()
+            meta, adv = _manifest_advice(hit)
+            head = ('<p style="font-size:13px;color:#cba6f7;margin:4px 0;">📇 No parameters in the file — this is its run’s manifest record '
+                    f'(<code>{html.escape(hit["run"].name)}</code>, {html.escape(hit["name"])}'
+                    + (", matched by its pixels" if hit["how"].startswith("pixels") else "") + '). ➡ Send to Generate uses it.</p>'
+                    + "".join(f'<p style="font-size:13px;color:#f9e2af;margin:2px 0;">⚠ {html.escape(a)}</p>' for a in adv))
+            import json as _j
+            return head + format_png_info_html(meta), _j.dumps(hit["record"], ensure_ascii=False, indent=1)[:20000]
+
+        png_input.change(on_image_change, [png_input], [png_details_html, png_raw_text]).then(
+            on_png_manifest, [png_input, png_name_tb], [png_details_html, png_raw_text], api_name=False,
+            js="(im, name) => { let n = ''; if (im) { n = im.orig_name || ''; if (!n) { const s = String(im.path || ''); "
+               "n = s.substring(Math.max(s.lastIndexOf('/'), s.lastIndexOf(String.fromCharCode(92))) + 1); } } return [im, n]; }")
 
         def do_send_to_gen(img):
             if img is None:
                 return (*[gr.update()] * 16,
                         '<p style="color:#f38ba8;font-size:13px;">⚠ No image loaded in PNG Info.</p>',
                         *[gr.update()] * len(gen_controls["extra"]))
-            plan = _restore_plan(read_png_info(img))
+            meta = read_png_info(img)
+            hit = None if meta.get("prompt") else _manifest_hit(img)       # a run-manifest picture: the lookup its drop made
+            if hit:
+                meta = _manifest_advice(hit)[0]
+            plan = _restore_plan(meta)
             u = lambda v: gr.update() if v is None else v
             lora_ups = [gr.update()] * 6
             if plan["loras"] is not None:
                 slots = (plan["loras"] + [("none", None)] * 3)[:3]
                 lora_ups = [v for path, w in slots for v in (path, gr.update() if w is None else w)]
-            status_msg = ('<p style="color:#a6e3a1;font-size:13px;">✅ Sent to Generate: '
+            status_msg = ('<p style="color:#a6e3a1;font-size:13px;">✅ Sent to Generate'
+                          + (f' (from its run’s manifest, {html.escape(hit["name"])})' if hit else "") + ": "
                           + (_plan_summary(plan) or "prompt only (no settings in this image)") + "</p>")
             return (u(plan["prompt"]), u(plan["negative_prompt"]), u(plan["scheduler"]), u(plan["steps"]),
                     u(plan["cfg_scale"]), u(plan["width"]), u(plan["height"]), u(plan["seed"]),
@@ -6683,7 +6764,7 @@ def _restore_plan(meta: dict) -> dict:
     """What to put in the Generate controls to make an image again, from read_png_info() (backend/records.restore_plan with this app's model lists and sampler table)."""
     plan = _records.restore_plan(meta, list_checkpoints=list_checkpoints, list_vaes=list_vaes, list_loras=list_loras, scheduler_map=SCHEDULER_MAP)
     ed = plan.get("eye_detail") or {}
-    if ed:                                                                  # the eye style is a global (Settings / card), not a control: say when it differs from the picture's
+    if ed and ed.get("style") != "unknown":                                 # the eye style is a global (Settings / card), not a control: say when it differs from the picture's
         from backend.detail_tools import EYE_STYLE
         pic = "natural" if ed.get("style") == "natural" else "round"
         if pic != EYE_STYLE["mode"]:
@@ -6725,6 +6806,53 @@ def _pose_control_setup(ex: dict, width: int, height: int, i2i: bool):
             + (" · legs hidden" if rec["legs"] == "hidden" else "")
             + (f' · PAG {ex["pag_scale"]:g} → 0 (pose control runs without PAG)' if ex["pag_scale"] > 0 else " · PAG off"))
     return ctl, rec, "", note
+
+
+_MANIFEST_SEEN: dict = {}      # a picture's fingerprint -> its run-manifest hit (PNG Info's Send to Generate reuses the lookup its drop made)
+
+
+def _manifest_hit(img, name: str = ""):
+    """The run-manifest record of a picture that carries no parameters of its own (Settings → Run manifest folders,
+    backend/run_manifests.py), or None. By its file name when the browser gave one, else the last lookup of the same pixels,
+    else its pixels against the runs' best/ pictures."""
+    from backend import run_manifests as _rm
+    if img is None:
+        return None
+    try:
+        if read_png_info(img).get("prompt"):
+            return None
+    except Exception:
+        pass
+    dirs = _rm.dirs_from_prefs(SETTINGS_DIR)
+    if not dirs:
+        return None
+    key = tuple(_rm.fingerprint(img))
+    if not name and key in _MANIFEST_SEEN:
+        return _MANIFEST_SEEN[key]
+    try:
+        hit = _rm.find(img, name or "", dirs)
+    except Exception as e:
+        print(f"[manifests] lookup failed: {e}")
+        hit = None
+    if hit:
+        if len(_MANIFEST_SEEN) > 64:
+            _MANIFEST_SEEN.clear()
+        _MANIFEST_SEEN[key] = hit
+    return hit
+
+
+def _manifest_advice(hit) -> tuple:
+    """(restore meta, advice lines) for a manifest hit: what a 12 GB card should change, and the time per picture here."""
+    from backend import run_manifests as _rm, settings_info as _si
+    rec = hit["record"]
+    meta = _rm.to_meta(rec)
+    h = meta.get("hires") or {}
+    est = _si.estimate_seconds({"prompt": meta["prompt"], "negative_prompt": meta["negative_prompt"], "steps": meta["steps"],
+                                "width": meta["width"], "height": meta["height"]},
+                               {"pag_scale": meta["pag_scale"], "hires_on": bool(h), "hires_scale": h.get("scale", 1.5),
+                                "hires_steps": h.get("steps", 12), "hires_upscaler": h.get("upscaler", ""), "fd_on": "face_detail" in meta,
+                                "hd_on": "hand_detail" in meta, "ed_on": "eye_detail" in meta})
+    return meta, _rm.advice(rec, [n for n, _ in list_checkpoints()], [n for n, _ in list_loras()], est)
 
 
 def _plan_summary(plan: dict) -> str:

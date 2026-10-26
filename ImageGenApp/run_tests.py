@@ -7526,6 +7526,153 @@ def _():
         _app.SETTINGS_DIR = old
 
 
+@test("img2img, less restrictive: Batch Size N gives N variations (seed, seed + 1, …; the result line names them), 🔬 Max detail runs on an img2img result too (the record keeps the input's size), a ticked hires fix that img2img skips is said, not silent; a dropped picture without settings no longer errors (48 values for 49 outputs since round 50)")
+def _():
+    from PIL import Image
+    import json as _j
+    _app, dg, _ = _app_closures()
+
+    class FakeSD:
+        model_family, current_model, _last_vae_path, prediction, device = "sdxl", "x.safetensors", None, {}, "cpu"
+        _lora_adapters, boosters, last_seeds, last_var_seeds, pipe = {}, {}, [], [], object()
+
+        def __init__(self):
+            self.calls = []
+
+        def img2img(self, img, prompt, neg, strength, steps, cfg, seed, sched, step_callback=None, clip_skip=1):
+            self.calls.append(seed)
+            self.last_seeds = [seed]
+            return [img.copy()], f"img2img | Seed: {seed}"
+    old_sd, old_out, old_md = _app.sd, _app.OUTPUTS_DIR, _app._max_detail_pass
+    tmp = Path(_tf.mkdtemp())
+    try:
+        _app.OUTPUTS_DIR = tmp
+        _app.sd = FakeSD()
+        src = Image.new("RGB", (96, 128), (90, 60, 30))
+        imgs, info, _ = dg("1girl", "", "Euler", 10, 7, 512, 512, 3, 500, src, 0.4, True, auto_quality=False,
+                           extra=dict(hires_on=True))
+        assert _app.sd.calls == [500, 501, 502] and len(imgs) == 3, (_app.sd.calls, len(imgs))
+        assert "3 variations, seeds 500–502" in info and "Hires fix skipped" in info, info[:600]
+        recs = [_j.loads(Image.open(f).info["imagegen"]) for f in sorted(tmp.glob("*.png"))]
+        assert sorted(r["seed"] for r in recs) == [500, 501, 502] and all(r["mode"] == "img2img" and "hires" not in r for r in recs), recs
+        # max detail on an img2img result (a fake 2× pass): runs, recorded; the record's size is the input's
+        for f in tmp.glob("*.png"):
+            f.unlink()
+        _app.sd = FakeSD()
+        _app._max_detail_pass = lambda ims, progress=None: ([i.resize((i.width * 2, i.height * 2)) for i in ims], "<br>🔬 Max detail")
+        imgs, info, _ = dg("1girl", "", "Euler", 10, 7, 512, 512, 1, 7, src, 0.4, True, auto_quality=False, extra=dict(md_on=True))
+        rec = _j.loads(Image.open(next(tmp.glob("*.png"))).info["imagegen"])
+        assert imgs[0].size == (192, 256) and rec.get("max_detail") and (rec["width"], rec["height"]) == (96, 128), (imgs[0].size, rec)
+    finally:
+        _app.sd, _app.OUTPUTS_DIR, _app._max_detail_pass = old_sd, old_out, old_md
+    # the drop of a picture without settings (and of nothing) returns one value per output
+    demo = _app.build_app()
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in demo.fns}
+    ev = by["on_i2i_drop"]
+    for img in (None, Image.new("RGB", (64, 64))):
+        out = ev.fn(img, True)
+        assert len(out) == len(ev.outputs), (len(out), len(ev.outputs))
+
+
+@test("Run manifests: a picture without parameters, listed in its run's manifest*.jsonl (Settings → Run manifest folders), is found by its file name (names repeat across runs: the pixels pick the run) or, without a name, by its pixels against the runs' best/ pictures; its record restores the txt2img settings (LoRAs strongest first, 3 slots, hires / face / hand / eye passes) with advice for a 12 GB card; img2img (at 0.4) and PNG Info → Send to Generate use it; no endpoint added")
+def _():
+    import json as _j
+    from PIL import Image, ImageDraw
+    from backend import run_manifests as RM
+    root = Path(_tf.mkdtemp())
+
+    def pic(color, mark):
+        im = Image.new("RGB", (64, 96), color)
+        ImageDraw.Draw(im).rectangle([mark, mark, mark + 20, mark + 30], fill=(255, 255, 255))
+        return im
+    rec = {"name": "x_scene_A", "ckpt": "myCheckpoint_v1", "loras": [["small", 0.2], ["big", 0.9], ["mid", 0.5], ["extra", 0.1]],
+           "scene": "night_pool", "scheduler": "Euler a", "steps": 28, "cfg_scale": 5.0, "width": 64, "height": 96, "seed": 1234,
+           "prompt": "1girl, night pool", "negative": "lowres", "weighting_mode": "a1111",
+           "hires": {"factor": 1.5, "denoise": 0.4, "upscaler": "Real-ESRGAN (ONNX)", "applied": True},
+           "detail": {"faces_refined": 1, "eyes_refined": 2, "hands_refined": 0}}
+    for run, color, mark, seed in (("run_b1", (200, 30, 30), 5, 1111), ("run_b2", (30, 30, 200), 30, 1234)):
+        (root / run / "best").mkdir(parents=True)
+        (root / run / "manifest.jsonl").write_text(_j.dumps(dict(rec, seed=seed)) + "\n" + _j.dumps({"name": "other"}) + "\n", encoding="utf-8")
+        pic(color, mark).save(root / run / "x_scene_A.png")
+        pic(color, mark).save(root / run / "best" / "x_scene_A_h40.png")
+    idx = RM.index([root])
+    assert set(idx) == {"x_scene_A", "other"} and len(idx["x_scene_A"]) == 2
+    assert RM.match_names("x_scene_A_h40_r2", idx) == ["x_scene_A"] and RM.match_names("x_sce", idx) == ["x_scene_A"] and RM.match_names("", idx) == []
+    hit = RM.find(pic((30, 30, 200), 30), "x_scene_A_h40.png", [root])          # the same name in two runs: the pixels pick run_b2
+    assert hit and hit["run"].name == "run_b2" and hit["record"]["seed"] == 1234 and hit["distance"] < 1, hit
+    hit2 = RM.find(pic((200, 30, 30), 5), "", [root])                            # no name: the best/ pictures by their pixels
+    assert hit2 and hit2["run"].name == "run_b1" and hit2["how"] == "pixels", hit2
+    assert RM.find(pic((0, 200, 0), 50), "", [root]) is None and RM.find(pic((0, 0, 0), 5), "x", []) is None
+    m = RM.to_meta(hit["record"])
+    assert m["loras"] == "big:0.9, mid:0.5, small:0.2, extra:0.1" and m["model"] == "myCheckpoint_v1.safetensors" and m["sampler"] == "Euler a"
+    assert m["hires"] == {"scale": 1.5, "denoise": 0.4, "steps": 28, "upscaler": "Real-ESRGAN (ONNX)"} and "face_detail" in m and "hand_detail" not in m
+    assert m["eye_detail"]["style"] == "unknown"
+    adv = RM.advice(hit["record"], ["myCheckpoint_v2.safetensors"], ["big.safetensors"], 300)
+    txt = " ".join(adv)
+    assert "3 strongest" in txt and "extra 0.1" in txt and "myCheckpoint_v1 is not installed" in txt and "myCheckpoint_v2" in txt
+    assert "mid" in txt and "28 steps" in txt and "5.0 min" in txt, adv
+    # through the app: the img2img follow-up and PNG Info's Send to Generate (prefs point at the folder)
+    import app as _app
+    tmp = Path(_tf.mkdtemp())
+    (tmp / "_prefs.json").write_text(_j.dumps({"manifest_dirs": [str(root)]}), encoding="utf-8")
+    old = _app.SETTINGS_DIR
+    _app.SETTINGS_DIR = tmp
+    try:
+        _app._MANIFEST_SEEN.clear()
+        demo = _app.build_app()
+        by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in demo.fns}
+        ev = by["on_i2i_manifest"]
+        out = ev.fn(pic((30, 30, 200), 30), "x_scene_A.png", True)
+        labels = [getattr(o, "label", None) for o in ev.outputs]
+        assert len(out) == len(ev.outputs) and labels[-1] == "Settings name", labels[-3:]
+        val = dict(zip(range(len(out)), out))
+        i_note = [i for i, o in enumerate(ev.outputs) if type(o).__name__ == "HTML"][0]
+        assert "run’s manifest" in val[i_note] or "run's manifest" in val[i_note], val[i_note][:300]
+        assert out[0] == "1girl, night pool" and out[8] == 1234 and out[-1] == "fork/night pool", (out[0], out[8], out[-1])
+        assert ev.outputs[labels.index("Denoise Strength")] and out[labels.index("Denoise Strength")] == 0.4
+        assert all(isinstance(v, dict) for v in ev.fn(pic((30, 30, 200), 30), "x_scene_A.png", False))          # restore off: nothing changes
+        assert all(isinstance(v, dict) for v in ev.fn(None, "", True))
+        send = by["do_send_to_gen"]
+        out2 = send.fn(pic((30, 30, 200), 30))                         # no name here: the lookup the drop made (same pixels)
+        st = next(v for v in out2 if isinstance(v, str) and "Sent to Generate" in v)
+        assert "manifest" in st and out2[0] == "1girl, night pool", st[:200]
+        api = {d.get("api_name") for d in demo.get_config_file()["dependencies"]}
+        assert "on_i2i_manifest" not in api and "on_png_manifest" not in api and "on_manifest_dirs" not in api
+    finally:
+        _app.SETTINGS_DIR = old
+        _app._MANIFEST_SEEN.clear()
+
+
+@test("Studio Loop explores around its keepers and says what they share: a plan's 'explore' share of each later round re-uses the best picture's seed with a small variation, the report lists the prompt tags that go with keepers and with failures, records keep the resolved prompt")
+def _():
+    from backend import loop_plan as LP, ui_loop as UL
+    import json as _j
+    from types import SimpleNamespace
+    assert LP.clean_plan({"presets": ["a"]})["explore"] == 0.0 and LP.clean_plan({"presets": ["a"], "explore": 7})["explore"] == 1.0
+    assert LP.explore_split(4, 0.25) == (3, 1) and LP.explore_split(4, 0) == (4, 0) and LP.explore_split(2, 1) == (0, 2) and LP.explore_split(1, 0.25) == (1, 0)
+    recs = [dict(settings="s", verdict="ok", stars=4, why=["x"], seed=10), dict(settings="s", verdict="best", stars=5, why=[], seed=20),
+            dict(settings="s", verdict="reject", stars=5, why=[], seed=30), dict(settings="t", verdict="best", stars=5, why=[], seed=40)]
+    assert LP.best_seed(recs, "s") == 20 and LP.best_seed(recs, "u") is None and LP.best_seed(recs[2:3], "s") is None
+    rows = ([dict(verdict="best", prompt="1girl, (smile:1.2), beach, dress") for _ in range(4)]
+            + [dict(verdict="reject", prompt="1girl, arms up, beach, dress") for _ in range(4)] + [dict(verdict="ok")])
+    good, bad = LP.tag_contrast(rows)
+    assert [t for t, _, _ in good] == ["smile"] and [t for t, _, _ in bad] == ["arms up"], (good, bad)        # weights stripped; tags in every picture say nothing
+    rep = LP.report_md(LP.clean_plan({"presets": ["s"]}), [dict(r, settings="s", round=1, why=[], file=f"p{i}.png") for i, r in enumerate(rows)], "", 1)
+    assert "What the keepers have in common" in rep and "smile (4/0)" in rep and "arms up (0/4)" in rep, rep
+    assert "What the keepers" not in LP.report_md(LP.clean_plan({"presets": ["s"]}), [dict(settings="s", round=1, verdict="ok", why=[], file="a.png")], "", 1)
+    import studio_loop as SL
+    src = Path(SL.__file__).read_text(encoding="utf-8")
+    assert '"Variation strength": LP.EXPLORE_STRENGTH' in src and "prompt=str(rec.get(\"prompt\")" in src
+    tmp = Path(_tf.mkdtemp()); (tmp / "loop").mkdir()
+    ns = SimpleNamespace(SETTINGS_DIR=tmp, OUTPUTS_DIR=tmp / "o", _list_saved_settings=lambda: ["a"], list_checkpoints=lambda: [], list_loras=lambda: [])
+    (tmp / "a.json").write_text("{}", encoding="utf-8")
+    (tmp / "loop" / "p.json").write_text(_j.dumps({"presets": ["a"], "gate": {"faces": 0}}), encoding="utf-8")
+    assert UL.set_explore(ns, "p", 0.5) == "0.5"
+    d = _j.loads((tmp / "loop" / "p.json").read_text(encoding="utf-8"))
+    assert d == {"presets": ["a"], "gate": {"faces": 0}, "explore": 0.5}
+    assert "50 % of each setting" in UL.check_plan(ns, UL.read_plan(ns, "p")) and "Explore: off" in UL.check_plan(ns, LP.clean_plan({"presets": ["a"]}))
+
+
 print("\n" + "=" * 70)
 print(f"RESULTS: {PASS} passed, {FAIL} failed, {SKIP} skipped, {PASS + FAIL + SKIP} total")
 print("=" * 70)
