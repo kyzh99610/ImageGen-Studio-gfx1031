@@ -494,6 +494,19 @@ def parameters_html() -> str:
                  "🧪 试运行：每个设置只出一张、只跑一轮——睡前快速检查。➕ 添加文件夹：把一个文件夹（portraits、scenes……）里的全部设置加入计划。"
                  "覆盖保存计划时，会保留标签页显示不了的内容（单个设置自己的张数或提示词后缀、筛选规则）。早上在图库上方选 best / ok / review / reject，"
                  "点一张图再按 ⭐：和历史里的 ⭐ 一样，下一轮它的设置会多出一张。report.md 会列出每个设置每张图的秒数；连续三次生成失败（程序被关掉）时循环会自行结束。")],
+            ["🔓 Where content is filtered, and who controls it",
+             "The app itself refuses no prompt: what a picture may show is decided by your prompts and NEGATIVE prompts. Long safety "
+             "negatives that many presets share are easiest to keep in ONE wildcard file: put __mylist__ in each negative (a wildcard in a "
+             "negative works like in the prompt; a one-line file is used whole) and edit models\\wildcards\\mylist.txt to change all of them at "
+             "once — the settings card under the 💾 list shows which wildcard files a setting uses. The 🔁 Studio Loop sorts pictures, it does "
+             "not stop the app: each plan has a switch “Reject pictures with exposure tags” (on by default; the plan check says which rule a plan "
+             "uses), the artifact list (text, watermark, a second person …) is in the plan's gate. One rule is fixed and no plan or switch turns it "
+             "off: the loop's age guard rejects every picture WD14 reads as a child (loli, child, aged down …, at a low threshold).",
+             _cn("程序本身不拒绝任何提示词：图里能出现什么，由你的提示词和反向提示词决定。很多预设共用的一长串安全反向词，最好放在一个通配符文件里："
+                 "在每个反向提示词里写 __mylist__（反向提示词里的通配符与正向相同；只有一行的文件会整行使用），然后编辑 models\\wildcards\\mylist.txt 即可一次改全部——"
+                 "💾 列表下的设置卡片会显示一个设置用了哪些通配符文件。🔁 Studio Loop 只是给图片分类，并不阻止程序：每个计划都有一个“拒绝带暴露标签的图片”开关"
+                 "（默认开；检查计划会显示该计划用哪条规则），瑕疵列表（文字、水印、第二个人……）在计划的 gate 里。有一条规则是固定的，任何计划或开关都关不掉："
+                 "循环的年龄保护会拒绝所有被 WD14 识别为儿童的图片（loli、child、aged down……，阈值较低）。")],
             ["🎴 Every outfit of a card",
              "Character cards → “🎴▶ Generate every outfit”: each outfit × N seeds (the same seeds for every outfit) "
              "with the current settings, then a labelled contact sheet. Pairs already made with the same settings "

@@ -7480,6 +7480,52 @@ def _():
                       "on_loop_star", "on_loop_test"}, api
 
 
+@test("Content controls: a plan may allow the exposure tags (a per-plan switch, saved into the plan without touching its other keys; the plan check says which rule applies) but the Studio Loop's age guard rejects child-looking pictures whatever the plan says; the saved-settings lister for other programs matches the app's")
+def _():
+    import json as _j
+    from types import SimpleNamespace
+    from backend import loop_plan as LP, ui_loop as UL, settings_info as SI
+    gate_open = LP.clean_plan({"presets": ["a"], "gate": {"block_tags": [], "artifact_tags": []}})["gate"]
+    assert gate_open["block_tags"] == []
+    assert LP.verdict({"stars": 5, "flags": []}, {"explicit": 0.9}, 1, gate_open)[0] == "best"           # allowed by this plan
+    assert LP.verdict({"stars": 5, "flags": []}, {"explicit": 0.9}, 1, LP.clean_plan({"presets": ["a"]})["gate"])[0] == "reject"
+    for t in ("loli", "child", "female_child", "aged_down"):
+        v, why = LP.verdict({"stars": 5, "flags": []}, {t: 0.4}, 1, gate_open)
+        assert v == "reject" and why[0].startswith("age guard"), (t, v, why)
+    # a plan cannot name the age tags away: they are not in its gate
+    g2 = LP.clean_plan({"presets": ["a"], "gate": {"block_tags": [], "artifact_tags": [], "tag_threshold": 0.99}})["gate"]
+    assert LP.verdict({"stars": 5}, {"loli": 0.36}, 1, g2)[0] == "reject" and LP.verdict({"stars": 5}, {"loli": 0.2}, 1, g2)[0] == "best"
+    # the switch
+    assert UL.with_exposure({"gate": {"block_tags": ["x"]}}, True)["gate"]["block_tags"] == ["x"]           # a custom list stays
+    assert "block_tags" not in UL.with_exposure({"gate": {"block_tags": []}}, True)["gate"]                  # back to the defaults
+    assert UL.with_exposure({"gate": {"faces": 0}}, False)["gate"] == {"faces": 0, "block_tags": []}
+    assert UL.with_exposure({"a": 1}, None) == {"a": 1}
+    assert UL.rejects_exposure(LP.clean_plan({"presets": ["a"]})) and not UL.rejects_exposure(LP.clean_plan({"presets": ["a"], "gate": {"block_tags": []}}))
+    tmp = Path(_tf.mkdtemp())
+    ns = SimpleNamespace(SETTINGS_DIR=tmp, OUTPUTS_DIR=tmp / "out", _list_saved_settings=lambda: ["a"], list_checkpoints=lambda: [], list_loras=lambda: [])
+    (tmp / "loop").mkdir()
+    (tmp / "a.json").write_text("{}", encoding="utf-8")
+    (tmp / "loop" / "p.json").write_text(_j.dumps({"presets": [{"settings": "a", "count": 3}], "gate": {"park_after": 4}}), encoding="utf-8")
+    assert UL.set_exposure(ns, "p", False) == "off"
+    d = _j.loads((tmp / "loop" / "p.json").read_text(encoding="utf-8"))
+    assert d == {"presets": [{"settings": "a", "count": 3}], "gate": {"park_after": 4, "block_tags": []}}, d
+    assert "<b>allowed</b>" in UL.check_plan(ns, UL.read_plan(ns, "p")) and "age guard is always on" in UL.check_plan(ns, UL.read_plan(ns, "p"))
+    UL.set_exposure(ns, "p", True)
+    assert "exposure tags are rejected" in UL.check_plan(ns, UL.read_plan(ns, "p"))
+    assert UL.set_exposure(ns, "nope", True) == ""
+    # the lister for programs that cannot import app.py (the ComfyUI node) gives the app's list
+    import app as _app
+    old = _app.SETTINGS_DIR
+    try:
+        for n in ("g/x", "g/_hidden", "characters/c", "_priv/y", "top", "_last_session", "api_keys"):
+            (tmp / f"{n}.json").parent.mkdir(parents=True, exist_ok=True)
+            (tmp / f"{n}.json").write_text("{}", encoding="utf-8")
+        _app.SETTINGS_DIR = tmp
+        assert SI.list_saved(tmp) == _app._list_saved_settings() == ["g/x", "a", "top"], SI.list_saved(tmp)
+    finally:
+        _app.SETTINGS_DIR = old
+
+
 print("\n" + "=" * 70)
 print(f"RESULTS: {PASS} passed, {FAIL} failed, {SKIP} skipped, {PASS + FAIL + SKIP} total")
 print("=" * 70)

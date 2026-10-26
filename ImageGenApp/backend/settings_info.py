@@ -28,6 +28,22 @@ from backend import wildcards as WC
 _WILD = re.compile(r"__([\w/\-]+)__")
 
 
+RESERVED_DIRS = {"characters", "loop", "poses", "composition", "cache", "temp", "wildcards"}   # = app._RESERVED_SETTING_DIRS
+
+
+def list_saved(settings_dir) -> list[str]:
+    """The saved settings as the app lists them ('group/name' first, then top-level names), for programs that cannot import app.py
+    (the ComfyUI node)."""
+    s = Path(settings_dir)
+    if not s.is_dir():
+        return []
+    top = sorted(p.stem for p in s.glob("*.json") if p.is_file() and not p.stem.startswith("_") and p.stem.casefold() != "api_keys")
+    ok = lambda g: g and not g.startswith((".", "_")) and g.casefold() not in RESERVED_DIRS
+    grouped = sorted(f"{d.name}/{p.stem}" for d in s.iterdir() if d.is_dir() and ok(d.name)
+                     for p in d.glob("*.json") if p.is_file() and not p.stem.startswith("_"))
+    return grouped + top
+
+
 def read(settings_dir, name: str) -> dict | None:
     """The saved setting `name` ('group/name' or 'name'), or None."""
     if not name:
