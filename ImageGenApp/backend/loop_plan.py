@@ -26,6 +26,41 @@ ARTIFACT_TAGS = ("text", "english text", "watermark", "signature", "artist name"
                  "2girls", "multiple girls", "split screen", "inset")
 VERDICTS = ("best", "ok", "review", "reject")
 
+
+def saved_names(result) -> list[str]:
+    """The picture file names the app's Generate result says it saved (its info text has a 'Saved: a.png, b.png' line per call), in order."""
+    texts: list[str] = []
+
+    def walk(x):
+        if isinstance(x, str):
+            texts.append(x)
+        elif isinstance(x, (list, tuple)):
+            for i in x:
+                walk(i)
+        elif isinstance(x, dict):
+            for i in x.values():
+                walk(i)
+    walk(result)
+    names: list[str] = []
+    for t in texts:
+        for line in re.findall(r"Saved:\s*([^<\n]+)", t):
+            for n in line.split(","):
+                n = n.strip()
+                if n.lower().endswith(".png") and n not in names:
+                    names.append(n)
+    return names
+
+
+def own_files(raw, result, t0: float, attach: bool) -> list:
+    """The pictures THIS Generate call made, in the folder `raw` the app saves to. Named by the app's own result, so a picture the user makes by hand
+    in an attached app while the loop runs is never swept into the run folder; only when the loop started the app itself (nothing else saves there)
+    and the result names nothing does it fall back to 'new files since the call began'."""
+    raw = Path(raw)
+    got = [raw / n for n in saved_names(result) if (raw / n).is_file()]
+    if got or attach:
+        return got
+    return sorted(f for f in raw.glob("*.png") if f.stat().st_mtime >= t0 - 1)
+
 DEFAULTS = dict(per_round=2, rounds=0, stop_at="", max_hours=8.0, card="", polish="", seed_base=-1,
                 gate=dict(block_tags=list(BLOCK_TAGS), artifact_tags=list(ARTIFACT_TAGS), tag_threshold=0.5,
                           faces=1, min_stars_ok=4, park_after=2))
