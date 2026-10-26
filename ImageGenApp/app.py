@@ -1991,6 +1991,7 @@ def _build_generate_tab():
                                 choices=_list_saved_settings(),
                                 interactive=True,
                             )
+                            settings_card = gr.HTML("")
                             settings_preview = gr.Image(label="Made with these settings", height=260,
                                                         interactive=False, visible=False)
                             with gr.Row():
@@ -3133,6 +3134,18 @@ def _build_generate_tab():
         return gr.update(value=str(f), visible=True) if f and f.is_file() else gr.update(value=None, visible=False)
 
     settings_dd.change(on_settings_pick, [settings_dd], [settings_preview])
+
+    def on_settings_card(name):
+        """What the picked setting will do, in plain words (backend/settings_info.py): model, recipe, Polish, passes, wildcards, time."""
+        from backend import settings_info as _SI
+        sname = _settings_name(name) if name else ""
+        d = _SI.read(SETTINGS_DIR, sname)
+        if not d:
+            return ""
+        meas = _SI.measured_seconds([SETTINGS_DIR / "loop", OUTPUTS_DIR / "loop"]).get(sname)
+        return _SI.card_html(sname, d, [n for n, _ in list_checkpoints()], [n for n, _ in list_loras()], meas)
+
+    settings_dd.change(on_settings_card, [settings_dd], [settings_card], api_name=False)
     settings_load_btn.click(
         do_load_settings,
         [settings_dd],

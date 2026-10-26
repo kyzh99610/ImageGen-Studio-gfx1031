@@ -473,6 +473,27 @@ def parameters_html() -> str:
                  "以及会拒绝图片的标签。循环会自己启动程序（请先关掉你的：同一张显卡上开两个程序会爆显存），或用 --attach URL 连接已运行的程序；"
                  "程序的降温模式/过热暂停对每张图都有效；在运行文件夹里放一个名为 STOP 的文件，会在当前这张图完成后结束；结束时会恢复你生成标签页的上次会话。"
                  "早上打开运行文件夹里的 report.html 查看——或者让助手读 report.md 来调整提示词。")],
+            ["🧭 Before you press Start: what a setting / a plan will do",
+             "Pick a saved setting in ⚙️ Save / Load Settings and a card under the list says, before you load it: the checkpoint and LoRAs "
+             "(⚠ when one is not installed here), the sampler / steps / CFG / size, what ✨ Polish does — with Auto, each picture's own framing tag "
+             "picks the recipe, so a wildcard set is counted over 40 sample draws (e.g. “Cowboy shot — hires 85 %, Full body 15 %”) and the passes "
+             "shown are the ones that recipe runs —, the wildcards it uses (⚠ when a file is missing: the __name__ would stay as text), and the time "
+             "per picture: measured, once a Studio Loop run has timed that setting, else a rough estimate at full speed (the pause while hot comes on "
+             "top). In the 🔁 Studio Loop tab, 📋 Check plan (also shown when you pick a plan) lists every setting with its Polish pick and time, "
+             "one round's length and how many rounds fit before the stop time / hour budget, and warns first about what would waste a night "
+             "(a missing setting, model, LoRA, wildcard or card). 🧪 Test run renders ONE picture of each setting in one round — a quick check before "
+             "you go to bed. ➕ Add folder puts every saved setting of a folder (portraits, scenes, …) into the plan. Saving a plan over an existing one "
+             "keeps what the tab cannot show (a setting's own count or prompt suffix, the gate). In the morning, pick best / ok / review / reject "
+             "above the gallery, click a picture and press ⭐: like a ⭐ in History, its setting gets one more picture next round. report.md lists "
+             "seconds per picture per setting, and a loop ends by itself when three generates in a row fail (the app was closed).",
+             _cn("在 ⚙️ 保存/加载设置里选中一个已保存设置，列表下方的卡片会在加载前说明：模型和 LoRA（本机没有时 ⚠）、采样器/步数/CFG/尺寸、"
+                 "✨ Polish 会做什么——Auto 时每张图由它自己的构图标签决定配方，通配符组合会按 40 次抽样统计（如“Cowboy shot — hires 85 %，Full body 15 %”），"
+                 "并显示该配方实际运行的细节重绘——、用到的通配符（文件缺失时 ⚠：__名字__ 会原样留在提示词里），以及每张图的时间："
+                 "Studio Loop 测过的实测值，否则是全速下的粗略估计（过热暂停另计）。在 🔁 Studio Loop 标签页，📋 检查计划（选中计划时也会显示）"
+                 "列出每个设置的 Polish 选择和时间、一轮的长度、在停止时间/小时数内能跑几轮，并先警告会浪费一整夜的问题（缺少设置、模型、LoRA、通配符或角色卡）。"
+                 "🧪 试运行：每个设置只出一张、只跑一轮——睡前快速检查。➕ 添加文件夹：把一个文件夹（portraits、scenes……）里的全部设置加入计划。"
+                 "覆盖保存计划时，会保留标签页显示不了的内容（单个设置自己的张数或提示词后缀、筛选规则）。早上在图库上方选 best / ok / review / reject，"
+                 "点一张图再按 ⭐：和历史里的 ⭐ 一样，下一轮它的设置会多出一张。report.md 会列出每个设置每张图的秒数；连续三次生成失败（程序被关掉）时循环会自行结束。")],
             ["🎴 Every outfit of a card",
              "Character cards → “🎴▶ Generate every outfit”: each outfit × N seeds (the same seeds for every outfit) "
              "with the current settings, then a labelled contact sheet. Pairs already made with the same settings "

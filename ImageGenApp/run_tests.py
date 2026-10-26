@@ -7360,6 +7360,126 @@ def _():
         NH.set_on(old_on)
 
 
+@test("Smooth runs: a saved setting explains itself (model / LoRAs / passes / what Polish Auto picks / wildcards / time, missing files warned), the Loop tab checks a plan before it runs (time per round, rounds that fit, missing pieces), re-saving a plan keeps its own counts and gate, a test run renders one of each, ⭐ from the loop gallery feeds the next round, the report lists seconds per picture, and a loop stops when the app stops answering")
+def _():
+    import datetime as _dt
+    import json as _j
+    from collections import Counter
+    from types import SimpleNamespace
+    from PIL import Image
+    from backend import settings_info as SI, ui_loop as UL, loop_plan as LP, wildcards as WC, history as H
+    import studio_loop as SL
+    tmp = Path(_tf.mkdtemp())
+    wdir = tmp / "wild"; wdir.mkdir()
+    (wdir / "mix.txt").write_text("cowboy shot, smile\nfull body, standing\ncowboy shot, wave\n", encoding="utf-8")
+    old_dirs = list(WC.WILDCARD_DIRS)
+    WC.WILDCARD_DIRS[:] = [wdir]
+    try:
+        base = {"prompt": "1girl, __mix__", "negative_prompt": "lowres", "scheduler": "DPM++ 2M AYS", "steps": 12, "cfg_scale": 6,
+                "width": 832, "height": 1216, "batch_size": 1, "model": r"C:\x\myModel.safetensors",
+                "lora_slots": [["myLora.safetensors", 0.8], ["gone.safetensors", 0.5], ["none", 0.7]],
+                "extra": {"pag_scale": 2.0, "ed_on": True, "ed_denoise": 0.4, "polish": "Auto", "cs": 0.75}}
+        picks = SI.polish_picks(base, draws=30)
+        assert set(picks) <= {"Cowboy shot — hires", "Full body"} and len(picks) == 2 and sum(picks.values()) == 30, picks
+        assert SI.polish_picks(dict(base, extra={"polish": "(off)"})) == Counter()
+        assert SI.polish_picks(dict(base, extra={"polish": "Portrait"})) == Counter({"Portrait": 1})
+        assert SI.polish_picks(dict(base, prompt="full body"), 5) == Counter({"Full body": 1})
+        # the time model: more work costs more
+        plain = dict(base, extra={"pag_scale": 0})
+        e0 = SI.estimate_seconds(plain)
+        assert 20 < e0 < 40, e0
+        hi = SI.estimate_seconds(plain, {"hires_on": True, "hires_scale": 1.5, "hires_steps": 12, "hires_upscaler": "Real-ESRGAN (ONNX)"})
+        lz = SI.estimate_seconds(plain, {"hires_on": True, "hires_scale": 1.5, "hires_steps": 12, "hires_upscaler": "Lanczos"})
+        assert hi > lz > e0 and 100 < hi < 200, (e0, lz, hi)
+        assert SI.estimate_seconds(dict(plain, negative_prompt="x, " * 3000)) > e0 * 1.5
+        assert SI.estimate_seconds(plain, {"pag_scale": 2}) > e0
+        s = SI.summary(base, ["myModel.safetensors"], ["myLora.safetensors"])
+        assert s["checkpoint_ok"] and s["loras"] == [("myLora", 0.8), ("gone", 0.5)] and s["loras_missing"] == ["gone"]
+        assert s["wildcards"] == [("mix", 3)] and s["polish"] == "Auto" and s["colour"] == 0.75
+        card = SI.card_html("g/x", dict(base, prompt="1girl, __nothere__, __mix__"), ["other.safetensors"], ["myLora.safetensors"])
+        assert "is not installed" in card and "gone" in card and "__nothere__" in card and "missing" in card and "Auto" in card and "rough" in card
+        assert "measured" in SI.card_html("g/x", base, [], [], measured=200.0)
+        assert SI.card_html("x", None) == ""
+        # measured seconds: records.jsonl 'secs' (newest file wins) and older logs' 'n picture(s) in T s' lines
+        lroot = tmp / "outputs" / "loop"
+        (lroot / "r1").mkdir(parents=True)
+        (lroot / "r1" / "records.jsonl").write_text("\n".join(_j.dumps(r) for r in [
+            {"settings": "g/x", "secs": 100}, {"settings": "g/x", "secs": 140}, {"settings": "g/x", "secs": 120}, {"settings": "g/y"}]),
+            encoding="utf-8")
+        sdir = tmp / "settings"; (sdir / "loop").mkdir(parents=True)
+        (sdir / "loop" / "night.log").write_text("01:00:00 g/z: 2 picture(s) in 300 s\n01:05:00 g/z: 0 picture(s) in 5 s\n", encoding="utf-8")
+        m = SI.measured_seconds([sdir / "loop", lroot])
+        assert m == {"g/x": 120.0, "g/z": 150.0}, m
+        # the report and the stats carry seconds per picture
+        recs = [dict(settings="g/x", round=1, verdict="best", why=[], secs=v, file=f"p{v}.png") for v in (100, 140, 120)]
+        assert LP.preset_stats(recs)["g/x"]["secs"] == 120.0 and LP.preset_stats([dict(recs[0], secs=None)])["g/x"]["secs"] is None
+        rep = LP.report_md(LP.clean_plan({"presets": ["g/x"]}), recs, "", 5)
+        assert "| s / picture |" in rep and "| 120 |" in rep, rep
+    finally:
+        WC.WILDCARD_DIRS[:] = old_dirs
+    # the Loop tab: re-saving keeps what the tab has no control for; folders; the plan check; a test run; ⭐
+    for n in ("g/a", "g/b", "h/c"):
+        (sdir / n).parent.mkdir(parents=True, exist_ok=True)
+        (sdir / f"{n}.json").write_text(_j.dumps(dict(base, prompt="1girl, cowboy shot", extra={"polish": "(off)"})), encoding="utf-8")
+    ns = SimpleNamespace(SETTINGS_DIR=sdir, OUTPUTS_DIR=tmp / "outputs", _ARGS=SimpleNamespace(port=7865),
+                         _list_saved_settings=lambda: ["g/a", "g/b", "h/c", "top"],
+                         list_checkpoints=lambda: [("myModel.safetensors", "p")], list_loras=lambda: [("myLora.safetensors", "p")])
+    (sdir / "loop" / "night.json").write_text(_j.dumps({"presets": [{"settings": "g/a", "count": 4, "prompt_suffix": "night"}, "g/b"],
+                                                        "per_round": 2, "gate": {"park_after": 5, "faces": 0}, "rounds": 3, "seed_base": 7}),
+                                             encoding="utf-8")
+    UL.save_plan(ns, "night", ["g/a", "h/c"], 1, "06:00", 8, "", "")
+    d = _j.loads((sdir / "loop" / "night.json").read_text(encoding="utf-8"))
+    assert d["presets"] == [{"settings": "g/a", "count": 4, "prompt_suffix": "night"}, "h/c"], d["presets"]
+    assert d["gate"] == {"park_after": 5, "faces": 0} and d["rounds"] == 3 and d["seed_base"] == 7 and d["per_round"] == 1 and d["stop_at"] == "06:00"
+    m = LP.clean_plan(UL.merged_plan(ns, "night", UL.plan_from_controls(["g/a", "h/c"], 2, "", 8, "", "")))
+    assert [q["count"] for q in m["presets"]] == [4, 2] and m["gate"]["park_after"] == 5    # 📋 Check counts what Save would keep
+    assert UL.groups(ns) == ["g", "h"] and UL.add_group(ns, ["h/c"], "g") == ["h/c", "g/a", "g/b"] and UL.add_group(ns, ["x"], "") == ["x"]
+    pl = UL.plan_from_controls(["g/a", "missing/one"], 2, "06:00", 8, "no such card", "")
+    chk = UL.check_plan(ns, pl, now=_dt.datetime(2026, 1, 1, 23, 0))
+    assert "missing/one" in chk and "refuse to start" in chk and "no such card" in chk and "One round" in chk and "time left 7.0 h" in chk, chk
+    chk2 = UL.check_plan(ns, UL.plan_from_controls(["g/a"], 8, "23:02", 8, "", ""), now=_dt.datetime(2026, 1, 1, 23, 0))
+    assert "only part of it will run" in chk2, chk2
+    calls = []
+
+    class FakeProc:
+        def __init__(self, args, **kw):
+            calls.append(args)
+        def poll(self):
+            return None
+    UL.STATE.update(proc=None, plan="", log=None, started=0.0)
+    msg = UL.start(ns, "night", popen=FakeProc, test=True)
+    assert msg.startswith("🧪 Test run") and calls[-1][3].endswith("_test_night.json"), (msg, calls)
+    t = LP.load_plan(sdir / "loop" / "_test_night.json")
+    assert t["rounds"] == 1 and [q["count"] for q in t["presets"]] == [1, 1] and t["presets"][0]["prompt_suffix"] == "night"
+    assert UL.list_plans(ns) == ["night"]                                          # test plans are not offered as plans
+    UL.STATE.update(proc=None, plan="", log=None, started=0.0)
+    run = ns.OUTPUTS_DIR / "loop" / "_test_night_20260101-0100"
+    (run / "ok").mkdir(parents=True)
+    Image.new("RGB", (8, 8)).save(run / "ok" / "q1.png")
+    UL.STATE["plan"] = "_test_night"
+    assert UL.view(ns, "ok") == [str(run / "ok" / "q1.png")] and UL.view(ns, "best") == [] and UL.view(ns, "junk") == []
+    UL.STATE["plan"] = ""
+    old_fav = H.FAV_FILE
+    H.FAV_FILE = tmp / "_fav.json"
+    try:
+        assert "Click a picture" in UL.star("")
+        assert UL.star(str(run / "ok" / "q1.png")).startswith("⭐") and H.favourites() == {"q1.png"}
+        assert UL.star(str(run / "ok" / "q1.png")).startswith("☆") and H.favourites() == set()
+    finally:
+        H.FAV_FILE = old_fav
+    assert SL.MAX_FAILS >= 2
+    # the UI-only helpers are wired without a named endpoint (the API stays as it was) and none is a GPU job
+    import app as _app
+    demo = _app.build_app()
+    names = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?") for f in demo.fns}
+    for fn in ("on_settings_card", "on_loop_check", "on_loop_check_saved", "on_loop_group", "on_loop_view", "on_loop_select",
+               "on_loop_star", "on_loop_test"):
+        assert fn in names and fn not in _app._GPU_FNS, fn
+    api = {d.get("api_name") for d in demo.get_config_file()["dependencies"]}
+    assert not api & {"on_settings_card", "on_loop_check", "on_loop_check_saved", "on_loop_group", "on_loop_view", "on_loop_select",
+                      "on_loop_star", "on_loop_test"}, api
+
+
 print("\n" + "=" * 70)
 print(f"RESULTS: {PASS} passed, {FAIL} failed, {SKIP} skipped, {PASS + FAIL + SKIP} total")
 print("=" * 70)
