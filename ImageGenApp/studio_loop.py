@@ -38,6 +38,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"      # the loop only scores on the CPU
 
 from backend import loop_plan as LP  # noqa: E402  (pure, no torch)
 
+MAX_FAILS = 3   # generate calls in a row that raise (the app closed or crashed): the loop stops instead of spinning until morning
+
 
 def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
@@ -245,6 +247,7 @@ def main(argv=None):
         api = Api(url)
         scorer = Scorer(plan["card"])
         counts = {p["settings"]: p["count"] for p in plan["presets"]}
+        fails = 0
         rnd = 0
         while True:
             rnd += 1
@@ -274,11 +277,17 @@ def main(argv=None):
                 t0 = time.time()
                 try:
                     res = api.generate(vals, ov)
+                    fails = 0
                 except Exception as e:
                     log(f"⚠ {p['settings']}: generate failed: {e}")
+                    fails += 1
+                    if fails >= MAX_FAILS:            # the app is gone or broken: stop instead of spinning until morning
+                        stopped = f"{fails} generates in a row failed (last: {str(e)[:120]})"
+                        break
                     continue
                 new = LP.own_files(raw, res, t0, bool(a.attach))
-                log(f"{p['settings']}: {len(new)} picture(s) in {time.time() - t0:.0f} s")
+                secs = time.time() - t0
+                log(f"{p['settings']}: {len(new)} picture(s) in {secs:.0f} s")
                 if a.attach and not new:
                     log(f"⚠ {p['settings']}: the app's result names no picture in {raw} (is --raw its outputs folder?)")
                 from PIL import Image
@@ -298,7 +307,7 @@ def main(argv=None):
                     shutil.move(str(f), str(dest))
                     r = dict(file=str(dest), settings=p["settings"], round=rnd, seed=rec.get("seed"), verdict=v, why=why,
                              stars=s.get("stars"), faces=s.get("faces"), hands_off=s.get("hands_off"),
-                             favourite=f.name in favs)
+                             favourite=f.name in favs, secs=round(secs / max(1, len(new)), 1))
                     records.append(r)
                     with open(run / "records.jsonl", "a", encoding="utf-8") as fh:
                         fh.write(json.dumps(r, ensure_ascii=False) + "\n")

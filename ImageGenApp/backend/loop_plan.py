@@ -178,7 +178,11 @@ def preset_stats(records: list[dict]) -> dict:
                 key = reason_key(w)
                 s["reasons"][key] = s["reasons"].get(key, 0) + 1
         s["favs"] += int(bool(r.get("favourite")))
+        if r.get("secs"):
+            s.setdefault("secs_list", []).append(float(r["secs"]))
     for s in st.values():
+        sl = sorted(s.pop("secs_list", []))
+        s["secs"] = sl[len(sl) // 2] if sl else None
         s["keep_rate"] = round((s["best"] + s["ok"]) / s["n"], 3) if s["n"] else 0.0
         s["last_rounds_kept"] = [s["rounds"][k] for k in sorted(s["rounds"])]
     return st
@@ -228,10 +232,12 @@ def report_md(plan: dict, records: list[dict], stopped: str, minutes: float) -> 
     lines = [f"# Studio Loop report", "",
              f"{len(records)} pictures in {minutes:.0f} min ({stopped or 'running'}): "
              f"best {tot['best']}, ok {tot['ok']}, review {tot['review']}, reject {tot['reject']}.", "",
-             "| saved setting | pictures | best | ok | review | reject | kept per round | top problems |", "|---|---|---|---|---|---|---|---|"]
+             "| saved setting | pictures | best | ok | review | reject | kept per round | s / picture | top problems |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for name, s in sorted(st.items(), key=lambda kv: -kv[1]["keep_rate"]):
         probs = ", ".join(f"{k} ×{n}" for k, n in sorted(s["reasons"].items(), key=lambda kv: -kv[1])[:3]) or "-"
-        lines.append(f"| {name} | {s['n']} | {s['best']} | {s['ok']} | {s['review']} | {s['reject']} | {s['last_rounds_kept']} | {probs} |")
+        secs = f"{s['secs']:.0f}" if s.get("secs") else "-"
+        lines.append(f"| {name} | {s['n']} | {s['best']} | {s['ok']} | {s['review']} | {s['reject']} | {s['last_rounds_kept']} | {secs} | {probs} |")
     parked = [n for n, c in next_counts(plan, st).items() if c == 0]
     lines += ["", "## Needs a prompt fix", ""]
     lines += [f"- {n}: kept nothing in its last {plan['gate']['park_after']} rounds" for n in parked] or ["- nothing parked"]
