@@ -65,7 +65,7 @@ def own_files(raw, result, t0: float, attach: bool) -> list:
         return got
     return sorted(f for f in raw.glob("*.png") if f.stat().st_mtime >= t0 - 1)
 
-DEFAULTS = dict(per_round=2, rounds=0, stop_at="", max_hours=8.0, card="", polish="", seed_base=-1,
+DEFAULTS = dict(per_round=2, rounds=0, stop_at="", max_hours=8.0, card="", polish="", seed_base=-1, explore=0.0,
                 gate=dict(block_tags=list(BLOCK_TAGS), artifact_tags=list(ARTIFACT_TAGS), tag_threshold=0.5,
                           faces=1, min_stars_ok=4, park_after=2))
 
@@ -88,6 +88,7 @@ def clean_plan(d: dict) -> dict:
     out["rounds"] = _num(d.get("rounds"), 0, 1000, 0, int)
     out["max_hours"] = _num(d.get("max_hours"), 0.05, 72, DEFAULTS["max_hours"])
     out["seed_base"] = _num(d.get("seed_base"), -1, 2**32 - 1, -1, int)
+    out["explore"] = _num(d.get("explore"), 0.0, 1.0, 0.0)
     stop = str(d.get("stop_at") or "").strip()
     if stop:
         try:
@@ -214,6 +215,47 @@ def next_counts(plan: dict, stats: dict) -> dict:
     return out
 
 
+EXPLORE_STRENGTH = 0.1     # variation strength of an 'explore' picture: a close relative of the keeper (the 🔀 More like this value)
+
+
+def explore_split(n: int, explore: float) -> tuple[int, int]:
+    """(new pictures, variations of the best one) for a setting's count this round."""
+    k = int(round(n * max(0.0, min(1.0, explore))))
+    return n - k, k
+
+
+def best_seed(records: list[dict], settings: str):
+    """The seed of a setting's best kept picture so far (best before ok, more stars, fewer reasons), or None."""
+    kept = [r for r in records if r.get("settings") == settings and r.get("verdict") in ("best", "ok") and r.get("seed") is not None]
+    return sorted(kept, key=rank_key)[0]["seed"] if kept else None
+
+
+def tag_contrast(records: list[dict], min_n: int = 3, top: int = 8) -> tuple[list, list]:
+    """Prompt tags that go with keepers and with failures, over the pictures that have their resolved prompt: ([(tag, kept, failed)] most
+    over-represented among keepers, the same among review / reject). A tag in every picture says nothing and is left out."""
+    import math
+    rows = [(r.get("verdict") in ("best", "ok"), {re.sub(r":\s*[\d.]+\s*$", "", re.sub(r"[()\[\]]", "", t)).strip().lower()
+                                                  for t in re.split(r"[,\n]", r.get("prompt") or "") if t.strip()} - {""})
+            for r in records if r.get("prompt")]
+    if not rows:
+        return [], []
+    nk = sum(1 for k, _ in rows if k)
+    nf = len(rows) - nk
+    count: dict = {}
+    for k, tags in rows:
+        for t in tags:
+            c = count.setdefault(t, [0, 0])
+            c[0 if k else 1] += 1
+    out = []
+    for t, (k, f) in count.items():
+        if k + f < min_n or k + f == len(rows):
+            continue
+        out.append((math.log((k + 0.5) / (nk + 1)) - math.log((f + 0.5) / (nf + 1)), t, k, f))
+    good = [(t, k, f) for s, t, k, f in sorted(out, reverse=True) if s > 0.4][:top]
+    bad = [(t, k, f) for s, t, k, f in sorted(out) if s < -0.4][:top]
+    return good, bad
+
+
 def should_stop(plan: dict, started: _dt.datetime, now: _dt.datetime, round_no: int, counts: dict) -> str:
     """Why the loop stops before round `round_no` ('' = go on)."""
     if plan["rounds"] and round_no > plan["rounds"]:
@@ -248,6 +290,12 @@ def report_md(plan: dict, records: list[dict], stopped: str, minutes: float) -> 
     parked = [n for n, c in next_counts(plan, st).items() if c == 0]
     lines += ["", "## Needs a prompt fix", ""]
     lines += [f"- {n}: kept nothing in its last {plan['gate']['park_after']} rounds" for n in parked] or ["- nothing parked"]
+    good, bad = tag_contrast(records)
+    if good or bad:
+        lines += ["", "## What the keepers have in common", "",
+                  "Prompt tags (wildcard picks included) seen more among kept pictures, and more among review / reject (kept / not kept):", ""]
+        lines += ["- keepers: " + (", ".join(f"{t} ({k}/{f})" for t, k, f in good) or "-"),
+                  "- failures: " + (", ".join(f"{t} ({k}/{f})" for t, k, f in bad) or "-")]
     lines += ["", "## Best pictures", ""]
     best = sorted([r for r in records if r["verdict"] == "best"], key=rank_key)[:40]
     lines += [f"- {Path(r['file']).name} ({r['settings']}, seed {r.get('seed')})" for r in best] or ["- none yet"]

@@ -485,7 +485,11 @@ def parameters_html() -> str:
              "you go to bed. ➕ Add folder puts every saved setting of a folder (portraits, scenes, …) into the plan. Saving a plan over an existing one "
              "keeps what the tab cannot show (a setting's own count or prompt suffix, the gate). In the morning, pick best / ok / review / reject "
              "above the gallery, click a picture and press ⭐: like a ⭐ in History, its setting gets one more picture next round. report.md lists "
-             "seconds per picture per setting, and a loop ends by itself when three generates in a row fail (the app was closed).",
+             "seconds per picture per setting, and a loop ends by itself when three generates in a row fail (the app was closed). "
+             "“Explore around the keepers” (per plan): from round 2 that share of each setting's pictures re-uses the seed of its best "
+             "picture so far (the same wildcard picks) with a small variation (strength 0.1, like 🔀 More like this); report.md then also "
+             "lists the prompt tags (wildcard picks included) seen more among kept pictures and more among review / reject — what to keep "
+             "in a wildcard file and what to take out.",
              _cn("在 ⚙️ 保存/加载设置里选中一个已保存设置，列表下方的卡片会在加载前说明：模型和 LoRA（本机没有时 ⚠）、采样器/步数/CFG/尺寸、"
                  "✨ Polish 会做什么——Auto 时每张图由它自己的构图标签决定配方，通配符组合会按 40 次抽样统计（如“Cowboy shot — hires 85 %，Full body 15 %”），"
                  "并显示该配方实际运行的细节重绘——、用到的通配符（文件缺失时 ⚠：__名字__ 会原样留在提示词里），以及每张图的时间："
@@ -494,6 +498,27 @@ def parameters_html() -> str:
                  "🧪 试运行：每个设置只出一张、只跑一轮——睡前快速检查。➕ 添加文件夹：把一个文件夹（portraits、scenes……）里的全部设置加入计划。"
                  "覆盖保存计划时，会保留标签页显示不了的内容（单个设置自己的张数或提示词后缀、筛选规则）。早上在图库上方选 best / ok / review / reject，"
                  "点一张图再按 ⭐：和历史里的 ⭐ 一样，下一轮它的设置会多出一张。report.md 会列出每个设置每张图的秒数；连续三次生成失败（程序被关掉）时循环会自行结束。")],
+            ["📇 Pictures from another run: drag one in, get its recipe back",
+             "Some generators (scripts, batch bots, other forks of this app) save plain PNGs and keep each picture's recipe in a "
+             "manifest*.jsonl next to them. Put the folder that holds such run folders in Settings → 📇 Run manifest folders. Then drop one "
+             "of their pictures into 🖼 Image-to-Image (or PNG Info): the app finds its record — by the file's name (names repeat across runs, "
+             "so the pictures are compared to pick the right run), or, when the browser passes no name, by its pixels against the runs' "
+             "best/ pictures — and fills the Generate tab with that run's txt2img settings: prompt, negative, checkpoint, the three strongest "
+             "LoRAs, sampler, steps, CFG, size, seed, hires and the face / hand / eye passes. img2img goes on at 0.4 (close to the picture; "
+             "0.2–0.3 closer, 0.5+ looser; Batch Size N = N variations), 🔁 Recreate runs its txt2img settings with its seed (another GPU "
+             "and runtime: close, not identical), and the Save Settings name is filled in (fork/<scene>) so 💾 keeps it as a base for "
+             "txt2img and the Studio Loop. Warnings say what a 12 GB card should change: LoRAs beyond three (the weakest are left out), "
+             "files not installed here (with local ones of a related name), a hires fix with as many steps as the base (12 is this app's "
+             "measured recipe), and the time per picture. img2img itself: Batch Size N now gives N variations (seed, seed + 1, …), 🔬 Max "
+             "detail runs on an img2img result, the strength goes down to 0.05 for a touch-up, and a ticked hires fix that img2img skips is said.",
+             _cn("有些生成器（脚本、批量机器人、本程序的其他分支）保存不带参数的 PNG，并把每张图的配方记在旁边的 manifest*.jsonl 里。"
+                 "在 设置 → 📇 Run manifest folders 里填入存放这些运行文件夹的目录。之后把其中一张图拖进 🖼 图生图（或 PNG Info）："
+                 "程序会找到它的记录——按文件名（不同运行里名字会重复，会比对图片选出正确的那次运行），浏览器没有传文件名时按像素与各运行的 best/ 图片比对——"
+                 "并把那次运行的文生图设置填回生成页：提示词、反向词、模型、最强的三个 LoRA、采样器、步数、CFG、尺寸、种子、高清修复以及脸/手/眼细节。"
+                 "图生图会以 0.4 打开（接近原图；0.2–0.3 更接近，0.5+ 更自由；批量 N = N 个变体），🔁 重现会用它的种子跑文生图（不同显卡与运行环境：接近但不完全相同），"
+                 "保存设置的名字会自动填好（fork/<场景>），按 💾 即可作为文生图和 Studio Loop 的基础。警告会说明 12 GB 显卡需要改什么："
+                 "超过三个的 LoRA（去掉最弱的）、本机没有的文件（并列出名字相近的本地文件）、步数与基础相同的高清修复（本程序实测配方用 12 步）、每张图的时间。"
+                 "图生图本身：批量 N 现在会给出 N 个变体（种子、种子+1……），🔬 Max detail 也能用于图生图结果，强度最低可到 0.05 做微调，勾选但被图生图跳过的高清修复会提示。")],
             ["🔓 Where content is filtered, and who controls it",
              "The app itself refuses no prompt: what a picture may show is decided by your prompts and NEGATIVE prompts. Long safety "
              "negatives that many presets share are easiest to keep in ONE wildcard file: put __mylist__ in each negative (a wildcard in a "

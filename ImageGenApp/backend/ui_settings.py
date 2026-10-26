@@ -125,3 +125,28 @@ def build_prefs_section(ns) -> None:
         return (f'<p style="color:#a6e3a1;font-size:13px;">✅ {html.escape(POWER_LABELS[name])}: pause {cool:g}× the step time, '
                 f'wait above {limit:g} °C (resume at {limit - 8:g} °C)</p>', gr.update(value=cool), gr.update(value=limit))
     power_rb.input(on_power_profile, [power_rb], [power_status, cool_sl, therm_sl])
+
+    # 📇 Run manifest folders: pictures of runs that keep their recipes in manifest*.jsonl (backend/run_manifests.py) — dropped into
+    # img2img they bring their run's txt2img settings back. A UI-only listener: no endpoint.
+    def _dirs_now():
+        try:
+            import json as _j
+            v = _j.loads((ns.SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("manifest_dirs") or []
+        except Exception:
+            v = []
+        return "\n".join(v) if isinstance(v, list) else str(v)
+    man_tb = gr.Textbox(value=_dirs_now, lines=2, label="📇 Run manifest folders (one per line)",
+                        info="Folders holding run folders with manifest*.jsonl (one JSON record per picture, 'name' = its file name). "
+                             "A picture from such a run dropped into img2img brings back that run's prompt, checkpoint, LoRAs, sampler, size, seed and passes.")
+    man_status = gr.HTML("")
+
+    def on_manifest_dirs(text):
+        from pathlib import Path as _P
+        dirs = [l.strip().strip('"') for l in str(text or "").splitlines() if l.strip()]
+        ns._save_pref("manifest_dirs", dirs)
+        bad = [d for d in dirs if not _P(d).is_dir()]
+        from backend import run_manifests as _rm
+        n = len(_rm.index([_P(d) for d in dirs if _P(d).is_dir()])) if dirs else 0
+        return (f'<p style="color:#a6e3a1;font-size:13px;">✅ {len(dirs) - len(bad)} folder(s), {n} pictures listed in their manifests</p>'
+                + (f'<p style="color:#f9e2af;font-size:13px;">⚠ not a folder: {html.escape(", ".join(bad))}</p>' if bad else ""))
+    man_tb.blur(on_manifest_dirs, [man_tb], [man_status], api_name=False)
