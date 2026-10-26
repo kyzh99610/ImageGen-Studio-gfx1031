@@ -77,6 +77,36 @@ def merged_plan(ns, name, plan: dict) -> dict:
     return out
 
 
+def with_exposure(d: dict, reject: bool | None) -> dict:
+    """The plan dict with its exposure rule set: reject=True keeps a custom block list (or the defaults), False empties it (the
+    plan's pictures may show what the default list rejects). The age guard (loop_plan.AGE_TAGS) is not part of the list and stays on."""
+    if reject is None:
+        return d
+    d = dict(d)
+    g = dict(d.get("gate") or {})
+    if reject:
+        if not g.get("block_tags"):
+            g.pop("block_tags", None)
+    else:
+        g["block_tags"] = []
+    d["gate"] = g
+    return d
+
+
+def rejects_exposure(plan: dict | None) -> bool:
+    return bool((plan or {}).get("gate", {}).get("block_tags", True)) if plan else True
+
+
+def set_exposure(ns, name, reject: bool) -> str:
+    """Write the exposure rule into the saved plan file `name` (other keys untouched)."""
+    f = _loop_dir(ns) / f"{_safe(name)}.json"
+    if not _safe(name) or not f.exists():
+        return ""
+    d = json.loads(f.read_text(encoding="utf-8-sig"))
+    f.write_text(json.dumps(with_exposure(d, bool(reject)), indent=1, ensure_ascii=False), encoding="utf-8")
+    return "on" if reject else "off"
+
+
 def save_plan(ns, name, settings, per_round, stop_at, max_hours, card, polish) -> str:
     """Write the plan the controls show. Saving over an existing plan keeps what the tab has no control for: a setting's own
     count / prompt suffix (when the setting is still in the plan), the gate, the round limit and the seed base."""
@@ -171,7 +201,9 @@ def check_plan(ns, plan: dict, now=None) -> str:
         warn.append(f"one round (~{_hm(round_m)}) is longer than the time left ({_hm(left)}): only part of it will run")
     head = (f"<p>One round ≈ <b>{_hm(round_m)}</b> ({pics} pictures); time left {_hm(left)} → about <b>{fit:.1f} round(s)</b>, "
             f"~{int(fit * pics)} pictures. ‘~’ = a rough estimate with the heat pause (no loop run has timed that setting yet); "
-            "settings that keep failing get parked and starred ones get more, so later rounds differ.</p>")
+            "settings that keep failing get parked and starred ones get more, so later rounds differ.</p>"
+            f"<p>Content rule: {'exposure tags are rejected' if plan['gate'].get('block_tags') else 'exposure tags are <b>allowed</b> in this plan'}"
+            f"; artifacts ({len(plan['gate'].get('artifact_tags') or [])} tags) are rejected; the age guard is always on.</p>")
     w = "".join(f"<p style='color:#f9e2af;margin:2px 0'>⚠ {x}</p>" for x in warn)
     table = ("<table style='font-size:13px;border-collapse:collapse'><tr style='color:#a6adc8'><td>saved setting</td><td>per round</td>"
              "<td>✨ Polish</td><td>per picture</td><td>checkpoint</td></tr>" + "".join(rows) + "</table>")
@@ -295,7 +327,7 @@ def build_tab(ns) -> None:
                     v = {"settings": [q["settings"] for q in p["presets"]], "per_round": p["per_round"], "stop_at": p["stop_at"],
                          "max_hours": p["max_hours"], "card": p["card"] if p["card"] in cards else "",
                          "polish": p["polish"] if p["polish"] in pol_choices else "", "name": first,
-                         "check": None}[key]
+                         "check": None, "reject": rejects_exposure(p)}[key]
                     return check_plan(ns, p) if key == "check" else v
                 return f
             refresh_btn = gr.Button("🔄", scale=0, min_width=60)
@@ -310,6 +342,9 @@ def build_tab(ns) -> None:
         with gr.Row():
             card_dd = gr.Dropdown(cards, value=_init("card", ""), label="Character card for the face check (optional)")
             polish_dd = gr.Dropdown(pol_choices, value=_init("polish", ""), label="✨ Polish to force (empty = each setting's own)")
+        reject_cb = gr.Checkbox(value=_init("reject", True),
+                                label="Reject pictures with exposure tags (the plan's block list: WD14 exposure tags and the 'explicit' rating). "
+                                      "Clear it for a plan whose pictures may show that. The age guard (child-looking pictures) always stays on.")
         with gr.Row():
             name_tb = gr.Textbox(value=_init("name", ""), label="Plan name", scale=3)
             save_btn = gr.Button("💾 Save plan", scale=1)
@@ -356,9 +391,10 @@ def build_tab(ns) -> None:
             return status(ns)
 
         # the helpers below are UI-only (api_name=False): the tab's named endpoints stay as they were
-        def on_loop_check(name, settings, per_round, stop_at, max_hours, card, polish):
+        def on_loop_check(name, settings, per_round, stop_at, max_hours, card, polish, reject):
             try:
-                return check_plan(ns, LP.clean_plan(merged_plan(ns, name, plan_from_controls(settings, per_round, stop_at, max_hours, card, polish))))
+                return check_plan(ns, LP.clean_plan(with_exposure(merged_plan(ns, name, plan_from_controls(
+                    settings, per_round, stop_at, max_hours, card, polish)), bool(reject))))
             except ValueError as ex:
                 return f'<p style="color:#f38ba8;">⚠ {html.escape(str(ex))}</p>'
 
@@ -384,9 +420,11 @@ def build_tab(ns) -> None:
             return f"<p>{star(path)}</p>"
 
         plan_dd.change(on_loop_pick, [plan_dd], [set_ms, per_sl, stop_tb, hours_nb, card_dd, polish_dd, name_tb])
-        save_btn.click(on_loop_save, [name_tb, set_ms, per_sl, stop_tb, hours_nb, card_dd, polish_dd], [msg, plan_dd])
+        save_btn.click(on_loop_save, [name_tb, set_ms, per_sl, stop_tb, hours_nb, card_dd, polish_dd], [msg, plan_dd]).then(
+            lambda n, r: set_exposure(ns, n, r) and None, [name_tb, reject_cb], None, api_name=False)
+        plan_dd.change(lambda n: rejects_exposure(read_plan(ns, n) if n else None), [plan_dd], [reject_cb], api_name=False)
         plan_dd.change(on_loop_check_saved, [plan_dd], [check_html], api_name=False)
-        check_btn.click(on_loop_check, [name_tb, set_ms, per_sl, stop_tb, hours_nb, card_dd, polish_dd], [check_html], api_name=False)
+        check_btn.click(on_loop_check, [name_tb, set_ms, per_sl, stop_tb, hours_nb, card_dd, polish_dd, reject_cb], [check_html], api_name=False)
         grp_btn.click(on_loop_group, [set_ms, grp_dd], [set_ms], api_name=False)
         verdict_rd.change(on_loop_view, [verdict_rd], [best, picked], api_name=False)
         best.select(on_loop_select, [verdict_rd], [picked], api_name=False)

@@ -25,6 +25,10 @@ BLOCK_TAGS = ("explicit",)   # WD14's rating; add your own tags under the plan's
 ARTIFACT_TAGS = ("text", "english text", "watermark", "signature", "artist name", "border", "multiple views", "comic",
                  "2girls", "multiple girls", "split screen", "inset")
 VERDICTS = ("best", "ok", "review", "reject")
+# Always rejected, whatever a plan's gate says (the plan cannot switch it off): pictures WD14 reads as a child. Lower threshold than
+# the gate's on purpose — this one should over-reject.
+AGE_TAGS = ("loli", "shota", "child", "female child", "male child", "aged down", "toddler")
+AGE_THRESHOLD = 0.35
 
 
 def saved_names(result) -> list[str]:
@@ -127,6 +131,9 @@ def verdict(score: dict, tags: dict, faces: int | None, gate: dict, hands_off: i
     why = []
     thr = gate.get("tag_threshold", 0.5)
     t = {str(k).lower().replace("_", " "): float(v) for k, v in (tags or {}).items()}
+    age = sorted({k for k in AGE_TAGS if t.get(k, 0.0) >= AGE_THRESHOLD})
+    if age:
+        return "reject", [f"age guard: {', '.join(age)}"]
     hit = sorted({k for k in gate.get("block_tags", ()) if t.get(k, 0.0) >= thr})
     if hit:
         return "reject", [f"blocked: {', '.join(hit)}"]
