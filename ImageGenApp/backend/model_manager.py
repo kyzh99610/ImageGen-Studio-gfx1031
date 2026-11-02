@@ -6,6 +6,10 @@ upscalers, and embeddings for use in the UI dropdowns.
 
 from __future__ import annotations
 
+import contextlib
+import json
+import mmap
+import warnings
 from pathlib import Path
 
 from config import CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, UPSCALERS_DIR, EMBEDDINGS_DIR
@@ -66,7 +70,12 @@ LOAD_COMMIT_FACTOR_FIRST = 2.4     # the first load in a process (kernel / conte
 LOAD_COMMIT_FACTOR_NATIVE = 2.0    # later loads on native ROCm: 6.46 GB SDXL files peaked at 1.75-1.86x (2026-11-01, sampled every 50 ms; first loads 2.17x)
 # An integrated GPU's memory is system memory, so the first picture's activations come out of commit too. Measured on a 780M: a 6.46 GB SDXL file loaded with
 # 13 GB of free commit, and the first sampling step then took it down to 0.4 GB with memory still growing (2026-11-01). SD 1.5 (2 GB file) stayed above 6 GB.
-LOAD_COMMIT_IGPU_EXTRA = 1.0
+LOAD_COMMIT_IGPU_EXTRA = 0.5        # with the read-only load: load + picture took 1.73x the file on a 780M (lowest free commit 3.1 GB)
+# With read_only_checkpoints() the file itself takes no commit: only the GPU's copy does. Measured on 6.46 GB SDXL files after an SD 1.5 cycle: 0.82x against 1.83x, the same picture (0/255).
+# First loads, on all 18 checkpoints here, a fresh process each: SDXL 1.19-1.48x against 2.17x, SD 1.5 1.58-1.66x of a 2 GB file (mostly the GPU runtime starting).
+# The load alone is not the whole need: the first picture after it takes ~2.5 GB more (load + picture 1.22x; in the app, with its LoRAs, ~1.3x). 1.1 would let a load through into a crash at that picture.
+LOAD_COMMIT_FACTOR_MAPPED = 1.4
+LOAD_COMMIT_FACTOR_MAPPED_FIRST = 1.8
 _first_load = [True]
 
 
@@ -101,10 +110,50 @@ def avail_commit_gb() -> float | None:
         return None
 
 
-def commit_problem(model_path, scale: float = 1.0) -> str | None:
+_SAFETENSORS_DTYPES = {"F64": "float64", "F32": "float32", "F16": "float16", "BF16": "bfloat16", "I64": "int64", "I32": "int32", "I16": "int16", "I8": "int8", "U8": "uint8", "BOOL": "bool"}
+
+
+def _read_only_state_dict(path):
+    """A .safetensors file as tensors over a read-only mapping. safetensors' own load_file maps it copy-on-write, and Windows charges commit for all of that up front."""
+    import torch
+    with open(path, "rb") as f:
+        mapped = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    size = int.from_bytes(mapped[:8], "little")
+    header, base, view, out = json.loads(mapped[8:8 + size]), 8 + size, memoryview(mapped), {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)            # "not writable": these tensors are only read, on their way to the GPU
+        for key, info in header.items():
+            if key == "__metadata__":
+                continue
+            dtype, (start, end) = getattr(torch, _SAFETENSORS_DTYPES[info["dtype"]]), info["data_offsets"]
+            out[key] = torch.frombuffer(view[base + start:base + end], dtype=dtype).reshape(info["shape"]) if end > start else torch.empty(info["shape"], dtype=dtype)
+    return out
+
+
+@contextlib.contextmanager
+def read_only_checkpoints(device):
+    """While a pipeline loads with from_single_file: on native ROCm with a GPU, .safetensors files come in over a read-only mapping. The caller must move the model to the GPU before
+    anything writes to its weights (a write to this mapping is an access violation), so the CPU and DirectML paths, which fuse LoRAs in place on the CPU, and the trainer don't use it."""
+    import config
+    if not (getattr(config, "NATIVE_ROCM", False) and str(device).startswith("cuda")):
+        yield
+        return
+    from diffusers.loaders import single_file_utils as SFU
+    original = SFU.load_state_dict
+
+    def load(path, *args, **kwargs):
+        return _read_only_state_dict(path) if str(path).lower().endswith(".safetensors") else original(path, *args, **kwargs)
+    SFU.load_state_dict = load
+    try:
+        yield
+    finally:
+        SFU.load_state_dict = original
+
+
+def commit_problem(model_path, scale: float = 1.0, mapped: bool = True) -> str | None:
     """A plain-English refusal when the free commit is clearly too small to load this checkpoint (call it after the
     previous model has been unloaded); None when it should fit or can't be judged (not a local file, not Windows).
-    `scale` multiplies the need (the LoRA trainer loads its base model in fp32: x1.5, round 21)."""
+    `scale` multiplies the need (the LoRA trainer loads its base model in fp32: x1.5, round 21). `mapped`: the load goes through read_only_checkpoints()."""
     p = Path(str(model_path))
     if not p.is_file():
         return None
@@ -114,8 +163,11 @@ def commit_problem(model_path, scale: float = 1.0) -> str | None:
     size = p.stat().st_size / 2**30
     import config
     native = getattr(config, "NATIVE_ROCM", False)
-    later = LOAD_COMMIT_FACTOR_NATIVE if native else LOAD_COMMIT_FACTOR
-    need = (LOAD_COMMIT_FACTOR_FIRST if _first_load[0] else later) * size * scale
+    if native and mapped and p.suffix.lower() == ".safetensors":
+        first, later = LOAD_COMMIT_FACTOR_MAPPED_FIRST, LOAD_COMMIT_FACTOR_MAPPED
+    else:
+        first, later = LOAD_COMMIT_FACTOR_FIRST, LOAD_COMMIT_FACTOR_NATIVE if native else LOAD_COMMIT_FACTOR
+    need = (first if _first_load[0] else later) * size * scale
     if native and _on_integrated_gpu():
         need += LOAD_COMMIT_IGPU_EXTRA * size * scale
     if free >= need:

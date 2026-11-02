@@ -1056,7 +1056,7 @@ class LoRATrainer:
         # the crash zone of round 3. Refuse a load that cannot fit, with the pipelines' message (the fp32 copy needs ~1.5x the pipelines' share).
         from backend.model_manager import commit_problem
         self._fp16 = use_fp16_base(cfg)
-        why = commit_problem(path, scale=1.0 if self._fp16 else _TRAIN_LOAD_SCALE)
+        why = commit_problem(path, scale=1.0 if self._fp16 else _TRAIN_LOAD_SCALE, mapped=False)
         if why:
             raise RuntimeError(why)
 

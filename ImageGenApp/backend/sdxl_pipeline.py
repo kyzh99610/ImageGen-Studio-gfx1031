@@ -793,7 +793,7 @@ class SDXLPipeline:
         self.device = _device()
         self.dtype = get_torch_dtype(self.device)
         self._unload()
-        from backend.model_manager import commit_problem
+        from backend.model_manager import commit_problem, read_only_checkpoints
         low = commit_problem(model_path_or_id)          # a refusal instead of a crash inside safetensors when commit runs out
         if low:
             return f"❌ {low}"
@@ -806,20 +806,21 @@ class SDXLPipeline:
         common_kwargs = dict(torch_dtype=self.dtype)
 
         try:
-            if is_local and path.suffix in (".safetensors", ".ckpt"):
-                self.pipe = StableDiffusionXLPipeline.from_single_file(
-                    str(path), **common_kwargs
-                )
-            else:
-                from backend.sd_pipeline import _from_pretrained
-                self.pipe = _from_pretrained(
-                    StableDiffusionXLPipeline, model_path_or_id, **common_kwargs
-                )
+            with read_only_checkpoints(self.device):
+                if is_local and path.suffix in (".safetensors", ".ckpt"):
+                    self.pipe = StableDiffusionXLPipeline.from_single_file(
+                        str(path), **common_kwargs
+                    )
+                else:
+                    from backend.sd_pipeline import _from_pretrained
+                    self.pipe = _from_pretrained(
+                        StableDiffusionXLPipeline, model_path_or_id, **common_kwargs
+                    )
 
-            # Optionally swap VAE
-            if vae_path and Path(vae_path).exists():
-                vae = AutoencoderKL.from_single_file(vae_path, torch_dtype=self.dtype)
-                self.pipe.vae = vae
+                # Optionally swap VAE
+                if vae_path and Path(vae_path).exists():
+                    vae = AutoencoderKL.from_single_file(vae_path, torch_dtype=self.dtype)
+                    self.pipe.vae = vae
             self._last_vae_path = vae_path
 
             # ── Device placement ──

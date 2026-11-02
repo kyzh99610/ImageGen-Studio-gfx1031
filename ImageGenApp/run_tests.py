@@ -1553,11 +1553,43 @@ def _():
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp) / "m.safetensors"
         p.write_bytes(b"\0" * (1 << 20))
-        with mock.patch.object(MM, "_first_load", [False]), mock.patch.object(MM, "avail_commit_gb", lambda: 0.0025), mock.patch("config.NATIVE_ROCM", True):
+        with mock.patch.object(MM, "_first_load", [False]), mock.patch.object(MM, "avail_commit_gb", lambda: 0.0015), mock.patch("config.NATIVE_ROCM", True):
             with mock.patch.object(MM, "_on_integrated_gpu", lambda: False):
-                assert MM.commit_problem(p) is None                     # 2.0 x 0.00098 fits
+                assert MM.commit_problem(p) is None                     # 1.4 x 0.00098 fits: the read-only mapping takes no commit
+                assert "Not enough free memory" in MM.commit_problem(p, mapped=False)  # the trainer's load still maps copy-on-write: 2.0 x 0.00098 does not
             with mock.patch.object(MM, "_on_integrated_gpu", lambda: True):
-                assert "Not enough free memory" in MM.commit_problem(p)  # 3.0 x 0.00098 does not
+                assert "Not enough free memory" in MM.commit_problem(p)  # 1.9 x 0.00098 does not
+
+
+@test("Read-only checkpoint loads: same tensors as safetensors, every dtype and an empty tensor; only native ROCm on a GPU uses them, and the loader is put back")
+def _():
+    import tempfile
+    from unittest import mock
+    import torch
+    from safetensors.torch import save_file
+    from diffusers.loaders import single_file_utils as SFU
+    from backend import model_manager as MM
+    tensors = {"a": torch.arange(12, dtype=torch.float16).reshape(3, 4), "b": torch.ones(5, dtype=torch.float32) / 3, "c": torch.tensor([1, 2], dtype=torch.int64), "d": torch.tensor([True, False]),
+               "e": torch.arange(4, dtype=torch.bfloat16), "empty": torch.zeros((0, 3), dtype=torch.float32)}
+    with tempfile.TemporaryDirectory() as tmp:
+        p = str(Path(tmp) / "m.safetensors")
+        save_file(tensors, p, metadata={"format": "pt"})
+        got = MM._read_only_state_dict(p)
+        assert set(got) == set(tensors)
+        for k, v in tensors.items():
+            assert got[k].dtype == v.dtype and got[k].shape == v.shape and torch.equal(got[k], v), k
+        original = SFU.load_state_dict
+        with mock.patch("config.NATIVE_ROCM", True):
+            with MM.read_only_checkpoints("cuda:0"):
+                assert SFU.load_state_dict is not original
+                assert torch.equal(SFU.load_state_dict(p)["a"], tensors["a"])
+            assert SFU.load_state_dict is original
+            for device in ("cpu", "privateuseone:0"):                  # these paths fuse LoRAs in place on the CPU
+                with MM.read_only_checkpoints(device):
+                    assert SFU.load_state_dict is original
+        with mock.patch("config.NATIVE_ROCM", False), MM.read_only_checkpoints("cuda:0"):
+            assert SFU.load_state_dict is original
+        del got
 
 
 @test("A PC with only python-rocm (no python-3.10, no ZLUDA): launch.bat and launch.ps1 find it, start on native ROCm and don't warn about ZLUDA; install_rocm.bat refuses a folder too deep for the kernels' file names")
@@ -4558,10 +4590,10 @@ def _():
     p.write_bytes(b"\0" * (1 << 20))                                         # 1 MiB stand-in: need = factor x 0.00098 GB
     with patch.object(MM, "avail_commit_gb", lambda: 0.0035):
         MM._first_load[0] = False
-        assert MM.commit_problem(p, scale=1.0) is None                       # 2.05 x 0.00098 = 0.0020 <= 0.0035: fits
-        assert MM.commit_problem(p, scale=LT._TRAIN_LOAD_SCALE) is None        # x 1.5 = 0.0030 <= 0.0035: still fits
+        assert MM.commit_problem(p, scale=1.0, mapped=False) is None         # 2.05 x 0.00098 = 0.0020 <= 0.0035: fits
+        assert MM.commit_problem(p, scale=LT._TRAIN_LOAD_SCALE, mapped=False) is None  # x 1.5 = 0.0030 <= 0.0035: still fits
     with patch.object(MM, "avail_commit_gb", lambda: 0.0025):
-        assert MM.commit_problem(p, scale=1.0) is None and "Not enough free memory" in MM.commit_problem(p, scale=LT._TRAIN_LOAD_SCALE)
+        assert MM.commit_problem(p, scale=1.0, mapped=False) is None and "Not enough free memory" in MM.commit_problem(p, scale=LT._TRAIN_LOAD_SCALE, mapped=False)
     tr = LT.LoRATrainer(LT.TrainingConfig(base_model=str(p), model_type="sd15", dataset_dir="d", device="cpu"))
     with patch.object(MM, "avail_commit_gb", lambda: 0.0025), patch("backend.sd_pipeline._is_sdxl", lambda path: False):
         r = tr.prepare()

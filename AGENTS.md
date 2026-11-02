@@ -31,7 +31,7 @@ AMD's native ROCm PyTorch instead (Python 3.12, no ZLUDA; see "Native ROCm PyTor
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 215-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 216-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -76,7 +76,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 ImageGenApp\install_rocm.bat                    :: native ROCm PyTorch in python-rocm\ (RX 9070 XT, 780M): launch.bat then uses it, --zluda keeps ZLUDA
 ImageGenApp\run_rocm.bat selftest_zluda.py      :: the same checks on native ROCm (run_rocm.bat smoke_gpu.py --sdxl too)
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 215 tests; NPU tests skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 216 tests; NPU tests skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -160,8 +160,7 @@ What differs from ZLUDA (`config.NATIVE_ROCM`, true when the `rocm_sdk` package 
 - MIOpen compiles kernels per tensor shape: a picture size never used before costs 28-70 s once, then it is cached across processes (no MIOpen at all: 4.1 s against 3.0 s per picture, so the main passes keep it).
   Detail crops change size with every picture, so `detail_tools.inpaint_region` runs with MIOpen off: an eye pass takes a flat 2.5 s against a mean of 11.8 s (1.3 s cached, 15 s not), identity equal (CCIP 0.926 / 0.923).
 - `MIOPEN_FIND_MODE=FAST` / `DYNAMIC_HYBRID` changed nothing measurable; `TORCH_BLAS_PREFER_HIPBLASLT=0` is 5 % slower. Both stay at the default.
-- Commit (RAM + page file): a first SDXL load peaks at 2.17× the file size, a later one or a switch at 1.75-1.86× (`LOAD_COMMIT_FACTOR_NATIVE` = 2.0). On a 32 GB PC with the default small page file the commit limit is ~36 GB, of which Windows and the driver hold ~16 GB at idle:
-  a switch bottoms out near 2 GB free, so a larger page file (fixed ~25 GB) is the real fix. It is the user's to change.
+- **Commit (RAM + page file).** safetensors' `load_file` maps the file copy-on-write and Windows charges commit for all of it, so a load counted the file twice: a first SDXL load 2.17× the file, a switch 1.83×, free commit down to 2.4 GB. `model_manager.read_only_checkpoints` loads `.safetensors` over a read-only mapping instead: first load 1.19-1.48× on all 18 checkpoints here (each in a fresh process), a switch 0.82× (lowest free 8.9 GB), pictures identical (8 real-app jobs, Polish and switches included, max difference 0). It is for native + GPU only: a write to the mapping is an access violation, and the CPU / DirectML paths fuse LoRAs in place; the trainer keeps the old load. The first picture after a load takes ~2.5 GB more, so the preflight asks for 1.4× (`LOAD_COMMIT_FACTOR_MAPPED`), not the load's own 0.82×: 1.1 would let a load through into a crash at that picture. On a 32 GB PC with the default small page file the commit limit is ~36 GB, of which ~16 GB are held at idle, and an SD 1.5 cycle leaves ~5.4 GB in the process (flat over 3 cycles, no leak), so an SD 1.5 → SDXL switch has ~5 GB of margin (~1.4 GB before). A larger page file still helps; it is the user's to change.
 - `install_rocm.bat` keeps torch pinned in its second pip step: left free, the resolver swapped it for a CPU-only PyPI build (via torchsde). torch 2.14 needs setuptools 77+.
 - **LoRA training on native** keeps flash attention (the trainer's old switch stayed off for every later Generate of the process), encodes latents on the GPU (the CPU took 703 s for 6 SDXL pictures at 832×1280; 57 pictures now take 66 s in all) and saves without moving the whole model to the CPU (that second copy took free commit to 0.7 GB). MIOpen stays on for that encode: without it the untiled fp32 VAE took free commit from 20 GB to 0.8. Measured on an RX 9070 XT: SDXL, 57 pictures, rank 16, 570 steps in 10.4 min at 7.9 GB allocated, lowest free commit 2.4 GB on the default small page file; SD 1.5, 24 steps in 15 s at 4.3 GB. Flash attention against math SDPA in training: 7.7 against 10.1 GB on SDXL (12 steps 19 against 25 s), 4.3 against 6.1 GB on SD 1.5.
 - **How many pictures:** a character LoRA from 9 pictures scored no better than no LoRA (CCIP 0.872 against 0.866, 405 steps); from 57 pictures, 570 steps, 0.905 against 0.881 at weight 0.8, and 0.886 at 1.0.
@@ -172,7 +171,7 @@ The real app driven over HTTP on native ROCm (8 Generate calls with Polish Cowbo
 A process that spilled VRAM silently draws stripe garbage afterwards (seen under ZLUDA after an untiled 1248×1824 VAE decode: every later SD 1.5 picture, std 61, no error, RAM full and the SSD at 100 % during the spill). The app's tiled decode doesn't get there, and `smoke_gpu.py` now rejects such pictures by row noise (garbage 65, real pictures 1-12): its old std check passed them.
 
 ### gfx1103 (Radeon 780M, HIP calls it "Radeon 7")
-Native ROCm runs it (`launch.bat --gpu 1`): the self-test passes, SD 1.5 512×768 with a LoRA takes ~60 s at 20 steps (~3 s/step), 7.3 GB of shared memory. The HIP SDK has no gfx1103 rocBLAS kernels, so ZLUDA can't. SDXL loads but its memory comes out of commit: the first step took free commit from 13 GB to 0.4 GB, so `commit_problem` asks for one more file size of free commit on an integrated GPU (`LOAD_COMMIT_IGPU_EXTRA`). therock's older hipInfo doesn't list this device, so `gpu_devices()` takes the longest list.
+Native ROCm runs it (`launch.bat --gpu 1`): the self-test passes, SD 1.5 512×768 with a LoRA takes ~60 s at 20 steps (~3 s/step), 7.3 GB of shared memory. The HIP SDK has no gfx1103 rocBLAS kernels, so ZLUDA can't. SDXL works since the read-only load: 832×1216, 12 AYS steps, 133 s per picture (441 s the first time, kernels), 10.9 GB of shared memory, lowest free commit 3.1 GB (load + picture 1.73× the file, so `commit_problem` adds `LOAD_COMMIT_IGPU_EXTRA` = 0.5 file sizes on an integrated GPU). Before it the first step took free commit from 13 GB to 0.4 GB. therock's older hipInfo doesn't list this device, so `gpu_devices()` takes the longest list.
 
 ### cuDNN/MIOpen is OFF under ZLUDA — do not re-enable there
 `config.get_device()` sets, for ZLUDA/AMD devices:
