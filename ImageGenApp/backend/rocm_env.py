@@ -32,6 +32,7 @@ REPO_DIR = APP_DIR.parent
 THEROCK_BIN = REPO_DIR / "therock_sdk" / "bin"
 NATIVE_DIR = REPO_DIR / "python-rocm"          # install_rocm.bat: native ROCm PyTorch, no ZLUDA
 NATIVE_SITE = NATIVE_DIR / "Lib" / "site-packages"
+NATIVE_LONGEST_PATH = 183                      # longest file under python-rocm\ (torch 2.14.0+rocm10.1.0, a hipBLASLt kernel; measured)
 GFX1031_LIB = REPO_DIR / "_gfx1031_rocm624" / "rocm gfx1031 for rocm 6.2.4" / "library"
 SYSTEM_ROCM = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "AMD" / "ROCm"
 
@@ -136,6 +137,24 @@ def native_python(arch: str) -> str:
     return ""
 
 
+def _long_paths_on() -> bool:
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as k:
+            return winreg.QueryValueEx(k, "LongPathsEnabled")[0] == 1
+    except (ImportError, OSError):
+        return False
+
+
+def native_path_problem(env_dir: Path = NATIVE_DIR, long_paths: bool | None = None) -> str:
+    """Why pip can't unpack the native environment in env_dir ('' = it can). A failed install says "No such file or directory" with Windows' 260-character limit nowhere in sight."""
+    length = len(str(env_dir)) + NATIVE_LONGEST_PATH
+    if length <= 259 or (_long_paths_on() if long_paths is None else long_paths):
+        return ""
+    return (f"This folder is too deep for the ROCm packages: {env_dir} plus their longest file comes to {length} characters and Windows stops at 259. "
+            f"Move the app {length - 259} or more characters closer to the drive root (C:\\ImageGen, say) and run install_rocm.bat again.")
+
+
 def _lib_supports(bin_dir: Path, arch: str) -> bool:
     lib = bin_dir / "rocblas" / "library"
     try:
@@ -209,6 +228,11 @@ def _env_index() -> int | None:
 
 
 if __name__ == "__main__":
+    if "--check-native-path" in sys.argv:      # install_rocm.bat, before it downloads anything
+        problem = native_path_problem()
+        if problem:
+            print(problem)
+        sys.exit(1 if problem else 0)
     if "--archs" in sys.argv:                  # every AMD GPU's architecture, for install_rocm.bat
         print(" ".join(sorted({d["arch"] for d in gpu_devices([p for _, p in _candidates()] + [NATIVE_SITE / "_rocm_sdk_core" / "bin"])})))
     else:

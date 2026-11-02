@@ -67,11 +67,12 @@ exit /b 0
 set "ZLUDA_DIR=%REPO_DIR%ZLUDA_v6\zluda"
 set "ZLUDA_EXE=%REPO_DIR%ZLUDA_v6\zluda\zluda.exe"
 set "USE_ZLUDA=0"
+set "ZLUDA_MISSING=0"
 if "!NO_ZLUDA!"=="0" (
     if exist "!ZLUDA_EXE!" (
         set "USE_ZLUDA=1"
     ) else (
-        echo [WARN] ZLUDA not found in !ZLUDA_DIR! - GPU acceleration is off
+        set "ZLUDA_MISSING=1"
     )
 )
 
@@ -84,8 +85,12 @@ if exist "%APP_DIR%backend\__pycache__" rd /s /q "%APP_DIR%backend\__pycache__" 
 
 :: -- Verify bundled Python -----------------------------------------------------
 if not exist "%PYTHON%" (
-    echo [WARN] Bundled Python not found, falling back to system python
-    set "PYTHON=python"
+    if exist "!REPO_DIR!python-rocm\Scripts\python.exe" (
+        set "PYTHON=!REPO_DIR!python-rocm\Scripts\python.exe"
+    ) else (
+        echo [WARN] Bundled Python not found, falling back to system python
+        set "PYTHON=python"
+    )
 )
 
 :: -- Pick the GPU, HIP runtime and rocBLAS kernels ---------------------------------
@@ -114,6 +119,7 @@ if not defined GPU_INDEX set "GPU_INDEX=0"
 :: Native ROCm PyTorch replaces ZLUDA for this GPU when install_rocm.bat set it up
 set "USE_NATIVE=0"
 if defined ROCM_NATIVE_PY if "!NO_ZLUDA!"=="0" if "!FORCE_ZLUDA!"=="0" set "USE_NATIVE=1"
+if "!USE_NATIVE!"=="0" if "!ZLUDA_MISSING!"=="1" echo [WARN] ZLUDA not found in !ZLUDA_DIR! - GPU acceleration is off
 if "!USE_NATIVE!"=="1" (
     set "HIP_FOUND=1"
     set "USE_ZLUDA=0"

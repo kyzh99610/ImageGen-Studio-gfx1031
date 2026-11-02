@@ -22,19 +22,24 @@ if /i "%~1"=="--no-pause" ( set "NO_PAUSE=1" ) else ( set "ARCHS=!ARCHS! %~1" )
 shift & goto :parse
 :parsed
 
+py -3.12 -c "" >nul 2>&1
+if !ERRORLEVEL! neq 0 (
+    echo [ERROR] Python 3.12 not found. Install it first: winget install Python.Python.3.12
+    goto :fail
+)
+py -3.12 "%APP_DIR%backendocm_env.py" --check-native-path
+if !ERRORLEVEL! neq 0 goto :fail
+
 if not exist "%ENV_DIR%\Scripts\python.exe" (
     echo [1/4] Creating the Python 3.12 environment...
     py -3.12 -m venv "%ENV_DIR%"
-    if !ERRORLEVEL! neq 0 (
-        echo [ERROR] Python 3.12 not found. Install it first: winget install Python.Python.3.12
-        goto :fail
-    )
+    if !ERRORLEVEL! neq 0 ( echo [ERROR] Could not create the environment in %ENV_DIR%. & goto :fail )
 )
 set "PYTHON=%ENV_DIR%\Scripts\python.exe"
 
 if not defined ARCHS for /f "usebackq delims=" %%A in (`call "%PYTHON%" "%APP_DIR%backend\rocm_env.py" --archs 2^>nul`) do set "ARCHS=%%A"
 if not defined ARCHS (
-    echo [ERROR] No AMD GPU found. Name it yourself, for example: install_rocm.bat gfx1201
+    echo [ERROR] No AMD GPU found through HIP. Name it yourself: install_rocm.bat gfx1201 for an RX 9070 XT, gfx1103 for a 780M
     goto :fail
 )
 
@@ -46,7 +51,7 @@ for %%A in (!ARCHS!) do (
 echo [2/4] Installing PyTorch for:!ARCHS! ^(several GB^)...
 "%PYTHON%" -m pip install --disable-pip-version-check --index-url %INDEX% "torch[!EXTRAS!]==2.14.0+rocm%ROCM_VER%" "torchvision[!EXTRAS!]==0.29.0a0+rocm%ROCM_VER%" "torchaudio==2.11.0.3+rocm%ROCM_VER%"
 if !ERRORLEVEL! neq 0 (
-    echo [ERROR] PyTorch could not be installed - check the architecture name and your internet connection.
+    echo [ERROR] PyTorch could not be installed - pip's own message is above. Usual causes: a wrong architecture name or no internet.
     goto :fail
 )
 

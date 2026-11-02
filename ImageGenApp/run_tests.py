@@ -1528,6 +1528,15 @@ def _():
             with mock.patch.object(config, "NATIVE_ROCM", False):
                 config.get_device(0, backend="cuda")
                 assert not torch.backends.cuda.flash_sdp_enabled() and not torch.backends.cudnn.enabled
+            # the LoRA trainer's device choice must not switch flash attention off for every later Generate of the process
+            from backend import lora_trainer as LT
+            torch.backends.cuda.enable_flash_sdp(True)
+            with mock.patch.object(config, "NATIVE_ROCM", True):
+                LT._get_device(LT.TrainingConfig())
+                assert torch.backends.cuda.flash_sdp_enabled()
+            with mock.patch.object(config, "NATIVE_ROCM", False):
+                LT._get_device(LT.TrainingConfig())
+                assert not torch.backends.cuda.flash_sdp_enabled()
     finally:
         torch.backends.cuda.enable_flash_sdp(flash)
         torch.backends.cudnn.enabled = cudnn
@@ -1549,6 +1558,51 @@ def _():
                 assert MM.commit_problem(p) is None                     # 2.0 x 0.00098 fits
             with mock.patch.object(MM, "_on_integrated_gpu", lambda: True):
                 assert "Not enough free memory" in MM.commit_problem(p)  # 3.0 x 0.00098 does not
+
+
+@test("A PC with only python-rocm (no python-3.10, no ZLUDA): launch.bat and launch.ps1 find it, start on native ROCm and don't warn about ZLUDA; install_rocm.bat refuses a folder too deep for the kernels' file names")
+def _():
+    import importlib.util
+    import shutil
+    import subprocess
+    import tempfile
+    from backend import rocm_env
+    assert rocm_env.native_path_problem(Path("C:/" + "d" * 70), long_paths=False) == ""
+    too_deep = rocm_env.native_path_problem(Path("C:/" + "d" * 90), long_paths=False)
+    assert "too deep" in too_deep and "C:\\ImageGen" in too_deep, too_deep
+    assert rocm_env.native_path_problem(Path("C:/" + "d" * 90), long_paths=True) == ""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp) / "r (x86)"
+        app_dir = repo / "ImageGenApp"
+        (app_dir / "backend").mkdir(parents=True)
+        for f in ("launch.bat", "launch.ps1"):
+            shutil.copy(APP_DIR / f, app_dir / f)
+        env_dir = repo / "python-rocm"
+        native = env_dir / "Scripts" / "python.exe"
+        if importlib.util.find_spec("venv"):
+            made = subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(env_dir)], capture_output=True, text=True, timeout=120)
+            assert made.returncode == 0 and native.exists(), made.stderr[-400:]
+        else:                                   # the embeddable python-3.10 has no venv module: a copy of it does the job
+            native.parent.mkdir(parents=True)
+            for f in Path(sys.executable).parent.iterdir():
+                if f.is_file() and (f.suffix in (".exe", ".dll", ".zip", ".pyd") or f.name.endswith("._pth")):
+                    shutil.copy(f, native.parent)
+        (app_dir / "backend" / "rocm_env.py").write_text(
+            "import sys\nif '--json' in sys.argv:\n    import json\n    print(json.dumps({'arch': 'gfx1201', 'gpu_index': 0, 'native_python': sys.executable, 'rocm_bin': ''}))\n"
+            "else:\n    print('set \"ROCM_ARCH=gfx1201\"')\n    print('set \"ROCM_GPU_INDEX=0\"')\n    print('set \"ROCM_NATIVE_PY=' + sys.executable + '\"')\n", encoding="utf-8")
+        (app_dir / "config.py").write_text("", encoding="utf-8")
+        (app_dir / "app.py").write_text("import sys\nprint('STUB APP ' + sys.prefix)\n", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if k not in ("IMAGEGEN_GPU", "IMAGEGEN_BACKEND")}
+        runs = {"launch.bat": ["cmd", "/d", "/c", str(app_dir / "launch.bat"), "--port", "7999", "--no-browser", "--no-pause"]}
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        if shell:
+            runs["launch.ps1"] = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(app_dir / "launch.ps1"), "-Port", "7999", "-NoBrowser", "-NoPause"]
+        for name, cmd in runs.items():
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL, env=env, encoding="utf-8", errors="replace")
+            out = r.stdout + r.stderr
+            assert "native ROCm" in out and "Launching on native" in out, (name, out[-900:])
+            assert "STUB APP" in out and "python-rocm" in out[out.index("STUB APP"):], (name, out[-900:])
+            assert "ZLUDA not found" not in out and "Bundled Python" not in out, (name, out[-900:])
 
 
 @test("First-run kernel note: ZLUDA v6's zluda2.db (or the older zluda.db) counts as compiled, a small or missing one warns, native ROCm never warns")

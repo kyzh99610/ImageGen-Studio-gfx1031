@@ -31,7 +31,7 @@ AMD's native ROCm PyTorch instead (Python 3.12, no ZLUDA; see "Native ROCm PyTor
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 214-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 215-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -76,7 +76,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-brow
 ImageGenApp\install_rocm.bat                    :: native ROCm PyTorch in python-rocm\ (RX 9070 XT, 780M): launch.bat then uses it, --zluda keeps ZLUDA
 ImageGenApp\run_rocm.bat selftest_zluda.py      :: the same checks on native ROCm (run_rocm.bat smoke_gpu.py --sdxl too)
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 214 tests; NPU tests skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 215 tests; NPU tests skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -163,7 +163,9 @@ What differs from ZLUDA (`config.NATIVE_ROCM`, true when the `rocm_sdk` package 
 - Commit (RAM + page file): a first SDXL load peaks at 2.17× the file size, a later one or a switch at 1.75-1.86× (`LOAD_COMMIT_FACTOR_NATIVE` = 2.0). On a 32 GB PC with the default small page file the commit limit is ~36 GB, of which Windows and the driver hold ~16 GB at idle:
   a switch bottoms out near 2 GB free, so a larger page file (fixed ~25 GB) is the real fix. It is the user's to change.
 - `install_rocm.bat` keeps torch pinned in its second pip step: left free, the resolver swapped it for a CPU-only PyPI build (via torchsde). torch 2.14 needs setuptools 77+.
-- The trainer still forces math SDPA (`lora_trainer.py`); native training is untested.
+- **LoRA training on native** keeps flash attention (the trainer's old switch stayed off for every later Generate of the process), encodes latents on the GPU (the CPU took 703 s for 6 SDXL pictures at 832×1280; 57 pictures now take 66 s in all) and saves without moving the whole model to the CPU (that second copy took free commit to 0.7 GB). MIOpen stays on for that encode: without it the untiled fp32 VAE took free commit from 20 GB to 0.8. Measured on an RX 9070 XT: SDXL, 57 pictures, rank 16, 570 steps in 10.4 min at 7.9 GB allocated, lowest free commit 2.4 GB on the default small page file; SD 1.5, 24 steps in 15 s at 4.3 GB. Flash attention against math SDPA in training: 7.7 against 10.1 GB on SDXL (12 steps 19 against 25 s), 4.3 against 6.1 GB on SD 1.5.
+- **How many pictures:** a character LoRA from 9 pictures scored no better than no LoRA (CCIP 0.872 against 0.866, 405 steps); from 57 pictures, 570 steps, 0.905 against 0.881 at weight 0.8, and 0.886 at 1.0.
+- **A PC with only `python-rocm\`** (no `python-3.10\`, no ZLUDA): the launchers use that environment's Python to run `rocm_env.py`; `launch.bat` used to skip the GPU choice there and start on the system Python. `install_rocm.bat` refuses a folder too deep for the kernels' file names (`rocm_env.native_path_problem`): `python-rocm\` plus its longest file, 183 characters, must fit in Windows' 259 unless long paths are on, so the repo folder's path has about 63 characters to use. pip's own error for this is "No such file or directory".
 
 The real app driven over HTTP on native ROCm (8 Generate calls with Polish Cowboy shot / Full body / Full body — max detail / Wide shot, two LoRAs fused, two SDXL checkpoint switches): every call succeeded, the same recipe and seed after a switch there and back was identical (0.00/255), a repeat Cowboy shot with the eye pass took 5.8 s, a switch 27-30 s, free commit never under 4.6 GB. Each new picture size still costs its one-time kernel compile (Full body 40 s, Wide shot 79 s the first time).
 

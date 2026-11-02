@@ -40,8 +40,13 @@ Remove-Item "$AppDir\backend\__pycache__" -Recurse -Force -ErrorAction SilentlyC
 
 # ── Python ────────────────────────────────────────────────────────────────────
 if (-not (Test-Path $Python)) {
-    Write-Warning "Bundled Python not found, falling back to system python"
-    $Python = "python"
+    $NativeOnly = Join-Path $RepoDir "python-rocm\Scripts\python.exe"
+    if (Test-Path $NativeOnly) {
+        $Python = $NativeOnly
+    } else {
+        Write-Warning "Bundled Python not found, falling back to system python"
+        $Python = "python"
+    }
 }
 
 # ── Pick the HIP runtime + rocBLAS kernels for this GPU (backend\rocm_env.py) ──
@@ -125,7 +130,7 @@ if ($UseZluda) {
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "[ERROR] Python cannot import core modules. Dependencies may be missing." -ForegroundColor Red
-    Write-Host "  Run install.bat first, then re-run this launcher." -ForegroundColor Yellow
+    Write-Host "  Run install.bat (or install_rocm.bat for native ROCm) first, then re-run this launcher." -ForegroundColor Yellow
     if (-not $NoPause) { Read-Host "Press Enter to exit" }
     exit 1
 }

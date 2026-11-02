@@ -29,6 +29,8 @@ import torch.nn.functional as F
 from PIL import Image
 from safetensors.torch import save_file
 
+import config as _cfg
+
 from backend.dataset_manager import (
     compute_bucket_assignments,
     read_caption,
@@ -147,8 +149,8 @@ def _get_device(cfg: TrainingConfig) -> torch.device:
         dev = torch.device(f"cuda:{dev_idx}")
         name = torch.cuda.get_device_name(dev_idx)
         print(f"[Train] Using CUDA device {dev_idx}: {name}")
-        # ZLUDA on AMD: disable flash/mem-efficient SDPA (needs cutlass, unavailable on HIP)
-        if "ZLUDA" in name or "AMD" in name or "Radeon" in name:
+        # ZLUDA on AMD: disable flash/mem-efficient SDPA (needs cutlass, unavailable on HIP). Native ROCm has it, and the switch would stay off for every later Generate of the process.
+        if not _cfg.NATIVE_ROCM and ("ZLUDA" in name or "AMD" in name or "Radeon" in name):
             torch.backends.cuda.enable_flash_sdp(False)
             torch.backends.cuda.enable_mem_efficient_sdp(False)
             print("[Train] Disabled flash/mem-efficient SDPA for AMD/ZLUDA compatibility")
@@ -966,9 +968,11 @@ class LoRATrainer:
                              f"💾 Saved checkpoint {ep_path.name} — the Generate tab's 🔄 Refresh lists it now")
 
         # ── Cleanup ────────────────────────────────────────────────────────
-        self.unet.cpu()
-        for te in self._trained_te_list:
-            te.cpu()
+        # save_lora takes each LoRA tensor to the CPU itself. A whole-model .cpu() holds a second copy next to the GPU's: on native ROCm an SDXL run's free commit fell to 0.7 GB here.
+        if not _cfg.NATIVE_ROCM:
+            self.unet.cpu()
+            for te in self._trained_te_list:
+                te.cpu()
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -1158,6 +1162,9 @@ class LoRATrainer:
             callback(2, 5, "Caching latents (VAE encode) …")
 
         if cfg.cache_latents:
+            # Native ROCm encodes on the GPU: the CPU took 703 s for 6 pictures at 832x1280. MIOpen stays on: without it this untiled fp32 encode took free commit from 20 GB to 0.8. ZLUDA stays on the CPU.
+            if _cfg.NATIVE_ROCM and torch.cuda.is_available():
+                self.vae.to(_get_device(cfg))
             self.latent_cache = _cache_latents_for_items(
                 self.items, self.vae, cfg.flip_augment,
                 callback=callback, hook=self._prepare_hook(callback))
@@ -1192,6 +1199,8 @@ class LoRATrainer:
             del self.vae
             self.vae = None
             gc.collect()
+            if _cfg.NATIVE_ROCM and torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if callback:
             callback(4, 5, "Ready!")

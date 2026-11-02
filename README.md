@@ -187,7 +187,7 @@ the recommended one.
 
 `backend/rocm_env.py` reads your GPU's architecture from `hipInfo` and picks the right runtime and kernels:
 - **gfx1030** (RX 6800 / 6800 XT / 6900 XT / 6950 XT) uses the HIP SDK's own kernels and doesn't get the gfx1031 library.
-- **RX 9070 XT (gfx1201), Radeon 780M (gfx1103):** `ImageGenApp\install_rocm.bat` installs AMD's native ROCm 10.1 PyTorch (Python 3.12, no ZLUDA, no HIP SDK) and `launch.bat` then uses it by itself; `--zluda` keeps ZLUDA. On an RX 9070 XT: SDXL 1024×1024 at 20 steps in 3.7 s against ZLUDA's 6.9 s, SD 1.5 512×768 in 0.98 s against 2.45 s. On a 780M, SD 1.5 512×768 takes ~60 s; SDXL needs more free RAM than most PCs have. `ImageGenApp\run_rocm.bat` runs the self-test and smoke test there.
+- **RX 9070 XT (gfx1201), Radeon 780M (gfx1103):** `ImageGenApp\install_rocm.bat` installs AMD's native ROCm 10.1 PyTorch (Python 3.12, no ZLUDA, no HIP SDK) and `launch.bat` then uses it by itself; `--zluda` keeps ZLUDA. On an RX 9070 XT: SDXL 1024×1024 at 20 steps in 3.7 s against ZLUDA's 6.9 s, SD 1.5 512×768 in 0.98 s against 2.45 s. On a 780M, SD 1.5 512×768 takes ~60 s; SDXL needs more free RAM than most PCs have. `ImageGenApp\run_rocm.bat` runs the self-test and smoke test there. Keep the repo folder's path under about 60 characters (`install_rocm.bat` says so when it isn't): the kernels' file names are long. LoRA training works there too: SDXL, 57 pictures, 570 steps in about 10 minutes.
 - **Other RDNA 3 / 4** get the HIP SDK runtime under ZLUDA. gfx1201 on HIP SDK 7.1 passes the self-test and smoke test; other cards are less tested.
 - **XDNA1 NPU** (Ryzen 7 8700G): detected with the Ryzen AI SDK, but it gives Stable Diffusion's float text encoder nothing, so SmartSplit uses the iGPU unless you pick the NPU yourself.
 - Anything else can use `launch.bat --dml` (DirectML).
@@ -200,7 +200,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 214 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload).
+That runs 215 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload).
 
 ## Credits and licenses
 
