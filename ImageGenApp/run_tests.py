@@ -1634,6 +1634,7 @@ def _():
         raw = bat.read_bytes()
         assert all(b < 128 for b in raw), f"{bat.name} has non-ASCII bytes (cmd reads it as CP1252)"
         assert raw.count(b"\n") == raw.count(b"\r\n"), f"{bat.name} has LF-only lines"
+        assert raw.count(b"\r") == raw.count(b"\r\n"), f"{bat.name} has a stray carriage return"
     r = subprocess.run(["cmd", "/d", "/c", str(APP_DIR / "launch.bat"), "--help"],
                        capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
     assert r.returncode == 0 and "--gpu N" in r.stdout, (r.returncode, r.stdout[-500:])

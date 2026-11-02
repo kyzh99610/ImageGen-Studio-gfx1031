@@ -27,7 +27,7 @@ if !ERRORLEVEL! neq 0 (
     echo [ERROR] Python 3.12 not found. Install it first: winget install Python.Python.3.12
     goto :fail
 )
-py -3.12 "%APP_DIR%backendocm_env.py" --check-native-path
+py -3.12 "%APP_DIR%backend\rocm_env.py" --check-native-path
 if !ERRORLEVEL! neq 0 goto :fail
 
 if not exist "%ENV_DIR%\Scripts\python.exe" (
