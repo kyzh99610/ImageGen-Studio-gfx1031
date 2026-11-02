@@ -14,10 +14,11 @@ from PIL import Image
 
 import re
 
-from config import OUTPUT_SUBDIR, OUTPUTS_DIR, SETTINGS_DIR
+from config import APP_DIR, OUTPUT_SUBDIR, OUTPUTS_DIR, SETTINGS_DIR
 
-# a process that saves into a sub-folder of outputs/ (IMAGEGEN_OUTPUT_SUBDIR: harnesses, labs) keeps its own index: the stale-entry pruning below would otherwise delete the user's entries
-INDEX_FILE = SETTINGS_DIR / (f"_history_index__{re.sub(r'[^A-Za-z0-9_.-]+', '_', OUTPUT_SUBDIR)}.json" if OUTPUT_SUBDIR else "_history_index.json")
+# a process that saves anywhere but outputs/ itself (IMAGEGEN_OUTPUT_SUBDIR: harnesses, labs; IMAGEGEN_OUTPUTS_DIR: another folder) keeps its own index: the stale-entry pruning below would otherwise delete the user's entries
+_index_tag = OUTPUT_SUBDIR or (OUTPUTS_DIR.name if OUTPUTS_DIR != APP_DIR / "outputs" else "")
+INDEX_FILE = SETTINGS_DIR / (f"_history_index__{re.sub(r'[^A-Za-z0-9_.-]+', '_', _index_tag)}.json" if _index_tag else "_history_index.json")
 FAV_FILE = SETTINGS_DIR / "_favourites.json"
 THUMBS = OUTPUTS_DIR / ".thumbs"
 THUMB_SIDE = 256

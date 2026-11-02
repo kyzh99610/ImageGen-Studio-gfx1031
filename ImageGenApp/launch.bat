@@ -2,8 +2,9 @@
 setlocal EnableDelayedExpansion
 
 :: -----------------------------------------------------------------------------
-:: ImageGen Studio - Windows launcher with ZLUDA v6 (CUDA on AMD via HIP)
-:: Runtime: bundled therock_sdk, else the system HIP SDK 6.x; gfx1031 GPUs also
+:: ImageGen Studio - Windows launcher: native ROCm PyTorch when install_rocm.bat
+:: set it up for this GPU, else ZLUDA v6 (CUDA on AMD via HIP).
+:: ZLUDA's runtime: bundled therock_sdk, else the system HIP SDK; gfx1031 GPUs also
 :: get the bundled gfx1031 rocBLAS kernels (see backend\rocm_env.py).
 :: Note: cmd.exe can't handle a "!" or "%" in the install folder's path.
 :: -----------------------------------------------------------------------------
@@ -18,6 +19,7 @@ set "EXTRA_ARGS="
 set "PORT=7860"
 set "GPU_INDEX="
 set "NO_ZLUDA=0"
+set "FORCE_ZLUDA=0"
 set "NO_PAUSE="
 
 :parse_args
@@ -44,7 +46,7 @@ if /i "%~1"=="--cpu"        ( set "FORCE_CPU=1" & set "NO_ZLUDA=1" & shift & got
 if /i "%~1"=="--nozluda"    ( set "NO_ZLUDA=1" & set "IMAGEGEN_BACKEND=directml" & shift & goto :parse_args )
 if /i "%~1"=="--dml"        ( set "NO_ZLUDA=1" & set "IMAGEGEN_BACKEND=directml" & shift & goto :parse_args )
 if /i "%~1"=="--directml"   ( set "NO_ZLUDA=1" & set "IMAGEGEN_BACKEND=directml" & shift & goto :parse_args )
-if /i "%~1"=="--zluda"      ( set "NO_ZLUDA=0" & set "IMAGEGEN_BACKEND=cuda" & shift & goto :parse_args )
+if /i "%~1"=="--zluda"      ( set "NO_ZLUDA=0" & set "FORCE_ZLUDA=1" & set "IMAGEGEN_BACKEND=cuda" & shift & goto :parse_args )
 echo [WARN] Unknown option "%~1" ignored ^(launch.bat --help lists them^)
 shift & goto :parse_args
 
@@ -56,6 +58,7 @@ echo   --no-browser   don't open the browser
 echo   --share        also create a public gradio.live link
 echo   --cpu          run on the CPU ^(very slow^)
 echo   --dml          use DirectML instead of ZLUDA
+echo   --zluda        use ZLUDA even when native ROCm is installed ^(install_rocm.bat^)
 echo   --no-pause     don't wait for a key press when the app exits
 exit /b 0
 
@@ -95,6 +98,7 @@ set "HIP_FOUND=0"
 set "ROCM_BIN="
 set "ROCM_NOTE="
 set "ROCM_GPU_INDEX="
+set "ROCM_NATIVE_PY="
 set "IMAGEGEN_GPU=!GPU_INDEX!"
 rem A fresh file per launch: a leftover one from another run must never be used
 set "ROCM_ENV_FILE=%TEMP%\imagegen_rocm_%RANDOM%%RANDOM%.bat"
@@ -107,7 +111,16 @@ if exist "%PYTHON%" (
 )
 if not defined GPU_INDEX set "GPU_INDEX=!ROCM_GPU_INDEX!"
 if not defined GPU_INDEX set "GPU_INDEX=0"
-if defined ROCM_BIN (
+:: Native ROCm PyTorch replaces ZLUDA for this GPU when install_rocm.bat set it up
+set "USE_NATIVE=0"
+if defined ROCM_NATIVE_PY if "!NO_ZLUDA!"=="0" if "!FORCE_ZLUDA!"=="0" set "USE_NATIVE=1"
+if "!USE_NATIVE!"=="1" (
+    set "HIP_FOUND=1"
+    set "USE_ZLUDA=0"
+    set "PYTHON=!ROCM_NATIVE_PY!"
+    set "ROCBLAS_TENSILE_LIBPATH="
+    echo [INFO] GPU !GPU_INDEX! !ROCM_ARCH! - native ROCm PyTorch
+) else if defined ROCM_BIN (
     set "HIP_FOUND=1"
     echo [INFO] GPU !GPU_INDEX! !ROCM_ARCH! - ROCm runtime: !ROCM_RUNTIME! ^(!ROCM_BIN!^)
     if defined ROCM_NOTE echo [WARN] !ROCM_NOTE!
@@ -127,9 +140,11 @@ if "!USE_ZLUDA!"=="1" set "PATH=!ROCM_BIN!;!ZLUDA_DIR!;!PATH!"
 
 :: -- ZLUDA / HIP environment flags --------------------------------------------
 set "ZLUDA_NO_TELEMETRY=1"
-:: Required: hipBLASLt has no gfx103x kernels, so every Linear+bias would fail
-set "DISABLE_ADDMM_CUDA_LT=1"
-set "MIOPEN_DEBUG_ENABLE_AI_IMMED_MODE_FALLBACK=0"
+:: Required under ZLUDA: hipBLASLt has no gfx103x kernels, so every Linear+bias would fail
+if "!USE_ZLUDA!"=="1" (
+    set "DISABLE_ADDMM_CUDA_LT=1"
+    set "MIOPEN_DEBUG_ENABLE_AI_IMMED_MODE_FALLBACK=0"
+)
 :: Suppress MIOpen gfx908 AI heuristic warnings (non-fatal, falls back to generic)
 set "MIOPEN_LOG_LEVEL=0"
 set "MIOPEN_ENABLE_LOGGING=0"
@@ -151,11 +166,11 @@ if exist "!REPO_DIR!.miopen_userdb" (
 )
 
 :: Quick sanity check: can Python import the app at all?
-"%PYTHON%" -c "import sys; sys.path.insert(0,'.'); import config" >nul 2>&1
-if %ERRORLEVEL% neq 0 (
+"!PYTHON!" -c "import sys; sys.path.insert(0,'.'); import config" >nul 2>&1
+if !ERRORLEVEL! neq 0 (
     echo.
     echo [ERROR] Python cannot import core modules. Dependencies may be missing.
-    echo  Run install.bat first, then re-run this launcher.
+    echo  Run install.bat ^(or install_rocm.bat for native ROCm^) first, then re-run this launcher.
     echo.
     goto :fail
 )
@@ -166,6 +181,8 @@ set "IMAGEGEN_GPU=!GPU_INDEX!"
 
 set "ZLUDA_SHOW=off"
 if "!USE_ZLUDA!"=="1" set "ZLUDA_SHOW=v6 (!ZLUDA_DIR!)"
+if "!USE_NATIVE!"=="1" set "ZLUDA_SHOW=not needed (native ROCm)"
+if "!USE_NATIVE!"=="1" set "ROCM_BIN=python-rocm"
 echo ======================================================
 echo  ImageGen Studio
 echo ======================================================
@@ -180,6 +197,9 @@ echo ======================================================
 if "!USE_ZLUDA!"=="1" (
     echo [INFO] Launching with ZLUDA v6...
     "!ZLUDA_EXE!" -- "!PYTHON!" app.py --port !PORT! !EXTRA_ARGS!
+) else if "!USE_NATIVE!"=="1" (
+    echo [INFO] Launching on native ROCm PyTorch...
+    "!PYTHON!" app.py --port !PORT! !EXTRA_ARGS!
 ) else (
     echo [INFO] Launching without ZLUDA ^(CPU or DirectML only^)...
     "!PYTHON!" app.py --port !PORT! !EXTRA_ARGS!

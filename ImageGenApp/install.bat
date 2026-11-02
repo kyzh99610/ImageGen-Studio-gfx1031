@@ -75,6 +75,7 @@ echo.
 echo ======================================================
 echo  Installation complete. Start the app with launch.bat
 echo  Optional: install_npu.bat adds Ryzen AI NPU support.
+echo  Newer GPUs ^(RX 9070 XT, 780M^): install_rocm.bat is about twice as fast as ZLUDA.
 echo ======================================================
 if not "%NO_PAUSE%"=="1" pause
 exit /b 0

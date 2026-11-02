@@ -4,7 +4,7 @@ Single source of truth for AI assistants (Copilot, Gemini, Claude, Codex…) wor
 `CLAUDE.md`, `GEMINI.md` and `.github/copilot-instructions.md` only point here — edit this file, not them.
 User-facing docs: `README.md` (install + gfx1031 background) and `ImageGenApp/README.md` (app features).
 
-**Last updated: 2026-09-30** — audit fixes (GPU job lock, Stop keeps images, SDE seeds, VAE change, kaomoji, secrets out of /config), hand detail, outfit batch, History tab, tiled SD detail pass, GPU smoke test
+**Last updated: 2026-11-02** — native ROCm 10.1 PyTorch without ZLUDA (RX 9070 XT, 780M), XDNA1 NPU measurements, ZLUDA on gfx1201
 
 ---
 
@@ -12,7 +12,8 @@ User-facing docs: `README.md` (install + gfx1031 background) and `ImageGenApp/RE
 
 A Windows-only local Stable Diffusion app (Python 3.10 + Gradio 4 + diffusers) for **AMD GPUs via ZLUDA v6**
 (CUDA → HIP). Supports SD 1.5, SDXL / Pony / Illustrious, LoRA, img2img, upscaling, watermark removal,
-LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB)** laptop.
+LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB)** laptop. An RX 9070 XT or a 780M can run on
+AMD's native ROCm PyTorch instead (Python 3.12, no ZLUDA; see "Native ROCm PyTorch").
 
 ## Layout
 
@@ -24,11 +25,13 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │   ├── config.py                  ← paths, device detection, ZLUDA env/cuDNN setup (import first!)
 │   ├── launch.bat / launch.ps1    ← main launchers (ZLUDA v6 + therock_sdk PATH setup)
 │   ├── run_zluda.bat <script.py>  ← run any script under the launch.bat ZLUDA environment
+│   ├── install_rocm.bat           ← optional native ROCm PyTorch (python-rocm\, requirements-rocm.txt)
+│   ├── run_rocm.bat <script.py>   ← run any script on native ROCm
 │   ├── install.bat / requirements.txt
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 195-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 214-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -56,6 +59,7 @@ LoRA training, and a Civitai browser. Primary target: **RX 6800M (gfx1031, 12 GB
 │       └── help_content.py        ← bilingual (EN/中文) in-app Help tab — keep in sync with behaviour
 ├── installer/                     ← setup.bat/ps1 (fresh-PC bootstrap: Python, packages, ZLUDA, gfx1031 kernels)
 ├── python-3.10/                   ← portable Python (use this, not system python)
+├── python-rocm/                   ← optional native ROCm PyTorch environment (install_rocm.bat), Python 3.12, no ZLUDA
 ├── ZLUDA_v6/zluda/                ← ZLUDA v6 (downloaded by setup)
 ├── therock_sdk/bin                ← OPTIONAL faster ROCm runtime (TheRock); used instead of the HIP SDK when present
 └── _gfx1031_rocm624/…/library     ← gfx1031-ONLY rocBLAS Tensile kernels (downloaded by setup; set by rocm_env.py)
@@ -69,8 +73,10 @@ cd desktop && npm install && npm run package    :: optional desktop window (Elec
 ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-browser] [--no-pause]
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
 .\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
+ImageGenApp\install_rocm.bat                    :: native ROCm PyTorch in python-rocm\ (RX 9070 XT, 780M): launch.bat then uses it, --zluda keeps ZLUDA
+ImageGenApp\run_rocm.bat selftest_zluda.py      :: the same checks on native ROCm (run_rocm.bat smoke_gpu.py --sdxl too)
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 188 pass + 7 skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 214 tests; NPU tests skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -83,7 +89,8 @@ standalone scripts end with `os._exit(code)`.
 ## Hardware
 
 Primary target and test machine: **RX 6800M (gfx1031, 12 GB)** laptop with a Vega 8 iGPU. The code also handles
-multi-GPU PCs (iGPU + dGPU, e.g. 780M + RX 6800 XT) and an XDNA1 NPU, but those paths are less tested.
+multi-GPU PCs (iGPU + dGPU, e.g. 780M + RX 6800 XT) and an XDNA1 NPU, but those paths are less tested. Also measured: a desktop
+with a Ryzen 7 8700G (780M, XDNA1) and an RX 9070 XT, 2026-11-01.
 
 DML enumeration order differs per machine — never hardcode a DML index. Use
 `sdxl_pipeline._dml_igpu_id()` (iGPU) or `upscaler._dml_dgpu_id()` (dGPU), both based on
@@ -120,7 +127,52 @@ therock_sdk if present, else the newest system ROCm 6.x, and set `HIP_PATH` to m
 v6 is supported. install.bat/launchers mention an `installer\hip_sdk_installer.exe` if someone places AMD's
 installer there; otherwise users get the amd.com link.
 
-### cuDNN/MIOpen is OFF on AMD — do not re-enable
+### RX 9070 XT (gfx1201) on ZLUDA and HIP SDK 7.1 (2026-11-01)
+therock_sdk has no gfx120x kernels, so `rocm_env.py` picks the system SDK 7.1 (56 gfx1201 rocBLAS kernel files; 6.4 not tried). ZLUDA v6 on it,
+driver 26.10.1: `selftest_zluda.py` all checks pass, `smoke_gpu.py --sdxl` 11/11. The first picture of a cold ZLUDA cache took 688 s
+(kernels compile), then an SD 1.5 384×512 10-step picture 1.2 s; SDXL 768×768 8 steps 6.7 s. `read_temp()` returns None on that desktop (no Windows
+thermal zone), so pause-while-hot never waits. HIP lists the iGPU as device 1 ("Radeon 7", 12 GB shared); DirectML lists it first (0).
+AMD's HIP SDK bundle (AMD Software: PRO Edition 25.30.02.01) holds HIP SDK **7.1.0**, not 6.4, plus a 25.30 display driver. To keep a newer driver,
+unpack it (`tar -xf`) and install only `Packages\Apps\ROCmSDKPackages\{SDKCore,RTCRuntime,LibrariesRuntime}\*.msi`.
+
+### Native ROCm PyTorch (no ZLUDA) — `install_rocm.bat`, `python-rocm\`
+ROCm 10.1's Windows wheels run PyTorch on the AMD GPU directly. `install_rocm.bat` builds `python-rocm\` next to `ImageGenApp` (Python 3.12,
+torch 2.14.0+rocm10.1.0 with one `device-<arch>` extra per GPU in the PC, then `requirements-rocm.txt`). From then on `launch.bat` / `launch.ps1`
+use it for those GPUs by themselves (`--zluda` / `-Zluda` keeps ZLUDA, `--dml` and `--cpu` are unchanged); `run_rocm.bat` is `run_zluda.bat` for scripts.
+No HIP SDK and no ZLUDA are needed then. AMD's index also lists gfx1031 wheels; they have not been tried, so a gfx1031 machine stays on ZLUDA unless
+`install_rocm.bat gfx1031` is run by hand.
+
+Measured on an RX 9070 XT (gfx1201, 16 GB), Adrenalin 26.10.1, 2026-11-01. Plain diffusers, same seeds, after the kernels were cached:
+
+| | ZLUDA v6 + HIP SDK 7.1 | native, flash attention | native, math SDPA |
+|---|---|---|---|
+| SDXL 1024×1024, 20 steps | 6.9 s | **3.7 s** | 11.8 s |
+| SD 1.5 512×768, 20 steps | 2.45 s | **0.98 s** | 5.05 s |
+| SDXL peak allocated | 12.45 GB | **8.1 GB** | 9.65 GB |
+
+Same-seed pictures differ by 3-6/255 between the stacks (same composition). Through the app's own code with PAG 2 and two LoRAs fused, 832×1216, AYS 12 steps:
+3.0 s per picture; hires 1.5× (8 effective steps) 5.6 s; hires to 1400×2040 7.3 s at 8.3 GB peak, no spill.
+
+What differs from ZLUDA (`config.NATIVE_ROCM`, true when the `rocm_sdk` package is importable):
+- Flash attention and cuDNN stay on, and attention slicing stays off (`enable_attention_slicing` would replace flash attention with a Python loop).
+- **One visible GPU.** `config.py` sets `HIP_VISIBLE_DEVICES` to the chosen GPU before torch starts (so `import config` first), because transformers switches flash attention off for the
+  whole process when it sees two devices ("Using the `SDPA` attention implementation on multi-gpu setup with ROCM…"): 3.15 s against 3.00 s per picture with a 780M beside the card. The chosen GPU is then device 0; DirectML still sees every GPU.
+- MIOpen compiles kernels per tensor shape: a picture size never used before costs 28-70 s once, then it is cached across processes (no MIOpen at all: 4.1 s against 3.0 s per picture, so the main passes keep it).
+  Detail crops change size with every picture, so `detail_tools.inpaint_region` runs with MIOpen off: an eye pass takes a flat 2.5 s against a mean of 11.8 s (1.3 s cached, 15 s not), identity equal (CCIP 0.926 / 0.923).
+- `MIOPEN_FIND_MODE=FAST` / `DYNAMIC_HYBRID` changed nothing measurable; `TORCH_BLAS_PREFER_HIPBLASLT=0` is 5 % slower. Both stay at the default.
+- Commit (RAM + page file): a first SDXL load peaks at 2.17× the file size, a later one or a switch at 1.75-1.86× (`LOAD_COMMIT_FACTOR_NATIVE` = 2.0). On a 32 GB PC with the default small page file the commit limit is ~36 GB, of which Windows and the driver hold ~16 GB at idle:
+  a switch bottoms out near 2 GB free, so a larger page file (fixed ~25 GB) is the real fix. It is the user's to change.
+- `install_rocm.bat` keeps torch pinned in its second pip step: left free, the resolver swapped it for a CPU-only PyPI build (via torchsde). torch 2.14 needs setuptools 77+.
+- The trainer still forces math SDPA (`lora_trainer.py`); native training is untested.
+
+The real app driven over HTTP on native ROCm (8 Generate calls with Polish Cowboy shot / Full body / Full body — max detail / Wide shot, two LoRAs fused, two SDXL checkpoint switches): every call succeeded, the same recipe and seed after a switch there and back was identical (0.00/255), a repeat Cowboy shot with the eye pass took 5.8 s, a switch 27-30 s, free commit never under 4.6 GB. Each new picture size still costs its one-time kernel compile (Full body 40 s, Wide shot 79 s the first time).
+
+A process that spilled VRAM silently draws stripe garbage afterwards (seen under ZLUDA after an untiled 1248×1824 VAE decode: every later SD 1.5 picture, std 61, no error, RAM full and the SSD at 100 % during the spill). The app's tiled decode doesn't get there, and `smoke_gpu.py` now rejects such pictures by row noise (garbage 65, real pictures 1-12): its old std check passed them.
+
+### gfx1103 (Radeon 780M, HIP calls it "Radeon 7")
+Native ROCm runs it (`launch.bat --gpu 1`): the self-test passes, SD 1.5 512×768 with a LoRA takes ~60 s at 20 steps (~3 s/step), 7.3 GB of shared memory. The HIP SDK has no gfx1103 rocBLAS kernels, so ZLUDA can't. SDXL loads but its memory comes out of commit: the first step took free commit from 13 GB to 0.4 GB, so `commit_problem` asks for one more file size of free commit on an integrated GPU (`LOAD_COMMIT_IGPU_EXTRA`). therock's older hipInfo doesn't list this device, so `gpu_devices()` takes the longest list.
+
+### cuDNN/MIOpen is OFF under ZLUDA — do not re-enable there
 `config.get_device()` sets, for ZLUDA/AMD devices:
 - `torch.backends.cudnn.enabled = False` — MIOpen convolutions under ZLUDA on gfx1031 return garbage
   (rel. error 1.0 in `selftest_zluda.py --cudnn`), and NaN latents unless `AMD_SERIALIZE_KERNEL=3`
@@ -131,7 +183,7 @@ installer there; otherwise users get the amd.com link.
 
 Consequences of native convs: big im2col scratch buffers. Untiled SDXL VAE decode at 832×1216 wants >4 GB,
 so SDXL VAE is always tiled (512 px). ZLUDA compiles kernels once per PC into
-`%LOCALAPPDATA%\zluda\ComputeCache\zluda.db` — with an empty cache the first SD 1.5 image took **~15 min**
+`%LOCALAPPDATA%\zluda\ComputeCache\zluda2.db` (`zluda.db` before v6 stable) — with an empty cache the first SD 1.5 image took **~15 min**
 (measured 2026-09-27); the Generate tab warns when the db is missing/small (`app._kernel_cache_note`).
 
 ### VAE decode
@@ -747,8 +799,11 @@ tiled VAE decode while SDXL is resident — otherwise the pair plus SDXL activat
 `[Bridge] …` lines in the console log allocated/reserved VRAM per stage. Runs take ~20 s warm.
 
 ### SmartSplit & NPU
-SmartSplit is SD 1.5 only. XDNA1 NPU (8700G) compiles CLIP via VitisAI but hardware-context creation fails
-(`0xc01e0009`); the iGPU is used instead. NPU tests skip when the Ryzen AI conda env is absent.
+SmartSplit is SD 1.5 only. XDNA1 NPU (8700G), measured on Ryzen AI 1.9.0: AMD's quantized test model runs on it (3.5 ms against 7.6 on
+the CPU, driver submissions counted) with AMD's quicktest options only (`target` X1 + an `xclbin` key, whose file 1.9.0 does not ship; a
+`config_file` session fails with `0xc01e0009`, `target` alone times out). SD's float CLIP opens no hardware context and takes the CPU's time
+(29.1 ms against 28.7) after a 25 s session build, so `SmartSplitConfig.auto` gives XDNA1 the iGPU instead. The worker's reported provider
+says VitisAI even then: judge by `xrt-smi examine --report aie-partitions`. The app's YOLO detectors get nothing either: a correctly quantized face detector keeps its boxes (241 of 241) but all 630 operators stay on the CPU, where it takes 13 ms anyway. AMD's `GenAI-SD` needs Strix / Krackan. So nothing in this pipeline runs on XDNA1 today. NPU tests skip when the Ryzen AI environment is absent.
 
 ### Measured on RX 6800M (2026-09-26)
 Warm (2nd+ generation in a session): SD 1.5 512×768 20 steps: ~36 s → **7.5 s** · SD 1.5 img2img 5.5 s ·
@@ -760,7 +815,7 @@ On DML the upscaler now uses `real_esrgan_x4_fp16.onnx` (made once by `upscaler.
 832×1216 → ~35 s, PSNR ≈ 57 dB vs fp32. Needs `onnx` + `onnxconverter-common`, else it stays on fp32.
 SDXL 832×1216 batch 1: ~26 s denoise + 4 s VAE · SDXL img2img 0.5 strength: ~17 s · no VRAM spill (peak 9.4 GiB).
 The **first** generation of each session is slow (SD 1.5 ~55 s) while ZLUDA loads/JITs kernels; the very first
-run on a PC (empty `zluda.db`) is much slower — ~15 min for the first SD 1.5 image — while it compiles kernels.
+run on a PC (empty `zluda2.db`) is much slower — ~15 min for the first SD 1.5 image — while it compiles kernels.
 
 ---
 
@@ -936,11 +991,12 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
 | Garbage / psychedelic colours on one model family | A VAE of the other family selected — the load status warns and uses the checkpoint's own VAE |
 | App dies (0xC0000005 in `safetensors.load_file`) while loading an SDXL checkpoint, or "Not enough free memory to load …" | Windows *commit* (RAM + page file) is full: a load needs ~2× the file size for a moment and GPU allocations count too. Close big programs or enlarge the page file (System → Advanced → Performance → Virtual memory) |
 | The laptop switches itself off during long generations (EventLog 6008 only, no bluescreen) | Sustained GPU load trips the laptop's protection → Settings → 🌡 Cool mode 1.5; a less aggressive power plan; a cooling stand |
-| First generation of a session is slow | Normal: ZLUDA loads kernels per process (~1 min); on a new PC ~15 min once (empty zluda.db) |
+| First generation of a session is slow | Normal: ZLUDA loads kernels per process (~1 min); on a new PC ~15 min once (empty zluda2.db) |
 | Process won't exit | ZLUDA shutdown hang — close the window / `taskkill /F /T` the zluda.exe tree |
 | "… is incomplete" / "isn't a valid .safetensors file" | Truncated/corrupt file (`model_manager.safetensors_problem()`) — re-download |
 | Prompt weights seem ignored | Must go through `prompt_syntax.a1111_to_compel()`; Compel reads raw `(x:1.2)` as text |
 | HF models land in `~/.cache/huggingface` | Something imported huggingface_hub before `config` set `HF_HOME` (app.py imports config before gradio) |
 | Gradio stuck loading | index.html patches lost after a gradio upgrade |
 | Accel-TE "Session creation failed" | No iGPU found or DML EP missing (`onnxruntime-directml`) |
-| NPU tests skipped | Expected without the Ryzen AI SDK conda env |
+| NPU tests skipped | Expected without the Ryzen AI SDK environment |
+| `SyntaxError: source code string cannot contain null bytes` on start or in pip | A hard reset during an install left files full of zero bytes. Delete `python-rocm\` (or `python-3.10\Lib\site-packages`) and run the installer again |

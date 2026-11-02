@@ -14,6 +14,7 @@ user's prompt.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import re
 from pathlib import Path
@@ -21,6 +22,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
+import config as _cfg
 from config import MODELS_DIR
 
 ANIME_CASCADE = MODELS_DIR / "detectors" / "lbpcascade_animeface.xml"
@@ -79,6 +81,20 @@ def _crop_box(mask_np: np.ndarray, W: int, H: int, pad: int, min_side: int) -> t
     return x1, y1, x2, y2
 
 
+def _no_shape_search(fn):
+    """Native ROCm: MIOpen compiles kernels per tensor shape, and a crop's size changes with every picture. Without it an eye pass took a flat 2.5 s
+    against a mean of 11.8 s (1.3 s when the shape was cached, 15 s when not), with equal identity (CCIP 0.926 / 0.923, 8 pictures each on gfx1201)."""
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        if not getattr(_cfg, "NATIVE_ROCM", False):
+            return fn(*args, **kwargs)
+        import torch
+        with torch.backends.cudnn.flags(enabled=False):
+            return fn(*args, **kwargs)
+    return run
+
+
+@_no_shape_search
 def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, negative: str = "", *,
                    steps: int = 25, cfg: float = 7.0, denoise: float = 0.75, seed: int = -1,
                    scheduler: str = "DPM++ 2M Karras", clip_skip: int = 1, padding: int = 48,

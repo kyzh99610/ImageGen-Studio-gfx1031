@@ -1,0 +1,37 @@
+# ImageGen Studio - native ROCm PyTorch environment (Python 3.12). install_rocm.bat installs these after torch.
+# The same pins as requirements.txt, minus torch-directml (it needs torch 2.4), the torch stack itself and setuptools.
+
+# Diffusion
+diffusers==0.36.0
+transformers==4.44.0
+tokenizers==0.19.1
+huggingface_hub==0.36.2
+accelerate==1.12.0
+safetensors==0.7.0
+compel==2.0.2
+peft==0.17.0
+torchsde==0.2.6
+
+# Image processing
+Pillow==10.2.0
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+onnxruntime-directml==1.23.0
+onnx==1.17.0
+onnxconverter-common==1.16.0
+protobuf==3.20.3
+easyocr==1.7.2
+
+# Web / UI
+gradio==4.19.2
+gradio_client==0.10.1
+fastapi==0.109.2
+starlette==0.36.3
+uvicorn[standard]==0.27.1
+websockets==11.0.3
+httpx==0.26.0
+requests
+tqdm==4.66.2
+pydantic==2.6.1
+# torch 2.14 needs 77+; under 81 keeps pkg_resources for the older packages here
+setuptools>=77,<81

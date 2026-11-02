@@ -6,7 +6,7 @@ smoke_gpu.py — quick end-to-end check on the real GPU (the CPU suite can't see
 
 Close the app first (one process owns the GPU). Uses the first installed SD 1.5 checkpoint and LoRA (or the ones
 given with --ckpt / --lora, file names). Exit code 0 = every check passed.
-Checks: images aren't NaN/black · same seed reproduces · a LoRA changes the weights and removing it restores them
+Checks: images aren't NaN/black/stripe garbage · same seed reproduces · a LoRA changes the weights and removing it restores them
 bit-exactly · img2img · inpaint leaves pixels outside the mask untouched · face / hand detail run · unloading frees
 VRAM · (--sdxl) SDXL generate + unload.
 """
@@ -50,6 +50,9 @@ def pick(items, arch_fn, arch, wanted=None):
 def ok_image(im, label):
     a = np.asarray(im.convert("RGB"), dtype=np.float32)
     assert np.isfinite(a).all() and a.std() > 8, f"{label}: flat / black image (std {a.std():.1f})"
+    # stripe garbage passes the std check (std 61 from a process that had spilled VRAM): its neighbouring rows differ by 65, a real picture's by 1-12
+    noise = float(np.abs(a[1:] - a[:-1]).mean())
+    assert noise < 35, f"{label}: garbage, not a picture (row noise {noise:.0f})"
     return a
 
 

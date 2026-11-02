@@ -6,6 +6,7 @@ RDNA generation, and dGPU-vs-iGPU preference.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -32,6 +33,9 @@ EMBEDDINGS_DIR       = MODELS_DIR / "embeddings"
 EMBEDDINGS_SD15_DIR  = EMBEDDINGS_DIR / "sd15"
 EMBEDDINGS_SDXL_DIR  = EMBEDDINGS_DIR / "sdxl"
 OUTPUTS_DIR     = APP_DIR / "outputs"
+# IMAGEGEN_OUTPUTS_DIR=<absolute folder>: new pictures go there instead, and outputs/ stays as it is (a machine that keeps its old pictures as a read-only reference; the test suite, which must never write among real pictures).
+if os.environ.get("IMAGEGEN_OUTPUTS_DIR", "").strip():
+    OUTPUTS_DIR = Path(os.environ["IMAGEGEN_OUTPUTS_DIR"].strip())
 # IMAGEGEN_OUTPUT_SUBDIR=<relative/sub/folder>: every picture this process saves goes to outputs/<that folder> instead of outputs/ itself (test harnesses and labs set it so their
 # pictures stay out of the 🗂 History tab, which lists the top level of outputs/ only). Unset / empty = outputs/ as always. Absolute paths, "..", drive letters are ignored.
 def _output_subdir(raw: str) -> str:
@@ -68,14 +72,23 @@ def _env_gpu_index() -> int:
 
 SELECTED_GPU_INDEX: int = _env_gpu_index()
 
+# Native ROCm PyTorch (install_rocm.bat, python-rocm\): no ZLUDA layer, so the rules written for ZLUDA below stay off.
+# Flash attention and MIOpen work there: on gfx1201 an SDXL step takes 0.17 s against ZLUDA's 0.32 s, with 8.1 GB allocated against 12.45 GB.
+NATIVE_ROCM = importlib.util.find_spec("rocm_sdk") is not None
+# One visible GPU, chosen before torch starts: with two, transformers switches flash attention off for the whole process on its first text encoder
+# (the iGPU beside the card was enough: 3.15 s against 3.00 s per picture). The chosen GPU is then device 0; DirectML still sees every GPU.
+if NATIVE_ROCM and "HIP_VISIBLE_DEVICES" not in os.environ and "torch" not in sys.modules:
+    os.environ["HIP_VISIBLE_DEVICES"] = str(SELECTED_GPU_INDEX)
+    SELECTED_GPU_INDEX = 0
+
 # Hardware & compatibility defaults for AMD ROCm / ZLUDA / DirectML.
 # (HSA_OVERRIDE_GFX_VERSION used to be forced to 10.3.0 here. It is a Linux ROCr variable —
 #  Windows HIP ignores it: the GPU self-test passes even with a bogus value. Removed.)
-if not os.environ.get("MIOPEN_DEBUG_ENABLE_AI_IMMED_MODE_FALLBACK"):
+if not NATIVE_ROCM and not os.environ.get("MIOPEN_DEBUG_ENABLE_AI_IMMED_MODE_FALLBACK"):
     os.environ["MIOPEN_DEBUG_ENABLE_AI_IMMED_MODE_FALLBACK"] = "0"
 # Required: with cublasLt enabled every Linear-with-bias fails under ZLUDA
 # (CUBLAS_STATUS_NOT_SUPPORTED — hipBLASLt has no gfx103x kernels). selftest checks it.
-if not os.environ.get("DISABLE_ADDMM_CUDA_LT"):
+if not NATIVE_ROCM and not os.environ.get("DISABLE_ADDMM_CUDA_LT"):
     os.environ["DISABLE_ADDMM_CUDA_LT"] = "1"
 # AMD_SERIALIZE_KERNEL=3 used to be forced here to hide NaN latents from MIOpen
 # convolutions. Disabling cuDNN (see get_device) fixes those at the source, and
@@ -86,7 +99,7 @@ if not os.environ.get("ZLUDA_NO_TELEMETRY"):
 # gfx1031 rocBLAS kernels: the launchers set ROCBLAS_TENSILE_LIBPATH (and ROCM_ARCH) from
 # backend/rocm_env.py. When started some other way under ZLUDA, decide here — but only for
 # a gfx1031 GPU: the library holds nothing else, so forcing it breaks every other GPU.
-if not os.environ.get("ROCBLAS_TENSILE_LIBPATH") and not os.environ.get("ROCM_ARCH"):
+if not NATIVE_ROCM and not os.environ.get("ROCBLAS_TENSILE_LIBPATH") and not os.environ.get("ROCM_ARCH"):
     try:
         sys.path.insert(0, str(APP_DIR))
         from backend.rocm_env import choose as _choose_rocm
@@ -131,7 +144,7 @@ def get_device(gpu_index: int | None = None, backend: str | None = None) -> str:
             dev_idx = idx if 0 <= idx < count else 0
             # ZLUDA on AMD: disable SDPA flash/mem-efficient (needs cutlass, unavailable)
             name = torch.cuda.get_device_name(dev_idx)
-            if "ZLUDA" in name or "AMD" in name or "Radeon" in name:
+            if not NATIVE_ROCM and ("ZLUDA" in name or "AMD" in name or "Radeon" in name):
                 torch.backends.cuda.enable_flash_sdp(False)
                 torch.backends.cuda.enable_mem_efficient_sdp(False)
                 # MIOpen convs via ZLUDA on RDNA2 (gfx1031) return NaN/garbage

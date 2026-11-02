@@ -624,8 +624,8 @@ class SDPipeline:
             else:
                 self.pipe = self.pipe.to(self.device)
 
-            # Memory efficiency helpers
-            if hasattr(self.pipe, "enable_attention_slicing"):
+            # Memory efficiency helpers (no slicing on native ROCm: flash attention is faster and smaller there)
+            if not _cfg.NATIVE_ROCM and hasattr(self.pipe, "enable_attention_slicing"):
                 self.pipe.enable_attention_slicing(1)
             if hasattr(self.pipe, "vae") and hasattr(self.pipe.vae, "enable_tiling"):
                 self.pipe.vae.enable_tiling()
@@ -1028,7 +1028,8 @@ class SDPipeline:
                     self.img2img_pipe = self.img2img_pipe.to(torch_directml.device())
             else:
                 self.img2img_pipe = self.img2img_pipe.to(self.device)
-            self.img2img_pipe.enable_attention_slicing(1)
+            if not _cfg.NATIVE_ROCM:
+                self.img2img_pipe.enable_attention_slicing(1)
             self.img2img_pipe.vae.enable_tiling()
             self.img2img_pipe.vae.enable_slicing()
 

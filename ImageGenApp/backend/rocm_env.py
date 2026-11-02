@@ -8,7 +8,8 @@ Measured on the RX 6800M (gfx1031, 2026-09-26):
     files fail every GEMM, and HIP SDK 6.4 has none (the process crashes).
   • HSA_OVERRIDE_GFX_VERSION does nothing on Windows (a bogus value passes the self-test).
 Other architectures must NOT get the gfx1031-only library, and therock only carries RDNA 1/2
-kernels (gfx101x/103x) — RDNA 3/4 (gfx110x/gfx120x) need the system HIP SDK 6.4+.
+kernels (gfx101x/103x) — RDNA 3/4 (gfx110x/gfx120x) need the system HIP SDK 6.4+
+(gfx1201 measured on 7.1, 2026-11-01: self-test and GPU smoke test pass).
 
 Which GPU: IMAGEGEN_GPU (HIP device index) when set, otherwise the best one hipInfo lists —
 a discrete card before an integrated one, then the most memory. HIP device order is also
@@ -29,6 +30,8 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent.parent
 REPO_DIR = APP_DIR.parent
 THEROCK_BIN = REPO_DIR / "therock_sdk" / "bin"
+NATIVE_DIR = REPO_DIR / "python-rocm"          # install_rocm.bat: native ROCm PyTorch, no ZLUDA
+NATIVE_SITE = NATIVE_DIR / "Lib" / "site-packages"
 GFX1031_LIB = REPO_DIR / "_gfx1031_rocm624" / "rocm gfx1031 for rocm 6.2.4" / "library"
 SYSTEM_ROCM = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "AMD" / "ROCm"
 
@@ -48,7 +51,7 @@ def _system_roots() -> list[Path]:
 
 def _candidates() -> list[tuple[str, Path]]:
     """(label, bin dir) of usable runtimes: therock first, then system ROCm 6.x newest
-    first, then 7.x (ZLUDA v6 is only verified on 6.x)."""
+    first, then 7.x (ZLUDA v6 is verified on 6.x with gfx1031, on 7.1 with gfx1201)."""
     out: list[tuple[str, Path]] = []
     if (THEROCK_BIN / "rocblas.dll").exists():
         out.append(("therock", THEROCK_BIN))
@@ -94,7 +97,9 @@ def parse_hipinfo(txt: str) -> list[dict]:
 
 
 def gpu_devices(bin_dirs: list[Path] | None = None) -> list[dict]:
-    """The GPUs HIP can use, in HIP device order, via hipInfo.exe ([] without a runtime)."""
+    """The GPUs HIP can use, in HIP device order, via hipInfo.exe ([] without a runtime). The longest list wins: therock's
+    older hipInfo doesn't list a gfx1103 iGPU that the driver's HIP does, and a hidden device would shift nothing but can't be picked."""
+    best: list[dict] = []
     for b in bin_dirs if bin_dirs is not None else [p for _, p in _candidates()]:
         exe = b / "hipInfo.exe"
         if not exe.exists():
@@ -106,9 +111,9 @@ def gpu_devices(bin_dirs: list[Path] | None = None) -> list[dict]:
         except Exception:
             continue
         devs = parse_hipinfo(txt or "")
-        if devs:
-            return devs
-    return []
+        if len(devs) > len(best):
+            best = devs
+    return best
 
 
 def gpu_archs(bin_dirs: list[Path] | None = None) -> list[tuple[str, str]]:
@@ -123,6 +128,14 @@ def best_index(devs: list[dict]) -> int:
     return max(range(len(devs)), key=lambda i: (not devs[i]["integrated"], devs[i]["mem_gb"], -i))
 
 
+def native_python(arch: str) -> str:
+    """The native ROCm environment's Python when it was installed with this GPU's kernels, else "" (ZLUDA or DirectML then)."""
+    python = NATIVE_DIR / "Scripts" / "python.exe"
+    if arch and python.exists() and any(NATIVE_SITE.glob(f"amd_torch_device_{arch}-*.dist-info")):
+        return str(python)
+    return ""
+
+
 def _lib_supports(bin_dir: Path, arch: str) -> bool:
     lib = bin_dir / "rocblas" / "library"
     try:
@@ -134,7 +147,8 @@ def _lib_supports(bin_dir: Path, arch: str) -> bool:
 def choose(gpu_index: int | None = None) -> dict:
     """Decide runtime + rocBLAS kernels for HIP device `gpu_index` (None = the best GPU)."""
     cands = _candidates()
-    devs = gpu_devices([p for _, p in cands])
+    # the native environment brings its own hipInfo: such a machine needs no HIP SDK at all
+    devs = gpu_devices([p for _, p in cands] + [NATIVE_SITE / "_rocm_sdk_core" / "bin"])
     if gpu_index is None:
         idx = best_index(devs)
     else:
@@ -142,7 +156,7 @@ def choose(gpu_index: int | None = None) -> dict:
     dev = devs[idx] if idx < len(devs) else {"name": "", "arch": ""}
     arch, name = dev["arch"], dev["name"]
     res = {"arch": arch, "gpu": name, "gpu_index": idx, "runtime": "", "rocm_bin": "",
-           "hip_path": "", "tensile": "", "note": ""}
+           "hip_path": "", "tensile": "", "note": "", "native_python": native_python(arch)}
     if gpu_index is not None and devs and not 0 <= gpu_index < len(devs):
         res["note"] = f"GPU {gpu_index} doesn't exist (HIP sees {len(devs)}) - using GPU 0"
     for label, b in cands:
@@ -181,6 +195,8 @@ def _bat(res: dict) -> str:
         lines.append(f'set "ROCBLAS_TENSILE_LIBPATH={_bat_value(res["tensile"])}"')
     if res["note"]:
         lines.append(f'set "ROCM_NOTE={_bat_value(res["note"])}"')
+    if res.get("native_python"):
+        lines.append(f'set "ROCM_NATIVE_PY={_bat_value(res["native_python"])}"')
     return "\n".join(lines)
 
 
@@ -193,5 +209,8 @@ def _env_index() -> int | None:
 
 
 if __name__ == "__main__":
-    r = choose(_env_index())
-    print(_bat(r) if "--bat" in sys.argv else json.dumps(r, indent=2))
+    if "--archs" in sys.argv:                  # every AMD GPU's architecture, for install_rocm.bat
+        print(" ".join(sorted({d["arch"] for d in gpu_devices([p for _, p in _candidates()] + [NATIVE_SITE / "_rocm_sdk_core" / "bin"])})))
+    else:
+        r = choose(_env_index())
+        print(_bat(r) if "--bat" in sys.argv else json.dumps(r, indent=2))

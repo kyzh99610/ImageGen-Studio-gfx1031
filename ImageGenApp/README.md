@@ -25,6 +25,17 @@ PowerShell users can also launch with `launch.ps1`:
 
 ---
 
+## Native ROCm (RX 9070 XT, 780M): twice as fast, no ZLUDA
+
+```bat
+install_rocm.bat        :: Python 3.12 + PyTorch for the GPUs in this PC, into ..\python-rocm (several GB)
+launch.bat              :: now starts on native ROCm by itself; launch.bat --zluda keeps ZLUDA
+```
+
+On an RX 9070 XT: SDXL 1024×1024 at 20 steps 3.7 s against ZLUDA's 6.9 s, SD 1.5 512×768 0.98 s against 2.45 s, a third less VRAM. A picture size used for the first time costs 30-70 s once (kernels are compiled and cached). Details in `../AGENTS.md`.
+
+---
+
 ## Tabs
 
 ### 🎨 Generate
@@ -221,10 +232,10 @@ SmartSplit is **SD 1.5 only** — SDXL uses the standard single-GPU path with op
 
 ### NPU Status (XDNA1, e.g. Ryzen 7 8700G)
 
-The XDNA1 NPU is detected when the AMD Ryzen AI SDK (tested: 1.7.0) is installed. However:
-- **VitisAI EP compiles CLIP models** (342s → 87 MB `.rai` cache file)
-- **Hardware context creation fails** (`0xc01e0009`) — XDNA1 is designed for small INT8 quantized workloads, not 442 MB+ float32 transformer models
-- The 780M iGPU via DML provides the acceleration instead (56× CPU speed)
+The app finds the newest AMD Ryzen AI SDK in `Program Files\RyzenAI` (1.9.0 measured) and its environment (a uv venv since 1.9.0, a conda env before). Measured on 1.9.0:
+- **The NPU itself works**: AMD's quantized test model runs at 3.5 ms against 7.6 ms on the CPU, and the driver counts the submissions. XDNA1 needs AMD's quicktest options (`target` X1 + an `xclbin` key); a `config_file` session fails at the hardware context (`0xc01e0009`) even on that small model
+- **SD's float CLIP gets nothing from it**: it opens no hardware context and takes the CPU's time (29.1 ms against 28.7) after a 25 s session build — XDNA1 is designed for small INT8 quantized workloads
+- So SmartSplit's auto setup never gives XDNA1 the text encoder (you can still pick it); the 780M iGPU via DML provides the acceleration instead
 - NPU tests in `run_tests.py` are skipped automatically on machines without the Ryzen AI SDK
 
 ## Civitai Integration

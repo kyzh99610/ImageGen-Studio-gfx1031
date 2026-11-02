@@ -259,7 +259,7 @@ def _device_badge(device: str | None = None) -> str:
     import config as _cfg
     dev = device or _cfg.DEVICE
     color_map = {"cuda": "#89b4fa", "directml": "#a6e3a1", "privateuseone": "#a6e3a1", "cpu": "#f38ba8"}
-    label_map = {"cuda": "🟦 CUDA / ZLUDA (ROCm)", "directml": "🟩 DirectML", "privateuseone": "🟩 DirectML", "cpu": "🟥 CPU"}
+    label_map = {"cuda": "🟦 ROCm (native)" if _cfg.NATIVE_ROCM else "🟦 CUDA / ZLUDA (ROCm)", "directml": "🟩 DirectML", "privateuseone": "🟩 DirectML", "cpu": "🟥 CPU"}
     base = dev.split(":")[0]
     color = color_map.get(base, "#cdd6f4")
     label = label_map.get(base, dev)
@@ -6680,8 +6680,15 @@ def _build_npu_info(npu: NPUInfo) -> str:
             "  • VAE Decode — useful on systems with limited dGPU VRAM",
             "",
             "Enable via: Settings → SmartSplit → set Text Encoder to 'npu'",
-            "NPU inference runs via the Ryzen AI conda env subprocess bridge.",
+            "NPU inference runs via the Ryzen AI environment's subprocess bridge.",
         ]
+        from backend.npu_bridge import is_xdna1
+        if is_xdna1():
+            lines += [
+                "",
+                "This XDNA1 NPU runs quantized models only: SD's float text encoder falls back to the CPU",
+                "(same speed, measured), so SmartSplit does not pick it by default.",
+            ]
     return "\n".join(lines)
 
 
@@ -6904,11 +6911,11 @@ def _kernel_cache_note() -> str:
     """Warning HTML when ZLUDA hasn't compiled its GPU kernels on this PC yet ('' otherwise).
     Measured on the RX 6800M: with an empty cache the first SD 1.5 image took ~15 min
     (every kernel compiles once); afterwards it's seconds. Nothing tells users that."""
-    if not str(DEVICE).startswith("cuda"):
+    if not str(DEVICE).startswith("cuda") or config.NATIVE_ROCM:
         return ""
-    db = Path(os.environ.get("LOCALAPPDATA", "")) / "zluda" / "ComputeCache" / "zluda.db"
-    try:
-        if db.exists() and db.stat().st_size > 20 * 2**20:
+    cache = Path(os.environ.get("LOCALAPPDATA", "")) / "zluda" / "ComputeCache"
+    try:                                       # zluda2.db since ZLUDA v6 stable, zluda.db before
+        if any(db.exists() and db.stat().st_size > 20 * 2**20 for db in (cache / "zluda2.db", cache / "zluda.db")):
             return ""
     except OSError:
         return ""

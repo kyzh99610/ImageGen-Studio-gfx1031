@@ -161,14 +161,14 @@ def detect_smartsplit_capability() -> SmartSplitCapability:
         pass
 
     # If VitisAI EP isn't in our onnxruntime, try the subprocess bridge
-    # (SDK conda env has Python 3.12 with VitisAI EP)
+    # (the SDK's environment has Python 3.12 with VitisAI EP)
     if not cap.npu_available:
         try:
             from backend.npu_bridge import check_npu_bridge_available
             bridge_ok, bridge_msg = check_npu_bridge_available()
             if bridge_ok:
                 cap.npu_available = True
-                cap.npu_name = "AMD XDNA NPU (via bridge → Ryzen AI conda env)"
+                cap.npu_name = "AMD XDNA NPU (via bridge → Ryzen AI environment)"
             else:
                 # Fall back to hardware_detector for info display
                 from backend.hardware_detector import get_profile
@@ -225,7 +225,8 @@ class SmartSplitConfig:
                 dgpu_dml_idx=cap.dgpu_dml_idx,
                 igpu_dml_idx=cap.igpu_dml_idx,
             )
-        te = "npu" if cap.npu_available else ("igpu_directml" if cap.igpu_te_available else "cpu")
+        from backend.npu_bridge import is_xdna1
+        te = "npu" if cap.npu_available and not is_xdna1() else ("igpu_directml" if cap.igpu_te_available else "cpu")
         vae = "igpu_directml" if cap.igpu_vae_available else "cpu"
         return cls(
             text_encoder_device=te,
@@ -270,6 +271,17 @@ def _export_text_encoder_to_onnx(pipe, model_stem: str) -> Path:
     original_device = next(te.parameters()).device
     te.cpu()
 
+    # torch 2.4's exporter crashes on CLIP's SDPA attention ("z_(): incompatible function arguments"): export an eager copy (same maths, rel. err 8e-7)
+    export_te = te
+    cfg = getattr(te, "config", None)
+    if getattr(cfg, "_attn_implementation", None) == "sdpa":
+        import copy
+        from transformers import CLIPTextModel
+        cfg = copy.copy(cfg)
+        cfg._attn_implementation = "eager"
+        export_te = CLIPTextModel(cfg).eval()
+        export_te.load_state_dict(te.state_dict())
+
     tokenizer = pipe.tokenizer
 
     dummy = tokenizer(
@@ -280,7 +292,7 @@ def _export_text_encoder_to_onnx(pipe, model_stem: str) -> Path:
     input_ids = dummy["input_ids"]
 
     torch.onnx.export(
-        te,
+        export_te,
         (input_ids,),
         str(onnx_path),
         input_names=["input_ids"],

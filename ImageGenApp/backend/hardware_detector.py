@@ -64,7 +64,7 @@ _RDNA_PATTERNS: list[tuple[re.Pattern, int, bool]] = [
     (re.compile(r"RX\s*9[0-9]{3}", re.I),                  4, False),   # RX 9xxx dGPU RDNA4
     (re.compile(r"610M",           re.I),                   2, True),    # 610M iGPU RDNA2
     (re.compile(r"680M|660M",      re.I),                   2, True),    # Zen3+ iGPU RDNA2
-    (re.compile(r"780M|760M|740M", re.I),                   3, True),    # Zen4 iGPU RDNA3
+    (re.compile(r"780M|760M|740M|^Radeon \d+$", re.I),      3, True),    # Zen4 iGPU RDNA3 (HIP and the registry call the 780M "Radeon 7")
     (re.compile(r"890M|880M|870M|860M|850M|840M|830M|Strix Halo|Hawk Point", re.I), 3, True),  # Zen5 iGPU RDNA3.5
     (re.compile(r"Vega",           re.I),                   1, True),    # Vega iGPU (Zen3 and earlier)
 ]
@@ -278,13 +278,8 @@ def _detect_npu() -> NPUInfo:
     # 2.5 Ryzen AI SDK installation folder (covers SDK installed for Python 3.12+
     #     where the wheel can't be imported from this Python 3.10 process)
     try:
-        ryzenai_path = os.environ.get("RYZEN_AI_INSTALLATION_PATH", "")
-        if not ryzenai_path:
-            for ver in ("1.7.0", "1.6.1", "1.6.0", "1.5.0"):
-                p = rf"C:\Program Files\RyzenAI\{ver}"
-                if os.path.isdir(p):
-                    ryzenai_path = p
-                    break
+        from backend.npu_bridge import find_sdk_path
+        ryzenai_path = find_sdk_path()
         if ryzenai_path:
             vitisai_dll = os.path.join(ryzenai_path, "deployment",
                                        "onnxruntime_providers_vitisai.dll")
@@ -296,7 +291,7 @@ def _detect_npu() -> NPUInfo:
                     backend="vitisai_sdk",
                     notes=(
                         f"Ryzen AI SDK {ver_tag} installed. "
-                        "NPU ready — inference runs via the ryzen-ai conda env "
+                        "NPU ready — inference runs via the SDK's Ryzen AI environment "
                         f"({ryzenai_path})."
                     ),
                 )
@@ -515,7 +510,7 @@ def detect_hardware() -> HardwareProfile:
 
         # Add RDNA gen notes
         if g.rdna_gen == 4:
-            g.notes += "RDNA 4 — ZLUDA support is experimental; use DirectML if issues arise. "
+            g.notes += "RDNA 4 — runs best on native ROCm (install_rocm.bat): about twice ZLUDA's speed on the RX 9070 XT. "
         elif g.rdna_gen == 1:
             g.notes += "Vega iGPU — limited compute; CPU fallback may be faster for large models. "
 

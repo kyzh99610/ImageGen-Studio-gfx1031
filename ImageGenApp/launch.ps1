@@ -57,9 +57,9 @@ try {
 } catch { }
 if ($Rocm.rocm_bin) {
     $RocmBin = $Rocm.rocm_bin
-    Write-Host "[INFO] GPU $($Rocm.gpu_index) $($Rocm.arch) - ROCm runtime: $($Rocm.runtime) ($RocmBin)"
-    if ($Rocm.note) { Write-Warning $Rocm.note }
-} else {
+    if (-not $Rocm.native_python) { Write-Host "[INFO] GPU $($Rocm.gpu_index) $($Rocm.arch) - ROCm runtime: $($Rocm.runtime) ($RocmBin)" }
+    if ($Rocm.note -and -not $Rocm.native_python) { Write-Warning $Rocm.note }
+} elseif (-not $Rocm.native_python) {
     Write-Warning @"
 No usable AMD HIP runtime found (bundled therock_sdk or HIP SDK 6.x).
 
@@ -77,7 +77,20 @@ if ($Dml -or $NoZluda) {
 if ($Zluda) {
     $env:IMAGEGEN_BACKEND = "cuda"
 }
-$UseZluda = (-not $NoZluda) -and (-not $Dml) -and (-not $Cpu) -and ($null -ne $ZludaExe) -and (Test-Path $ZludaExe) -and ($null -ne $RocmBin)
+# Native ROCm PyTorch replaces ZLUDA for this GPU when install_rocm.bat set it up (-Zluda keeps ZLUDA)
+$UseNative = [bool]$Rocm.native_python -and (-not $NoZluda) -and (-not $Dml) -and (-not $Cpu) -and (-not $Zluda)
+if ($UseNative) {
+    $Python = $Rocm.native_python
+    $env:IMAGEGEN_BACKEND = "cuda"
+    Remove-Item Env:ROCBLAS_TENSILE_LIBPATH -ErrorAction SilentlyContinue
+    Write-Host "[INFO] GPU $($Rocm.gpu_index) $($Rocm.arch) - native ROCm PyTorch"
+}
+$UseZluda = (-not $UseNative) -and (-not $NoZluda) -and (-not $Dml) -and (-not $Cpu) -and ($null -ne $ZludaExe) -and (Test-Path $ZludaExe) -and ($null -ne $RocmBin)
+$hfCache = Join-Path $RepoDir ".hf_cache"
+if ($UseNative -and (Test-Path $hfCache)) {
+    $env:HF_HOME = $hfCache
+    $env:HUGGINGFACE_HUB_CACHE = Join-Path $hfCache "hub"
+}
 if ($UseZluda) {
     $env:ZLUDA_NO_TELEMETRY   = "1"
     $env:DISABLE_ADDMM_CUDA_LT = "1"  # cublasLt -> hipBLASLt has no gfx103x kernels (every Linear+bias fails)
@@ -129,8 +142,8 @@ Write-Host "======================================================" -ForegroundC
 Write-Host "  ImageGen Studio" -ForegroundColor White
 Write-Host "======================================================" -ForegroundColor Cyan
 Write-Host "  Python : $Python"
-Write-Host "  ROCm   : $(if($RocmBin){$RocmBin}else{'not found'})"
-Write-Host "  ZLUDA  : v$ZludaVer $(if($UseZluda){'enabled'}else{'disabled (CPU/DirectML)'})"
+Write-Host "  ROCm   : $(if($UseNative){'python-rocm (native)'}elseif($RocmBin){$RocmBin}else{'not found'})"
+Write-Host "  ZLUDA  : $(if($UseNative){'not needed (native ROCm)'}elseif($UseZluda){"v$ZludaVer enabled"}else{"v$ZludaVer disabled (CPU/DirectML)"})"
 Write-Host "  GPU    : device $GpuIndex"
 Write-Host "  Port   : $Port"
 Write-Host "======================================================" -ForegroundColor Cyan
@@ -144,6 +157,9 @@ try {
     if ($UseZluda) {
         Write-Host "[INFO] Launching with ZLUDA v6 (DLL injection)..." -ForegroundColor Green
         & $ZludaExe -- $Python "app.py" @ExtraArgs
+    } elseif ($UseNative) {
+        Write-Host "[INFO] Launching on native ROCm PyTorch..." -ForegroundColor Green
+        & $Python "app.py" @ExtraArgs
     } else {
         Write-Host "[INFO] Launching without ZLUDA (CPU/DirectML mode)..." -ForegroundColor Yellow
         & $Python "app.py" @ExtraArgs

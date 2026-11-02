@@ -1,5 +1,6 @@
 # Bundled runtimes / SDKs (multi-GB, not source)
 /python-3.10/
+/python-rocm/
 /therock_sdk/
 /ZLUDA/
 /ZLUDA_v6/

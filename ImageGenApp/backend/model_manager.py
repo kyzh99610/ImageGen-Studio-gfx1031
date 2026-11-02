@@ -63,7 +63,20 @@ def safetensors_problem(path: str) -> str:
 # safetensors' load_file — and with it the queue, an outfit batch…
 LOAD_COMMIT_FACTOR = 2.05          # later loads
 LOAD_COMMIT_FACTOR_FIRST = 2.4     # the first load in a process (kernel / context set-up on top)
+LOAD_COMMIT_FACTOR_NATIVE = 2.0    # later loads on native ROCm: 6.46 GB SDXL files peaked at 1.75-1.86x (2026-11-01, sampled every 50 ms; first loads 2.17x)
+# An integrated GPU's memory is system memory, so the first picture's activations come out of commit too. Measured on a 780M: a 6.46 GB SDXL file loaded with
+# 13 GB of free commit, and the first sampling step then took it down to 0.4 GB with memory still growing (2026-11-01). SD 1.5 (2 GB file) stayed above 6 GB.
+LOAD_COMMIT_IGPU_EXTRA = 1.0
 _first_load = [True]
+
+
+def _on_integrated_gpu() -> bool:
+    try:
+        import torch
+        from backend.hardware_detector import _classify_gpu
+        return torch.cuda.is_available() and _classify_gpu(torch.cuda.get_device_name(0))[1]
+    except Exception:
+        return False
 
 
 def avail_commit_gb() -> float | None:
@@ -99,7 +112,12 @@ def commit_problem(model_path, scale: float = 1.0) -> str | None:
     if free is None:
         return None
     size = p.stat().st_size / 2**30
-    need = (LOAD_COMMIT_FACTOR_FIRST if _first_load[0] else LOAD_COMMIT_FACTOR) * size * scale
+    import config
+    native = getattr(config, "NATIVE_ROCM", False)
+    later = LOAD_COMMIT_FACTOR_NATIVE if native else LOAD_COMMIT_FACTOR
+    need = (LOAD_COMMIT_FACTOR_FIRST if _first_load[0] else later) * size * scale
+    if native and _on_integrated_gpu():
+        need += LOAD_COMMIT_IGPU_EXTRA * size * scale
     if free >= need:
         _first_load[0] = False
         return None

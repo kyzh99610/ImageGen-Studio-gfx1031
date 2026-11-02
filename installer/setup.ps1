@@ -170,7 +170,7 @@ if ($SkipRocm) {
     } else {
         Write-Host "  Not installed. Install 'AMD HIP SDK for Windows' 6.4 (free, from AMD):" -ForegroundColor DarkYellow
         Write-Host "    https://www.amd.com/en/developer/resources/rocm-hub/hip-sdk.html" -ForegroundColor Cyan
-        Write-Host "  Pick HIP SDK 6.4 (not 7.x). In its installer you can untick the display driver."
+        Write-Host "  RDNA 1/2: pick HIP SDK 6.4. RX 9070 XT (gfx1201): 7.1 is the verified one. In its installer you can untick the display driver."
         Write-Host "  Then start ImageGen Studio - no need to run this setup again."
         if (-not $Unattended) { Read-Host "  Press Enter to continue" | Out-Null }
     }

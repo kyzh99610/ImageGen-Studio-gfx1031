@@ -103,7 +103,7 @@ function logLine(line) {
   if (recentLines.length > 200) recentLines.shift();
   send('log', clean);
   if (/Found AMD|ROCm runtime|GPU gfx/.test(clean)) status('Starting the AI backend…', clean);
-  else if (/Launching with ZLUDA/.test(clean)) status('Loading the app (about 20 seconds)…', clean);
+  else if (/Launching (with ZLUDA|on native ROCm)/.test(clean)) status('Loading the app (about 20 seconds)…', clean);
   else if (/Running on local URL/.test(clean)) {
     status('Almost ready…', clean);
     // launch.bat moves to the next free port if ours was taken between pickPort() and the bind:

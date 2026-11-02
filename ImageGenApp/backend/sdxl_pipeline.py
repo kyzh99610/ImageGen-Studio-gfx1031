@@ -839,8 +839,8 @@ class SDXLPipeline:
             else:
                 self.pipe = self.pipe.to(self.device)
 
-            # Memory efficiency
-            if hasattr(self.pipe, "enable_attention_slicing"):
+            # Memory efficiency (not on native ROCm: slicing would swap flash attention, faster and smaller there, for a Python loop)
+            if not _cfg.NATIVE_ROCM and hasattr(self.pipe, "enable_attention_slicing"):
                 self.pipe.enable_attention_slicing(1)
             if hasattr(self.pipe, "vae"):
                 self.pipe.vae.enable_tiling()
@@ -1291,7 +1291,8 @@ class SDXLPipeline:
             # silently doubling VRAM (SDXL spills to shared memory) for txt2img too.
             self.img2img_pipe = StableDiffusionXLImg2ImgPipeline.from_pipe(self.pipe, torch_dtype=self.dtype)
             # Components shared with txt2img pipe — already on correct devices.
-            self.img2img_pipe.enable_attention_slicing(1)
+            if not _cfg.NATIVE_ROCM:
+                self.img2img_pipe.enable_attention_slicing(1)
             self.img2img_pipe.vae.enable_tiling()
             self.img2img_pipe.vae.tile_sample_min_size = 512
             self.img2img_pipe.vae.tile_latent_min_size = 64

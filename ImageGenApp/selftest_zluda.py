@@ -1,5 +1,5 @@
 """
-selftest_zluda.py — verify the GPU backend gives *correct* results, not just "no crash".
+selftest_zluda.py — verify the GPU backend (ZLUDA, or native ROCm via run_rocm.bat) gives *correct* results, not just "no crash".
 
 Runs the ops Stable Diffusion depends on (GEMM, conv, attention, GroupNorm) on
 the GPU and compares each against a float32 CPU reference. A broken backend
@@ -60,9 +60,9 @@ def main() -> int:
     print("=" * 72)
     print(f"  device       : {config.DEVICE}")
     if not config.DEVICE.startswith("cuda"):
-        print("  ❌ CUDA/ZLUDA device not active — launch via run_zluda.bat / launch.bat")
+        print("  ❌ CUDA/ZLUDA device not active — launch via run_zluda.bat / run_rocm.bat / launch.bat")
         return 1
-    print(f"  gpu          : {torch.cuda.get_device_name()}")
+    print(f"  gpu          : {torch.cuda.get_device_name(config.DEVICE)}")
     print(f"  torch        : {torch.__version__}")
     print(f"  cuDNN/MIOpen : {'ON' if torch.backends.cudnn.enabled else 'off (native convs)'}")
     for k in ("ROCM_ARCH", "HIP_PATH", "ROCBLAS_TENSILE_LIBPATH", "DISABLE_ADDMM_CUDA_LT"):

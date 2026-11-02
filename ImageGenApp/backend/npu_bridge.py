@@ -3,11 +3,12 @@ backend/npu_bridge.py
 Subprocess bridge for AMD XDNA NPU inference via VitisAI EP.
 
 Since the Ryzen AI SDK's onnxruntime-vitisai wheel requires Python 3.12 but
-our app runs on Python 3.10, we bridge the gap by calling the SDK's conda
-environment (ryzen-ai-1.7.0) via subprocess for NPU-specific ONNX sessions.
+our app runs on Python 3.10, we bridge the gap by calling the SDK's own
+environment (a uv venv since 1.9.0, a conda env before) via subprocess for
+NPU-specific ONNX sessions.
 
 Architecture:
-  Main process (Python 3.10)          NPU worker (Python 3.12 conda)
+  Main process (Python 3.10)          NPU worker (Python 3.12 env)
   ┌─────────────────────────┐         ┌────────────────────────────┐
   │  SmartSplitPipeline     │  stdin  │  _npu_worker.py            │
   │  .encode_prompt()  ─────┼────────>│  reads ONNX path + tokens  │
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -32,8 +34,9 @@ from typing import Optional
 
 import numpy as np
 
-# ── Conda env discovery ──────────────────────────────────────────────────────
+# ── Ryzen AI environment discovery ───────────────────────────────────────────
 
+_RYZEN_ROOT = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "RyzenAI"
 _CONDA_ENV_NAMES = ["ryzen-ai-1.7.0", "ryzen-ai-1.6.1", "ryzen-ai-1.6.0"]
 _CONDA_BASES = [
     Path(r"C:\ProgramData\miniconda3"),
@@ -42,15 +45,44 @@ _CONDA_BASES = [
     Path(os.environ.get("USERPROFILE", "")) / "anaconda3",
 ]
 
-_SDK_PATH = os.environ.get(
-    "RYZEN_AI_INSTALLATION_PATH",
-    r"C:\Program Files\RyzenAI\1.7.0",
-)
+
+def find_sdk_path() -> str:
+    """The Ryzen AI SDK folder: RYZEN_AI_INSTALLATION_PATH, else the newest <ProgramFiles>\\RyzenAI\\<x.y.z>; "" = none."""
+    env = os.environ.get("RYZEN_AI_INSTALLATION_PATH", "")
+    if env:
+        return env
+    try:
+        vers = [d for d in _RYZEN_ROOT.iterdir() if d.is_dir() and re.fullmatch(r"\d+(\.\d+)+", d.name)]
+    except OSError:
+        return ""
+    return str(max(vers, key=lambda d: [int(x) for x in d.name.split(".")])) if vers else ""
+
+
+_SDK_PATH = find_sdk_path() or str(_RYZEN_ROOT / "1.7.0")
 _VAIP_CONFIG = os.path.join(_SDK_PATH, "voe-4.0-win_amd64", "vaip_config.json")
+_xdna1: Optional[bool] = None
+
+
+def is_xdna1() -> bool:
+    """Phoenix / Hawk Point NPU (8700G…). It runs quantized models only: SD's float CLIP compiled under VitisAI on 1.9.0 opened no
+    hardware context and took the CPU's time (29.1 ms against 28.7), after a 25 s session build — so it never gets the text encoder by default."""
+    global _xdna1
+    if _xdna1 is None:
+        try:
+            ids = subprocess.run("pnputil /enum-devices /bus PCI /deviceids", shell=True, capture_output=True,
+                                 text=True, timeout=30).stdout
+        except Exception:
+            ids = ""
+        _xdna1 = "VEN_1022&DEV_1502" in ids
+    return _xdna1
 
 
 def find_conda_python() -> Optional[Path]:
-    """Find the Ryzen AI conda environment's Python executable."""
+    """Find the Ryzen AI environment's Python: the SDK's uv venv next to its folder (1.9.0), else a conda env (older SDKs)."""
+    sdk = Path(_SDK_PATH)
+    venv = sdk.parent / f"ryzen-ai-{sdk.name}" / "Scripts" / "python.exe"
+    if venv.exists():
+        return venv
     for base in _CONDA_BASES:
         base = base.resolve()
         if not base.exists():
@@ -70,14 +102,15 @@ def check_npu_bridge_available() -> tuple[bool, str]:
     python = find_conda_python()
     if not python:
         return False, (
-            "Ryzen AI conda env not found. "
-            "Expected: miniconda3/envs/ryzen-ai-1.7.0/python.exe"
+            "Ryzen AI environment not found. "
+            f"Expected: {Path(_SDK_PATH).parent}/ryzen-ai-<version>/Scripts/python.exe "
+            "or miniconda3/envs/ryzen-ai-1.7.0/python.exe"
         )
 
     if not os.path.isfile(_VAIP_CONFIG):
         return False, f"VAIP config not found: {_VAIP_CONFIG}"
 
-    # Quick check: does the conda Python have VitisAI EP?
+    # Quick check: does the environment's Python have VitisAI EP?
     try:
         result = subprocess.run(
             [str(python), "-c",
@@ -89,14 +122,14 @@ def check_npu_bridge_available() -> tuple[bool, str]:
             return True, f"NPU bridge ready via {python}"
         else:
             return False, (
-                f"Conda env found ({python}) but VitisAI EP not available. "
+                f"Ryzen AI environment found ({python}) but VitisAI EP not available. "
                 f"Providers: {result.stdout.strip()}"
             )
     except Exception as e:
         return False, f"NPU bridge check failed: {e}"
 
 
-# ── Worker script (written to temp dir, executed in conda env) ────────────────
+# ── Worker script (written to temp dir, executed in the Ryzen AI env) ─────────
 
 _WORKER_SCRIPT = r'''
 """NPU worker — long-lived subprocess for VitisAI EP inference."""
@@ -106,23 +139,34 @@ import numpy as np
 SDK = os.environ.get("RYZEN_AI_INSTALLATION_PATH", r"C:\Program Files\RyzenAI\1.7.0")
 VAIP = os.path.join(SDK, "voe-4.0-win_amd64", "vaip_config.json")
 
-# Ensure SDK DLLs are findable
+# Ensure SDK DLLs are findable (1.9.0 has no xrt folder: the driver brings it)
 deploy = os.path.join(SDK, "deployment")
 xrt = os.path.join(SDK, "xrt")
 os.environ["PATH"] = deploy + ";" + xrt + ";" + os.environ.get("PATH", "")
 if hasattr(os, "add_dll_directory"):
-    os.add_dll_directory(deploy)
-    os.add_dll_directory(xrt)
+    for d in (deploy, xrt):
+        if os.path.isdir(d):
+            os.add_dll_directory(d)
 
 import onnxruntime as ort
 
 sessions = {}  # cache: onnx_path -> InferenceSession
 
 
+def npu_options() -> dict:
+    """Phoenix / Hawk Point (XDNA1) needs AMD's quicktest recipe, measured on 1.9.0 with its test model: a config_file session
+    fails at the hardware context (0xc01e0009) and target X1 alone times out; with the xclbin key (its file is not even shipped)
+    it runs, 3.5 ms against 7.6 on the CPU, and the driver counts the submissions."""
+    if os.environ.get("IMAGEGEN_NPU_XDNA1") == "1":
+        return {"target": "X1", "xlnx_enable_py3_round": 0,
+                "xclbin": os.path.join(SDK, "voe-4.0-win_amd64", "xclbins", "phoenix", "4x4.xclbin")}
+    return {"config_file": VAIP}
+
+
 def get_session(onnx_path: str) -> ort.InferenceSession:
     if onnx_path not in sessions:
         providers = ["VitisAIExecutionProvider", "CPUExecutionProvider"]
-        options = [{"config_file": VAIP}, {}]
+        options = [npu_options(), {}]
         sess = ort.InferenceSession(onnx_path, providers=providers,
                                     provider_options=options)
         actual = sess.get_providers()
@@ -251,7 +295,7 @@ class NPUBridge:
 
         self._conda_python = find_conda_python()
         if not self._conda_python:
-            return "ERROR: Ryzen AI conda Python not found"
+            return "ERROR: Ryzen AI environment's Python not found"
 
         # Write worker script to temp location
         self._worker_script = Path(os.environ.get("TEMP", "/tmp")) / "_npu_worker.py"
@@ -259,6 +303,7 @@ class NPUBridge:
 
         env = os.environ.copy()
         env["RYZEN_AI_INSTALLATION_PATH"] = _SDK_PATH
+        env["IMAGEGEN_NPU_XDNA1"] = "1" if is_xdna1() else "0"
 
         self._process = subprocess.Popen(
             [str(self._conda_python), str(self._worker_script)],

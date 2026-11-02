@@ -17,6 +17,11 @@ from unittest.mock import patch, MagicMock
 from dataclasses import dataclass
 import numpy as np
 os.environ["IMAGEGEN_TESTS"] = "1"         # the app must not apply the user's saved cool factor / pause limit (a pause limit makes every fake generate read the live sensor and wait while hot)
+import atexit, shutil, tempfile
+_TEST_TMP = tempfile.mkdtemp(prefix="imagegen_tests_")
+os.environ["IMAGEGEN_OUTPUTS_DIR"] = os.path.join(_TEST_TMP, "test_outputs")   # no test may write among the user's real pictures (the 🖐 tries once landed in outputs/hand_redraw_tries)
+os.environ.pop("IMAGEGEN_OUTPUT_SUBDIR", None)
+atexit.register(shutil.rmtree, _TEST_TMP, ignore_errors=True)
 
 # Fix Windows console encoding for Unicode emoji
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
@@ -38,11 +43,11 @@ class Skip(Exception):
 
 
 def needs_npu():
-    """Skip unless this machine has a Ryzen AI NPU *and* the Ryzen AI conda env
-    (only the 8700G workstation in the hardware matrix does)."""
+    """Skip unless this machine has a Ryzen AI NPU *and* the Ryzen AI environment
+    (only the 8700G machines in the hardware matrix do)."""
     from backend.npu_bridge import find_conda_python
     if find_conda_python() is None:
-        raise Skip("no Ryzen AI SDK conda env on this machine")
+        raise Skip("no Ryzen AI SDK environment on this machine")
 
 
 ONLY = os.environ.get("TEST_ONLY", "")      # regex: run only the tests whose name matches (a quick check of one area), e.g. TEST_ONLY="Eye detail"
@@ -114,6 +119,7 @@ def _():
     # Check if the SDK path scanner works (scans known directories)
     # Just verify the logic runs without crashing
     known_paths = [
+        r"C:\Program Files\RyzenAI\1.9.0",
         r"C:\Program Files\RyzenAI\1.7.0",
         r"C:\Program Files\RyzenAI\1.6.1",
         r"C:\Program Files\RyzenAI\1.6.0",
@@ -217,6 +223,8 @@ print("\n[3/8] SmartSplit Config Auto-Routing")
 
 @test("SmartSplitConfig.auto() routes TE to NPU when available")
 def _():
+    from unittest import mock
+    import backend.npu_bridge as nb
     from backend.smartsplit_pipeline import SmartSplitConfig, SmartSplitCapability
     cap = SmartSplitCapability(
         possible=True,
@@ -225,7 +233,8 @@ def _():
         igpu_te_available=True,
         igpu_vae_available=True,
     )
-    cfg = SmartSplitConfig.auto(cap)
+    with mock.patch.object(nb, "_xdna1", False):        # an XDNA2 machine: on XDNA1 the default is the iGPU (its own test below)
+        cfg = SmartSplitConfig.auto(cap)
     assert cfg.enabled is True
     assert cfg.text_encoder_device == "npu", f"Expected 'npu', got '{cfg.text_encoder_device}'"
     assert cfg.unet_device == "cuda"
@@ -602,8 +611,10 @@ print("\n[8/10] End-to-End SmartSplit with NPU")
 
 @test("Full SmartSplit config with NPU → correct describe() output")
 def _():
+    from unittest import mock
+    import backend.npu_bridge as nb
     from backend.smartsplit_pipeline import SmartSplitConfig, SmartSplitCapability
-    # Simulate 8700G: dGPU + iGPU + NPU all available
+    # Simulate a dGPU + iGPU + XDNA2 NPU machine, all available (XDNA1 has its own test)
     cap = SmartSplitCapability(
         possible=True,
         dgpu_available=True,
@@ -614,7 +625,8 @@ def _():
         igpu_name="AMD Radeon 780M",
         npu_name="AMD XDNA NPU (VitisAI)",
     )
-    cfg = SmartSplitConfig.auto(cap)
+    with mock.patch.object(nb, "_xdna1", False):
+        cfg = SmartSplitConfig.auto(cap)
     assert cfg.enabled
     assert cfg.text_encoder_device == "npu"
     assert cfg.vae_device == "igpu_directml"
@@ -761,9 +773,52 @@ def _():
         assert cfg.unet_device == "dgpu_directml"
         print(f"    Auto config (DML): TE→{cfg.text_encoder_device}, UNet→{cfg.unet_device}, VAE→{cfg.vae_device}")
     else:
-        # CUDA/ZLUDA path — NPU preferred for TE
-        assert cfg.text_encoder_device == "npu", f"CUDA path should use NPU, got '{cfg.text_encoder_device}'"
+        # CUDA/ZLUDA path — NPU preferred for TE, except XDNA1 (float CLIP falls back to the CPU there)
+        from backend.npu_bridge import is_xdna1
+        if is_xdna1():
+            assert cfg.text_encoder_device != "npu", f"XDNA1 should not get the TE, got '{cfg.text_encoder_device}'"
+        else:
+            assert cfg.text_encoder_device == "npu", f"CUDA path should use NPU, got '{cfg.text_encoder_device}'"
         print(f"    Auto config (CUDA): TE→{cfg.text_encoder_device}, UNet→{cfg.unet_device}, VAE→{cfg.vae_device}")
+
+@test("SmartSplit auto-config: XDNA1 never gets the text encoder by default, other NPUs do")
+def _():
+    import backend.npu_bridge as nb
+    from backend.smartsplit_pipeline import SmartSplitCapability, SmartSplitConfig
+    cap = SmartSplitCapability()
+    cap.possible, cap.npu_available, cap.igpu_te_available, cap.dgpu_dml_idx = True, True, True, -1
+    saved = nb._xdna1
+    try:
+        nb._xdna1 = True
+        assert SmartSplitConfig.auto(cap).text_encoder_device == "igpu_directml"
+        cap.igpu_te_available = False
+        assert SmartSplitConfig.auto(cap).text_encoder_device == "cpu"
+        nb._xdna1 = False
+        assert SmartSplitConfig.auto(cap).text_encoder_device == "npu"
+    finally:
+        nb._xdna1 = saved
+
+@test("Ryzen AI SDK discovery: the env var wins, else the newest version folder by number, venv before conda")
+def _():
+    import tempfile
+    from pathlib import Path
+    from unittest import mock
+    import backend.npu_bridge as nb
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for name in ("1.7.0", "1.9.0", "1.10.0", "ryzen-ai-1.10.0", "notes"):
+            (root / name).mkdir()
+        with mock.patch.dict(os.environ, {"RYZEN_AI_INSTALLATION_PATH": ""}), mock.patch.object(nb, "_RYZEN_ROOT", root):
+            assert nb.find_sdk_path() == str(root / "1.10.0")
+        with mock.patch.dict(os.environ, {"RYZEN_AI_INSTALLATION_PATH": r"X:\sdk"}), mock.patch.object(nb, "_RYZEN_ROOT", root):
+            assert nb.find_sdk_path() == r"X:\sdk"
+        with mock.patch.dict(os.environ, {"RYZEN_AI_INSTALLATION_PATH": ""}), mock.patch.object(nb, "_RYZEN_ROOT", root / "missing"):
+            assert nb.find_sdk_path() == ""
+        scripts = root / "ryzen-ai-1.10.0" / "Scripts"
+        scripts.mkdir()
+        (scripts / "python.exe").write_bytes(b"")
+        with mock.patch.object(nb, "_SDK_PATH", str(root / "1.10.0")):
+            assert nb.find_conda_python() == scripts / "python.exe"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -778,6 +833,14 @@ def _():
     assert _mod._accel_te_enabled is True
     set_sdxl_npu_te(False)
     assert _mod._accel_te_enabled is False
+
+@test("IMAGEGEN_OUTPUTS_DIR: pictures go to that folder, not outputs/, and the history index is its own file (the pruning must not touch the old one)")
+def _():
+    import config
+    from backend import history
+    assert Path(config.OUTPUTS_DIR) == Path(os.environ["IMAGEGEN_OUTPUTS_DIR"]) and Path(config.OUTPUTS_DIR) != APP_DIR / "outputs"
+    assert Path(config.OUTPUTS_DIR).is_dir()
+    assert history.INDEX_FILE.name == "_history_index__test_outputs.json"
 
 @test("ONNX cache directory exists")
 def _():
@@ -1410,6 +1473,104 @@ def _():
             os.environ.pop("IMAGEGEN_GPU", None)
         else:
             os.environ["IMAGEGEN_GPU"] = old
+
+
+@test("rocm_env: native ROCm only for a GPU whose kernels are installed; the longest hipInfo list wins; the choice reaches the launchers")
+def _():
+    import tempfile
+    from unittest import mock
+    from backend import rocm_env as R
+    with tempfile.TemporaryDirectory() as tmp:
+        env = Path(tmp) / "python-rocm"
+        site = env / "Lib" / "site-packages"
+        (env / "Scripts").mkdir(parents=True)
+        site.mkdir(parents=True)
+        (site / "amd_torch_device_gfx1201-2.14.0+rocm10.1.0.dist-info").mkdir()
+        with mock.patch.object(R, "NATIVE_DIR", env), mock.patch.object(R, "NATIVE_SITE", site):
+            assert R.native_python("gfx1201") == ""                     # no python.exe yet
+            (env / "Scripts" / "python.exe").write_bytes(b"")
+            assert R.native_python("gfx1201").endswith("python.exe")
+            assert R.native_python("gfx1031") == "" and R.native_python("") == ""
+    one = "device#   0\nName: A\ntotalGlobalMem: 16.00 GB\nisIntegrated: 0\ngcnArchName: gfx1201\n"
+    two = one + "device#   1\nName: B\ntotalGlobalMem: 12.00 GB\nisIntegrated: 1\ngcnArchName: gfx1103\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        bins = [Path(tmp) / "older", Path(tmp) / "newer"]
+        for b in bins:
+            b.mkdir()
+            (b / "hipInfo.exe").write_bytes(b"")
+        answers = {str(bins[0]): one, str(bins[1]): two}
+        fake = lambda cmd, **k: MagicMock(stdout=answers[str(Path(cmd[0]).parent)])
+        with patch("subprocess.run", fake):
+            assert [d["arch"] for d in R.gpu_devices(bins)] == ["gfx1201", "gfx1103"]
+    bat = R._bat({"arch": "gfx1201", "runtime": "", "gpu_index": 0, "rocm_bin": "", "hip_path": "", "tensile": "", "note": "", "native_python": r"C:\x\python.exe"})
+    assert r'set "ROCM_NATIVE_PY=C:\x\python.exe"' in bat
+    assert "ROCM_NATIVE_PY" not in R._bat({"arch": "gfx1031", "runtime": "", "gpu_index": 0, "rocm_bin": "", "hip_path": "", "tensile": "", "note": ""})
+
+
+@test("Native ROCm: flash attention and cuDNN stay on, attention slicing stays off, ZLUDA's environment isn't forced; ZLUDA keeps all of it")
+def _():
+    from unittest import mock
+    import torch
+    import config
+    src_xl = (APP_DIR / "backend" / "sdxl_pipeline.py").read_text(encoding="utf-8")
+    src_sd = (APP_DIR / "backend" / "sd_pipeline.py").read_text(encoding="utf-8")
+    for src in (src_xl, src_sd):
+        assert src.count("enable_attention_slicing(1)") == 2 and src.count("_cfg.NATIVE_ROCM") >= 2
+    flash, cudnn = torch.backends.cuda.flash_sdp_enabled(), torch.backends.cudnn.enabled
+    try:
+        with mock.patch.object(torch.cuda, "is_available", lambda: True), mock.patch.object(torch.cuda, "device_count", lambda: 1), \
+                mock.patch.object(torch.cuda, "get_device_name", lambda i=0: "AMD Radeon RX 9070 XT"):
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cudnn.enabled = True
+            with mock.patch.object(config, "NATIVE_ROCM", True):
+                assert config.get_device(0, backend="cuda") == "cuda:0"
+                assert torch.backends.cuda.flash_sdp_enabled() and torch.backends.cudnn.enabled
+            with mock.patch.object(config, "NATIVE_ROCM", False):
+                config.get_device(0, backend="cuda")
+                assert not torch.backends.cuda.flash_sdp_enabled() and not torch.backends.cudnn.enabled
+    finally:
+        torch.backends.cuda.enable_flash_sdp(flash)
+        torch.backends.cudnn.enabled = cudnn
+
+
+@test("Commit preflight: an integrated GPU on native ROCm needs more free commit (its memory is system memory); a 780M is recognised by HIP's name for it")
+def _():
+    import tempfile
+    from unittest import mock
+    from backend import model_manager as MM
+    from backend.hardware_detector import _classify_gpu
+    assert _classify_gpu("Radeon 7")[1] is True and _classify_gpu("AMD Radeon 780M Graphics")[1] is True
+    assert _classify_gpu("AMD Radeon RX 9070 XT")[1] is False and _classify_gpu("Radeon RX 9070")[1] is False
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "m.safetensors"
+        p.write_bytes(b"\0" * (1 << 20))
+        with mock.patch.object(MM, "_first_load", [False]), mock.patch.object(MM, "avail_commit_gb", lambda: 0.0025), mock.patch("config.NATIVE_ROCM", True):
+            with mock.patch.object(MM, "_on_integrated_gpu", lambda: False):
+                assert MM.commit_problem(p) is None                     # 2.0 x 0.00098 fits
+            with mock.patch.object(MM, "_on_integrated_gpu", lambda: True):
+                assert "Not enough free memory" in MM.commit_problem(p)  # 3.0 x 0.00098 does not
+
+
+@test("First-run kernel note: ZLUDA v6's zluda2.db (or the older zluda.db) counts as compiled, a small or missing one warns, native ROCm never warns")
+def _():
+    import tempfile
+    from unittest import mock
+    import app as _app
+    with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"LOCALAPPDATA": tmp}), mock.patch.object(_app, "DEVICE", "cuda:0"):
+        cache = Path(tmp) / "zluda" / "ComputeCache"
+        cache.mkdir(parents=True)
+        with mock.patch.object(_app.config, "NATIVE_ROCM", False):
+            assert "First run" in _app._kernel_cache_note()
+            for name in ("zluda2.db", "zluda.db"):
+                with open(cache / name, "wb") as f:
+                    f.truncate(1 << 20)
+                assert "First run" in _app._kernel_cache_note(), f"a small {name} is not a compiled cache"
+                with open(cache / name, "wb") as f:
+                    f.truncate(21 << 20)
+                assert _app._kernel_cache_note() == "", name
+                (cache / name).unlink()
+        with mock.patch.object(_app.config, "NATIVE_ROCM", True):
+            assert _app._kernel_cache_note() == ""
 
 
 @test("Launchers: ASCII/CRLF batch files, --help works, unknown flags are reported")
@@ -6399,13 +6560,9 @@ def _():
     try:
         out = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, '.'); import config; from backend import history; print(config.OUTPUTS_DIR.as_posix()); print(history.INDEX_FILE.name)"],
                              cwd=str(app_dir), env=env, capture_output=True, text=True, timeout=120).stdout.split("\n")
-        assert out[0].endswith("/outputs/" + sub) and out[1] == "_history_index___lab__unit_test19.json", out
+        assert out[0] == (Path(_cfg.OUTPUTS_DIR) / sub).as_posix() and out[1] == "_history_index___lab__unit_test19.json", out
     finally:
-        shutil.rmtree(app_dir / "outputs" / "_lab" / "_unit_test19", ignore_errors=True)
-        try:
-            (app_dir / "outputs" / "_lab").rmdir()
-        except OSError:
-            pass
+        shutil.rmtree(Path(_cfg.OUTPUTS_DIR) / "_lab", ignore_errors=True)
 
 
 @test("make_zip.ps1: its exclusion list keeps settings, outputs, models, scripts, logs and api keys out of the zip and the code in (round 16: scripts / wildcards / detectors / logs shipped)")

@@ -29,8 +29,8 @@ set "RYZENAI_PATH="
 if defined RYZEN_AI_INSTALLATION_PATH (
     set "RYZENAI_PATH=!RYZEN_AI_INSTALLATION_PATH!"
 ) else (
-    :: Try the default installation path for v1.7.0
-    for %%V in (1.7.0 1.6.1 1.6.0 1.5.0) do (
+    :: Try the default installation paths, oldest first: the newest one found wins
+    for %%V in (1.5.0 1.6.0 1.6.1 1.7.0 1.9.0) do (
         if exist "C:\Program Files\RyzenAI\%%V" (
             set "RYZENAI_PATH=C:\Program Files\RyzenAI\%%V"
         )
@@ -86,7 +86,7 @@ if /i "!WHEEL_CPVER!" neq "!OUR_CPVER!" (
     echo        The Ryzen AI SDK is installed and the NPU will be detected correctly.
     echo        Direct Python binding is unavailable ^(AMD only ships !WHEEL_CPVER! for v1.7+^).
     echo.
-    echo        NPU inference will run via the ryzen-ai conda env ^(Python 3.12^).
+    echo        NPU inference will run via the SDK's Ryzen AI environment ^(Python 3.12^).
     goto :verify_sdk
 )
 
