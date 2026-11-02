@@ -21,7 +21,7 @@ Workflow:
   4. Scan → Prepare → Auto-Caption → Review → Train!
 
 Tips:
-  • 15-50 images for character LoRAs
+  • 15-60 images for character LoRAs (9 did no better than no LoRA at all)
   • Include varied poses, angles, outfits, backgrounds
   • Solo character images work best
   • Body pillows (16:5) are handled natively — no forced square crop

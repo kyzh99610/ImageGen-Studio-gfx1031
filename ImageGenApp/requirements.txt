@@ -47,5 +47,5 @@ tqdm==4.66.2
 pydantic==2.6.1
 setuptools==69.5.1
 
-# Optional — AMD XDNA NPU (Ryzen AI 8700G / Hawk Point) offload: install AMD Ryzen AI
-# Software; the app finds its conda env and talks to it through a subprocess bridge.
+# Optional — AMD XDNA NPU (Ryzen AI 8700G / Hawk Point), detection only so far: install AMD Ryzen AI
+# Software; the app finds its environment and talks to it through a subprocess bridge.

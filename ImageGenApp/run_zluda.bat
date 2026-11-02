@@ -2,7 +2,7 @@
 setlocal EnableDelayedExpansion
 
 rem Usage: run_zluda.bat script.py [args]  -- same ZLUDA environment as launch.bat
-rem ZLUDA v6 + the HIP runtime backend\rocm_env.py picks for this GPU (therock_sdk or HIP SDK 6.x)
+rem ZLUDA v6 + the HIP runtime backend\rocm_env.py picks for this GPU (therock_sdk or a system HIP SDK)
 
 set "APP_DIR=%~dp0"
 set "REPO_DIR=%APP_DIR%..\"
@@ -21,8 +21,9 @@ set "ROCM_ENV_FILE=%TEMP%\imagegen_rocm_%RANDOM%%RANDOM%.bat"
 if exist "%ROCM_ENV_FILE%" call "%ROCM_ENV_FILE%"
 del "%ROCM_ENV_FILE%" 2>nul
 if not defined ROCM_BIN (
-    echo [ERROR] No usable HIP runtime ^(therock_sdk or AMD HIP SDK 6.x^).
+    echo [ERROR] No usable HIP runtime ^(therock_sdk or a system AMD HIP SDK^).
     echo         Install the AMD HIP SDK 6.4 ^(installer\hip_sdk_installer.exe if included^).
+    echo         On an RX 9070 XT or a 780M, use install_rocm.bat and run_rocm.bat instead.
     exit /b 1
 )
 if defined ROCM_NOTE echo [WARN] !ROCM_NOTE!

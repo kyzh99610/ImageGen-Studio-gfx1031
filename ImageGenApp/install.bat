@@ -49,7 +49,7 @@ if !ERRORLEVEL! neq 0 (
     goto :fail
 )
 
-:: -- HIP runtime check (ZLUDA needs AMD's HIP SDK 6.x, or the bundled therock_sdk) --
+:: -- HIP runtime check (ZLUDA needs AMD's HIP SDK, or the bundled therock_sdk) --
 set "ROCM_BIN="
 set "ROCM_ENV_FILE=%TEMP%\imagegen_rocm_%RANDOM%%RANDOM%.bat"
 "%PYTHON%" "%APP_DIR%backend\rocm_env.py" --bat > "!ROCM_ENV_FILE!" 2>nul
@@ -65,6 +65,7 @@ if defined ROCM_BIN (
     echo [WARN] AMD HIP SDK not found. ZLUDA needs it to use your GPU.
     echo        Install "AMD HIP SDK for Windows" 6.4:
     echo        https://www.amd.com/en/developer/resources/rocm-hub/hip-sdk.html
+    echo        On an RX 9070 XT or a 780M, run install_rocm.bat instead: it needs no HIP SDK.
     if exist "!REPO_DIR!installer\hip_sdk_installer.exe" (
         choice /C YN /M "Run the included installer\hip_sdk_installer.exe now"
         if !ERRORLEVEL!==1 start "" /wait "!REPO_DIR!installer\hip_sdk_installer.exe"

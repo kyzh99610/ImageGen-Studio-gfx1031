@@ -2,7 +2,7 @@
   "name": "imagegen-studio",
   "productName": "ImageGen Studio",
   "version": "1.0.0",
-  "description": "Desktop window for ImageGen Studio (local Stable Diffusion on AMD via ZLUDA)",
+  "description": "Desktop window for ImageGen Studio (local Stable Diffusion on AMD GPUs)",
   "main": "main.js",
   "private": true,
   "scripts": {

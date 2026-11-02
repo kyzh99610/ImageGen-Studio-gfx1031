@@ -11,7 +11,7 @@
       3. gfx1031 rocBLAS kernels (github.com/likelovewant/ROCmLibs-for-gfx1103-AMD780M-APU,
          release v0.6.2.4) -> _gfx1031_rocm624\  (only used on gfx1031 GPUs)
       4. Python packages (ImageGenApp\install.bat -> requirements.txt, ~5 GB)
-      5. AMD HIP SDK 6.x check (needed by ZLUDA)
+      5. AMD HIP SDK check (needed by ZLUDA)
       6. Optional starter models (~6.3 GB)
 
     Downloads are checked against the SHA-256 of the files this project was tested with.
@@ -158,7 +158,7 @@ Write-Step 4 $TOTAL "Python packages (PyTorch 2.4.1 cu118, diffusers, gradio ...
 if ($LASTEXITCODE -ne 0) { Stop-Setup "Package installation failed - see the messages above. Re-run setup to retry." }
 
 # -- 5. AMD HIP SDK -----------------------------------------------------------
-Write-Step 5 $TOTAL "AMD HIP SDK 6.x (ZLUDA needs it)"
+Write-Step 5 $TOTAL "AMD HIP SDK (ZLUDA needs it)"
 if ($SkipRocm) {
     Write-Host "  Skipped (-SkipRocm)" -ForegroundColor DarkGray
 } else {
@@ -171,6 +171,7 @@ if ($SkipRocm) {
         Write-Host "  Not installed. Install 'AMD HIP SDK for Windows' 6.4 (free, from AMD):" -ForegroundColor DarkYellow
         Write-Host "    https://www.amd.com/en/developer/resources/rocm-hub/hip-sdk.html" -ForegroundColor Cyan
         Write-Host "  RDNA 1/2: pick HIP SDK 6.4. RX 9070 XT (gfx1201): 7.1 is the verified one. In its installer you can untick the display driver."
+        Write-Host "  RX 9070 XT or 780M: ImageGenApp\install_rocm.bat needs no HIP SDK and runs about twice as fast."
         Write-Host "  Then start ImageGen Studio - no need to run this setup again."
         if (-not $Unattended) { Read-Host "  Press Enter to continue" | Out-Null }
     }

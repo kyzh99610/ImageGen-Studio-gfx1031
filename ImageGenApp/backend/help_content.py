@@ -1142,10 +1142,14 @@ def hardware_html() -> str:
             ["<b>ZLUDA v6</b>",
              "Translates CUDA calls to AMD HIP so AMD GPUs appear as NVIDIA to PyTorch. Primary backend.",
              _cn("将CUDA指令翻译为AMD HIP，让PyTorch/Diffusers把你的AMD GPU当作NVIDIA使用。由launch.bat自动启用。主要后端。")],
+            ["<b>Native ROCm</b>",
+             "AMD's own PyTorch for an RX 9070 XT or a 780M: about twice as fast, no ZLUDA. Run <code>install_rocm.bat</code> once and <code>launch.bat</code> uses it by itself "
+             "(<code>launch.bat --zluda</code> keeps ZLUDA). cuDNN/MIOpen stays on there.",
+             _cn("AMD官方PyTorch，适用于RX 9070 XT和780M：速度约为ZLUDA的两倍，不需要ZLUDA。运行一次 install_rocm.bat，之后 launch.bat 会自动使用（launch.bat --zluda 可继续用ZLUDA）。此时cuDNN/MIOpen保持开启。")],
             ["<b>dGPU (RX 6800M / RX 6800 XT / RX 9070 XT)</b>",
-             "Runs text encoders, UNet and VAE decode via ZLUDA. cuDNN/MIOpen is disabled on AMD "
+             "Runs text encoders, UNet and VAE decode via ZLUDA or native ROCm. Under ZLUDA cuDNN/MIOpen is disabled "
              "(its convolutions return wrong results under ZLUDA); PyTorch's native convolutions are used instead.",
-             _cn("通过ZLUDA运行文本编码、UNet去噪和VAE解码。AMD上禁用cuDNN/MIOpen（其卷积在ZLUDA下结果错误），改用PyTorch原生卷积。")],
+             _cn("通过ZLUDA或原生ROCm运行文本编码、UNet去噪和VAE解码。ZLUDA下禁用cuDNN/MIOpen（其卷积在ZLUDA下结果错误），改用PyTorch原生卷积。")],
             ["<b>iGPU (780M / Vega / 610M)</b>",
              "Optional SDXL text encoding via ONNX DirectML — mainly useful on the DirectML backend "
              "(under ZLUDA the dGPU already encodes prompts in well under a second). Also used for VAE in SmartSplit (SD 1.5).",
@@ -1177,14 +1181,14 @@ def hardware_html() -> str:
     h += '<div class="hg-h3">GPU Self-Test &nbsp;<span class="cn">GPU自检</span></div>'
     h += """<ol style="color:#cdd6f4;font-size:13px;line-height:2;">
 <li>Black/noisy images or NaN errors after a driver, ROCm or ZLUDA update? Run
-    <code>run_zluda.bat selftest_zluda.py</code> in the <code>ImageGenApp</code> folder.</li>
+    <code>run_zluda.bat selftest_zluda.py</code> (<code>run_rocm.bat</code> on native ROCm) in the <code>ImageGenApp</code> folder.</li>
 <li>It compares GPU results for matrix multiply, convolution, attention and GroupNorm against the CPU
     and fails loudly if the GPU backend returns wrong numbers.</li>
 <li>If generation suddenly becomes very slow, check the info line for <b>⚠ VRAM over-committed</b> —
     Windows spills to system RAM instead of reporting out-of-memory. Lower the resolution or batch size.</li>
 </ol>
 <div class="hg-note">""" + _cn(
-        "驱动/ROCm/ZLUDA更新后出现黑图或NaN？在ImageGenApp目录运行 run_zluda.bat selftest_zluda.py，"
+        "驱动/ROCm/ZLUDA更新后出现黑图或NaN？在ImageGenApp目录运行 run_zluda.bat selftest_zluda.py（原生ROCm用 run_rocm.bat），"
         "它会对比GPU与CPU的计算结果。若生成突然变得极慢，查看信息栏是否出现“VRAM over-committed”——"
         "Windows显存不足时不会报错，而是溢出到系统内存，请降低分辨率或批量。"
     ) + "</div>"

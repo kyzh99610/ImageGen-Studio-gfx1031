@@ -9,6 +9,8 @@ with txt2img, img2img, LoRAs, upscaling, LoRA training, a Civitai browser and mo
 
 > Tested on an **RX 6800M (12 GB)** laptop: SD 1.5 512×768 in **~16 s** and SDXL 832×1216 in
 > **~90 s** (20 steps, AMD HIP SDK 6.4). See [Performance](#performance).
+>
+> **RX 9070 XT or Radeon 780M?** They run on AMD's native ROCm PyTorch instead, about twice as fast, with no HIP SDK and no ZLUDA: see [Other GPUs](#other-gpus).
 
 ---
 
@@ -77,6 +79,7 @@ launch.bat --port 8080       :: another port (a busy port moves to the next free
 launch.bat --gpu 1           :: pick the HIP device (default: the best discrete GPU)
 launch.bat --no-browser      :: don't open the browser
 launch.bat --dml             :: DirectML instead of ZLUDA (any GPU, slower)
+launch.bat --zluda           :: ZLUDA even when native ROCm is installed (install_rocm.bat)
 launch.bat --cpu             :: CPU only (very slow)
 ```
 
@@ -175,10 +178,12 @@ the recommended one.
 
 | Symptom | Fix |
 |---|---|
-| `[WARN] No usable AMD HIP runtime found` | Install AMD HIP SDK **6.4** (step 1), then start again |
+| `[WARN] No usable AMD HIP runtime found` | Install AMD HIP SDK **6.4** (step 1), then start again. On an RX 9070 XT or a 780M, run `ImageGenApp\install_rocm.bat` instead |
 | Self-test fails / black or noisy images | Make sure you started with `launch.bat` / `run_zluda.bat`, not `python app.py`, and that `IMAGEGEN_CUDNN` isn't set. Post the self-test output in an issue. |
 | First image seems stuck | Normal on first use (10–15 min kernel compile). Watch Task Manager: the GPU is busy. |
 | Generation suddenly very slow, "⚠ VRAM over-committed" | VRAM spilled into system RAM. Lower the resolution or batch size. |
+| "Not enough free memory to load …" | Windows commit (RAM + page file) is short. Close big programs, or enlarge the page file (System → Advanced → Performance → Virtual memory). |
+| `SyntaxError: source code string cannot contain null bytes` | A hard reset during an install left damaged files. Delete `python-rocm\` (or `python-3.10\Lib\site-packages`) and run the installer again. |
 | `.bat` window flashes and closes | Run it from a Command Prompt to see the error; check the folder path has no `!` or `%` |
 | Browser stuck on "Loading…" | Open <http://127.0.0.1:7860> in a new tab, and turn off browser auto-translate for the page |
 | App keeps running after closing the browser | Close the console window, or use the desktop window, which stops the backend itself |
@@ -200,7 +205,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 216 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload).
+That runs 216 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload). On native ROCm, use `python-rocm\Scripts\python.exe` for the CPU tests and `ImageGenApp\run_rocm.bat` for the GPU ones.
 
 ## Credits and licenses
 
@@ -210,6 +215,7 @@ This project's code is MIT-licensed (see [LICENSE](LICENSE)). It downloads, but 
   built from AMD's rocBLAS/Tensile (MIT) with "littlewu's logic"
 - AMD HIP SDK (AMD's license, installed by you), Python (PSF), PyTorch, diffusers, Gradio, and the other packages in
   `requirements.txt` (each under its own license)
+- AMD's ROCm builds of PyTorch and its ROCm SDK packages, only if you run `install_rocm.bat`
 - Models you download have their own licenses. Check them on Civitai / Hugging Face.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This project isn't affiliated with AMD, NVIDIA or the ZLUDA

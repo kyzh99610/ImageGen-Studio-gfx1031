@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-  ImageGen Studio - PowerShell launcher with ZLUDA (AMD ROCm via CUDA emulation)
+  ImageGen Studio - PowerShell launcher: native ROCm when installed, else ZLUDA (AMD ROCm via CUDA emulation)
 #>
 
 param(
@@ -21,7 +21,7 @@ $RepoDir  = Split-Path $AppDir -Parent
 $PyDir    = Join-Path $RepoDir "python-3.10"
 $Python   = Join-Path $PyDir "python.exe"
 
-# ── ZLUDA v6 (+ therock_sdk, or the system HIP SDK 6.x when therock_sdk is absent) ──
+# ── ZLUDA v6 (+ therock_sdk, or the system HIP SDK when therock_sdk is absent) ──
 # The old ZLUDA v5 build was removed 2026-09-26: it failed every GPU op on this driver.
 $ZludaVer = 0
 $ZludaDir = Join-Path $RepoDir "ZLUDA_v6\zluda"
@@ -51,7 +51,7 @@ if (-not (Test-Path $Python)) {
 
 # ── Pick the HIP runtime + rocBLAS kernels for this GPU (backend\rocm_env.py) ──
 # hipInfo reports the GPU architecture; therock_sdk (bundled) has RDNA 1/2 kernels, the
-# system HIP SDK 6.x has RDNA 3/4. gfx1031 also gets the bundled gfx1031 rocBLAS kernels.
+# system HIP SDK has RDNA 3/4. gfx1031 also gets the bundled gfx1031 rocBLAS kernels.
 $RocmBin = $null
 $Rocm = @{}
 # An explicit -Gpu decides the runtime too; otherwise rocm_env.py picks the best GPU
@@ -66,11 +66,12 @@ if ($Rocm.rocm_bin) {
     if ($Rocm.note -and -not $Rocm.native_python) { Write-Warning $Rocm.note }
 } elseif (-not $Rocm.native_python) {
     Write-Warning @"
-No usable AMD HIP runtime found (bundled therock_sdk or HIP SDK 6.x).
+No usable AMD HIP runtime found (bundled therock_sdk or a system HIP SDK).
 
 To fix this, install the AMD HIP SDK 6.4 (installer\hip_sdk_installer.exe if your copy
 includes it, or https://www.amd.com/en/developer/resources/rocm-hub/hip-sdk.html)
-and re-run this launcher. Continuing in CPU/DirectML mode.
+and re-run this launcher. On an RX 9070 XT or a 780M, run install_rocm.bat instead: it needs no HIP SDK.
+Continuing in CPU/DirectML mode.
 "@
     $NoZluda = $true
 }
@@ -178,6 +179,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] App exited with code $LASTEXITCODE" -ForegroundColor Red
     if (-not $RocmBin) {
         Write-Host "  Install the AMD HIP SDK 6.4 first (installer\hip_sdk_installer.exe if included)." -ForegroundColor Yellow
+        Write-Host "  On an RX 9070 XT or a 780M, run install_rocm.bat instead." -ForegroundColor Yellow
     } else {
         Write-Host "  Run install.bat if Python dependencies are missing." -ForegroundColor Yellow
     }

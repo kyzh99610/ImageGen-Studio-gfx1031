@@ -14,7 +14,12 @@ checks each download against a pinned SHA-256:
 `ImageGenApp/install.bat` installs the Python packages in `ImageGenApp/requirements.txt` (PyTorch, diffusers,
 transformers, Gradio, ONNX Runtime DirectML, EasyOCR, …) from PyPI and download.pytorch.org, each under its own license.
 
-You install the **AMD HIP SDK** yourself, under AMD's license terms.
+`ImageGenApp/install_rocm.bat` (optional, native ROCm) installs PyTorch 2.14.0, torchvision and torchaudio built for ROCm 10.1 and AMD's ROCm SDK
+packages (`rocm-sdk-*`, `amd-torch-device-*`) from AMD's index, <https://stable.repo.amd.com/rocm/whl-next/>, and the packages in
+`ImageGenApp/requirements-rocm.txt` from PyPI. The PyTorch packages are pinned by version, not by SHA-256. AMD's SDK packages name no license in their
+metadata: check AMD's terms before redistributing them. This repository doesn't. You install Python 3.12 yourself.
+
+You install the **AMD HIP SDK** and, for NPU detection, **AMD Ryzen AI Software** yourself, under AMD's license terms.
 
 At runtime the app may download models on request: the anime face detectors
 [deepghs/anime_face_detection](https://huggingface.co/deepghs/anime_face_detection) (YOLOv8 ONNX, MIT) and

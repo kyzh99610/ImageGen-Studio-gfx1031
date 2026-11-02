@@ -1,6 +1,6 @@
 # 🦞 ImageGen Studio
 
-A local AI image generation suite built for **AMD GPUs via ZLUDA v6 (ROCm/HIP)**, with GPU VAE decoding, **SmartSplit multi-device offload**, optional iGPU text encoding, and a built-in **Civitai Hub** for model discovery. Runs on Windows with AMD RDNA 2/3/4 dGPUs (primary target: RX 6800M, gfx1031), with optional iGPU and XDNA NPU support.
+A local AI image generation suite built for **AMD GPUs via ZLUDA v6 (ROCm/HIP)** or AMD's native ROCm PyTorch, with GPU VAE decoding, **SmartSplit multi-device offload**, optional iGPU text encoding, and a built-in **Civitai Hub** for model discovery. Runs on Windows with AMD RDNA 2/3/4 dGPUs (primary target: RX 6800M, gfx1031), with optional iGPU and XDNA NPU support.
 
 > Developer / AI-assistant notes live in [`../AGENTS.md`](../AGENTS.md).
 
@@ -18,6 +18,7 @@ PowerShell users can also launch with `launch.ps1`:
 ```powershell
 .\launch.ps1 -Port 8080 -Share   # custom port, public Gradio share link
 .\launch.ps1 -Dml                # DirectML instead of ZLUDA
+.\launch.ps1 -Zluda              # ZLUDA even when native ROCm is installed
 .\launch.ps1 -Cpu                # force CPU mode
 ```
 
@@ -32,7 +33,7 @@ install_rocm.bat        :: Python 3.12 + PyTorch for the GPUs in this PC, into .
 launch.bat              :: now starts on native ROCm by itself; launch.bat --zluda keeps ZLUDA
 ```
 
-On an RX 9070 XT: SDXL 1024×1024 at 20 steps 3.7 s against ZLUDA's 6.9 s, SD 1.5 512×768 0.98 s against 2.45 s, a third less VRAM. A picture size used for the first time costs 30-70 s once (kernels are compiled and cached). Details in `../AGENTS.md`.
+On an RX 9070 XT: SDXL 1024×1024 at 20 steps 3.7 s against ZLUDA's 6.9 s, SD 1.5 512×768 0.98 s against 2.45 s, a third less VRAM. A picture size used for the first time costs 30-70 s once (kernels are compiled and cached). On a Radeon 780M (`launch.bat --gpu 1` next to a discrete card): SD 1.5 512×768 ~60 s, SDXL 832×1216 at 12 AYS steps ~133 s (441 s the first time), 10.9 GB of shared memory. `run_rocm.bat <script.py>` runs any script in that environment. Keep the repo folder's path under about 60 characters: the kernels' file names are long. Details in `../AGENTS.md`.
 
 ---
 
@@ -173,7 +174,7 @@ Train your own LoRA adapters from scratch:
 3. **Training** — Latent caching, live text encoder training, gradient checkpointing, cosine LR scheduling. Progress bar with loss tracking and ETA.
 4. **Output** — Standard kohya-format `.safetensors` saved to `models/loras/` and listed in the Generate tab's LoRA slots right away. An existing LoRA with the same name is never overwritten (`name_2`, `name_3`, …).
 
-Supports SD 1.5 and SDXL / Pony / Illustrious. GPU training via ZLUDA (SD 1.5, 25 images, 1 epoch ≈ 5 min on an RX 6800M); CPU training as safe fallback. Any model loaded in the Generate tab is unloaded first to free VRAM — it reloads on your next Generate.
+Supports SD 1.5 and SDXL / Pony / Illustrious. GPU training via ZLUDA (SD 1.5, 25 images, 1 epoch ≈ 5 min on an RX 6800M) or native ROCm (SDXL, 57 images, 570 steps ≈ 10 min on an RX 9070 XT); CPU training as safe fallback. A character LoRA from 9 images scored no better than no LoRA; from 57 images it did, best around weight 0.8. Any model loaded in the Generate tab is unloaded first to free VRAM — it reloads on your next Generate.
 
 ### ⚙️ Settings
 
@@ -196,16 +197,17 @@ Full bilingual (English/中文) reference guide covering prompt syntax, generati
 ZLUDA v6 (downloaded by setup into `ZLUDA_v6\zluda\`) intercepts NVIDIA CUDA calls at runtime, forwarding them to AMD HIP/ROCm. Text encoders, the UNet (main denoising network) and the VAE decoder all run on the dGPU via ZLUDA.
 
 **Requirements:**
-1. **ROCm runtime** — AMD HIP SDK 6.x (6.4 tested); an optional `therock_sdk\` folder is preferred when present
+1. **ROCm runtime** — AMD HIP SDK 6.x (6.4 tested; 7.1 on an RX 9070 XT); an optional `therock_sdk\` folder is preferred when present
 2. **ZLUDA v6** — `ZLUDA_v6\zluda\`, injected via `launch.bat` (ZLUDA v5 fails every GPU operation on current drivers)
 3. **gfx1031 only:** the community rocBLAS kernels in `_gfx1031_rocm624\` (AMD's HIP SDK has none for gfx1031)
 4. **PyTorch CUDA 11.8 wheel** — Standard CUDA build; ZLUDA translates at runtime
 
-**Why cuDNN is off:** under ZLUDA on RDNA 2 (gfx1031), AMD's MIOpen convolution library returns wrong results — NaN latents or garbage VAE output. The app disables cuDNN on AMD GPUs and uses PyTorch's own convolutions (through rocBLAS), which are correct and faster. This also lets the VAE decode on the GPU (SDXL ~4 s instead of ~21 s on CPU) with an automatic CPU fallback. Set `IMAGEGEN_CUDNN=1` only to experiment.
+**Why cuDNN is off:** under ZLUDA on RDNA 2 (gfx1031), AMD's MIOpen convolution library returns wrong results — NaN latents or garbage VAE output. The app disables cuDNN under ZLUDA and uses PyTorch's own convolutions (through rocBLAS), which are correct and faster. This also lets the VAE decode on the GPU (SDXL ~4 s instead of ~21 s on CPU) with an automatic CPU fallback. Set `IMAGEGEN_CUDNN=1` only to experiment. Native ROCm keeps cuDNN on.
 
 **VRAM over-commit:** Windows doesn't report out-of-memory when the GPU fills up — it silently spills into system RAM and generation becomes ~20× slower. If that happens the info line shows **⚠ VRAM over-committed**; lower the resolution or batch size.
 
 **Verify GPU is detected:** Open **Settings** tab → device badge shows:
+- 🟦 **ROCm (native)** — AMD GPU on AMD's own PyTorch ✅
 - 🟦 **CUDA / ZLUDA (ROCm)** — AMD GPU via ZLUDA ✅
 - 🟩 **DirectML** — fallback via torch-directml
 - 🟥 **CPU** — slowest fallback
@@ -263,10 +265,13 @@ ImageGenApp/
 ├── app.py                    # Main Gradio application (entry point)
 ├── config.py                 # Paths, device detection, ZLUDA/cuDNN setup
 ├── requirements.txt          # Python dependencies
-├── launch.bat                # Windows launcher with ZLUDA v6 injection
+├── requirements-rocm.txt     # The same pins for native ROCm (Python 3.12)
+├── launch.bat                # Windows launcher: native ROCm when installed, else ZLUDA v6
 ├── launch.ps1                # PowerShell launcher
 ├── run_zluda.bat             # Run any script under the ZLUDA environment
+├── run_rocm.bat              # Run any script on native ROCm
 ├── install.bat               # One-time dependency installer
+├── install_rocm.bat          # Optional native ROCm PyTorch (..\python-rocm)
 ├── selftest_zluda.py         # GPU-vs-CPU correctness self-test
 ├── smoke_gpu.py              # GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl], app closed)
 ├── run_tests.py              # CPU test suite (NPU tests skip without the hardware)
@@ -295,7 +300,7 @@ the [main README](../README.md#troubleshooting).
 
 | Problem | Solution |
 |---|---|
-| "CUDA not available" after launch | Ensure HIP SDK is installed and `launch.bat` is used (not `python app.py` directly) |
+| "CUDA not available" after launch | Ensure HIP SDK is installed (or `install_rocm.bat` has run, on an RX 9070 XT / 780M) and `launch.bat` is used (not `python app.py` directly) |
 | Model fails to load | Check that `.safetensors` is not corrupted; try a HuggingFace model ID |
 | Out of memory (OOM) | Reduce batch to 1, lower resolution, or restart app. Enable SmartSplit for SD 1.5. |
 | App window doesn't close after Ctrl+C | ZLUDA shutdown hang — close the console window |

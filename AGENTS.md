@@ -23,7 +23,7 @@ AMD's native ROCm PyTorch instead (Python 3.12, no ZLUDA; see "Native ROCm PyTor
 ├── ImageGenApp/                   ← the app
 │   ├── app.py                     ← Gradio Blocks UI (~6000 lines), all callbacks, _save_outputs()
 │   ├── config.py                  ← paths, device detection, ZLUDA env/cuDNN setup (import first!)
-│   ├── launch.bat / launch.ps1    ← main launchers (ZLUDA v6 + therock_sdk PATH setup)
+│   ├── launch.bat / launch.ps1    ← main launchers (native ROCm when installed, else ZLUDA v6 + therock_sdk PATH setup)
 │   ├── run_zluda.bat <script.py>  ← run any script under the launch.bat ZLUDA environment
 │   ├── install_rocm.bat           ← optional native ROCm PyTorch (python-rocm\, requirements-rocm.txt)
 │   ├── run_rocm.bat <script.py>   ← run any script on native ROCm
@@ -70,9 +70,9 @@ AMD's native ROCm PyTorch instead (Python 3.12, no ZLUDA; see "Native ROCm PyTor
 ```bat
 ImageGenApp\install.bat                         :: once
 cd desktop && npm install && npm run package    :: optional desktop window (Electron 44)
-ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--gpu N] [--no-browser] [--no-pause]
+ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--zluda] [--gpu N] [--no-browser] [--no-pause]
 :: busy port: an ImageGen Studio already there is reopened, anything else → next free port
-.\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml]
+.\ImageGenApp\launch.ps1 [-Port N] [-Share] [-Cpu] [-NoZluda] [-Dml] [-Zluda]
 ImageGenApp\install_rocm.bat                    :: native ROCm PyTorch in python-rocm\ (RX 9070 XT, 780M): launch.bat then uses it, --zluda keeps ZLUDA
 ImageGenApp\run_rocm.bat selftest_zluda.py      :: the same checks on native ROCm (run_rocm.bat smoke_gpu.py --sdxl too)
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
@@ -123,7 +123,7 @@ Env set by launchers / `config.py`: `ROCBLAS_TENSILE_LIBPATH` (gfx1031 only, via
 ZLUDA v6 + the system **HIP SDK 6.4** (`C:\Program Files\AMD\ROCm\6.4`) + the gfx1031 Tensile library passes
 `selftest_zluda.py` and generates (SD 1.5 512x768: ~15 s vs ~8 s on therock). With ROCm 6.4's own rocBLAS library the
 process crashes (0xC0000409) — the gfx1031 library is required. `launch.bat` / `launch.ps1` / `run_zluda.bat` pick
-therock_sdk if present, else the newest system ROCm 6.x, and set `HIP_PATH` to match. ZLUDA v5 fails every op (CUBLAS_STATUS_ALLOC_FAILED, "operation not supported") on driver 32.0.21045, so only
+therock_sdk if present, else the newest system ROCm 6.x, then 7.x, and set `HIP_PATH` to match. ZLUDA v5 fails every op (CUBLAS_STATUS_ALLOC_FAILED, "operation not supported") on driver 32.0.21045, so only
 v6 is supported. install.bat/launchers mention an `installer\hip_sdk_installer.exe` if someone places AMD's
 installer there; otherwise users get the amd.com link.
 
@@ -139,7 +139,7 @@ unpack it (`tar -xf`) and install only `Packages\Apps\ROCmSDKPackages\{SDKCore,R
 ROCm 10.1's Windows wheels run PyTorch on the AMD GPU directly. `install_rocm.bat` builds `python-rocm\` next to `ImageGenApp` (Python 3.12,
 torch 2.14.0+rocm10.1.0 with one `device-<arch>` extra per GPU in the PC, then `requirements-rocm.txt`). From then on `launch.bat` / `launch.ps1`
 use it for those GPUs by themselves (`--zluda` / `-Zluda` keeps ZLUDA, `--dml` and `--cpu` are unchanged); `run_rocm.bat` is `run_zluda.bat` for scripts.
-No HIP SDK and no ZLUDA are needed then. AMD's index also lists gfx1031 wheels; they have not been tried, so a gfx1031 machine stays on ZLUDA unless
+No ZLUDA is needed then, and no HIP SDK: with the system SDK's folders off PATH and `HIP_PATH` unset, `hipInfo` from the wheel, a matmul and a convolution work and no loaded DLL comes from the system SDK (RX 9070 XT, 2026-11-02; the SDK stayed installed, so a PC that never had it is not proven). AMD's index also lists gfx1031 wheels; they have not been tried, so a gfx1031 machine stays on ZLUDA unless
 `install_rocm.bat gfx1031` is run by hand.
 
 Measured on an RX 9070 XT (gfx1201, 16 GB), Adrenalin 26.10.1, 2026-11-01. Plain diffusers, same seeds, after the kernels were cached:
@@ -849,6 +849,8 @@ without it) · gradio 4.19.2 (index.html patched) ·
 **onnxruntime-directml 1.23.0 only** (plain `onnxruntime` shares the same package dir — never install both;
 `rembg` will complain in `pip check`, harmless) · easyocr 1.7.2 · opencv-python-headless 4.9.0.80.
 
+`python-rocm\` (Python 3.12): torch 2.14.0+rocm10.1.0 · torchvision 0.29.0a0+rocm10.1.0 · torchaudio 2.11.0.3+rocm10.1.0, no torch-directml; the rest as `requirements-rocm.txt` pins them.
+
 ## Civitai API
 
 Base `https://civitai.com/api/v1`, header `Authorization: Bearer <key>` (needed for NSFW/downloads).
@@ -876,10 +878,10 @@ feathered Gaussian fallback at image borders.
 | `DISABLE_ADDMM_CUDA_LT=1` | **Required** — without it every Linear+bias fails (`CUBLAS_STATUS_NOT_SUPPORTED`). The old self-test had no addmm case (false negative) |
 | cuDNN/MIOpen off | **Required** (see above) |
 | `HSA_OVERRIDE_GFX_VERSION=10.3.0` | **No effect on Windows** (bogus `9.0.0` passes) — removed |
-| therock for every GPU | **Wrong for RDNA 3/4**: therock only has gfx101x/103x kernels. `rocm_env.py` picks the system HIP SDK 6.x for those |
+| therock for every GPU | **Wrong for RDNA 3/4**: therock only has gfx101x/103x kernels. `rocm_env.py` picks the system HIP SDK for those (6.x first, then 7.x) |
 | `HIP_VISIBLE_DEVICES` in `set_active_gpu` | v5-era; breaks ZLUDA v6 multi-GPU — removed |
 
-`backend/rocm_env.py` (stdlib only) reads the arch from `hipInfo.exe`, chooses therock vs system ROCm 6.x by which rocBLAS
+`backend/rocm_env.py` (stdlib only) reads the arch from `hipInfo.exe`, chooses therock vs system ROCm by which rocBLAS
 library has kernels for it, and emits `set` lines the launchers `call` from a per-launch temp file (a shared file once
 went stale and made `launch.bat` pick a missing runtime). `run_tests.py` covers gfx1031/gfx1030/gfx1201/gfx1103.
 Without `--gpu`/`IMAGEGEN_GPU` it picks the best HIP device itself (discrete before integrated, then most memory —
@@ -979,6 +981,9 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
 26. **Upscale tab dropped the `imagegen` record** → `_carry_params()`.
 27. **LoRAs not re-applied after a checkpoint switch** (2026-09-28 → 10-02) → snapshot started in `_reload_all_loras` when missing.
 28. **No LoRA loaded with `HF_HUB_OFFLINE=1`** → `weight_name` passed to `load_lora_weights`.
+29. **`install_rocm.bat` couldn't find `rocm_env.py`** (2026-11-02): a stray carriage return in the path; the launcher test counts bare CRs now.
+30. **`smoke_gpu.py` passed a refused model load** (2026-11-02): it now asserts that the load message starts with ✅.
+31. **`launch.bat` never used native ROCm on a PC with only `python-rocm\`, and pip failed on too deep a folder with "No such file or directory"** (2026-11-02): see "Native ROCm PyTorch". Found on a fresh clone; a used checkout hid both.
 
 ## Troubleshooting
 
@@ -990,7 +995,7 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
 | Generation suddenly very slow | VRAM spilled to shared memory — look for "⚠ VRAM over-committed", lower size/batch |
 | Colours of the background flood the character | Weighted scene/colour tags under Compel weighting — Settings → Prompt weights = A1111 (default since 2026-09-30); lower the scene tags' weights |
 | Garbage / psychedelic colours on one model family | A VAE of the other family selected — the load status warns and uses the checkpoint's own VAE |
-| App dies (0xC0000005 in `safetensors.load_file`) while loading an SDXL checkpoint, or "Not enough free memory to load …" | Windows *commit* (RAM + page file) is full: a load needs ~2× the file size for a moment and GPU allocations count too. Close big programs or enlarge the page file (System → Advanced → Performance → Virtual memory) |
+| App dies (0xC0000005 in `safetensors.load_file`) while loading an SDXL checkpoint, or "Not enough free memory to load …" | Windows *commit* (RAM + page file) is full: a load needs ~2× the file size for a moment (native ROCm: 1.4×, 1.8× the first time in a process) and GPU allocations count too. Close big programs or enlarge the page file (System → Advanced → Performance → Virtual memory) |
 | The laptop switches itself off during long generations (EventLog 6008 only, no bluescreen) | Sustained GPU load trips the laptop's protection → Settings → 🌡 Cool mode 1.5; a less aggressive power plan; a cooling stand |
 | First generation of a session is slow | Normal: ZLUDA loads kernels per process (~1 min); on a new PC ~15 min once (empty zluda2.db) |
 | Process won't exit | ZLUDA shutdown hang — close the window / `taskkill /F /T` the zluda.exe tree |

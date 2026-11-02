@@ -6086,8 +6086,8 @@ def _build_train_tab(gen_lora_dds=()):
                         label="Training device",
                         choices=["auto", "cuda", "cpu", "directml"],
                         value="auto",
-                        info="Auto = CUDA/ZLUDA GPU if available, else CPU. "
-                             "CUDA/ZLUDA gives ~5× speedup (launch via launch.bat). "
+                        info="Auto = the GPU (ZLUDA or native ROCm) if available, else CPU. "
+                             "The GPU gives ~5× speedup or more (launch via launch.bat). "
                              "DirectML backward is broken for UNet — expert use only. "
                              "CPU always works (uses your RAM).")
 

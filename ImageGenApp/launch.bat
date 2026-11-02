@@ -96,7 +96,7 @@ if not exist "%PYTHON%" (
 :: -- Pick the GPU, HIP runtime and rocBLAS kernels ---------------------------------
 :: backend\rocm_env.py asks hipInfo which AMD GPUs exist (the best one unless --gpu
 :: is given) and picks the runtime that has kernels for it: therock_sdk (bundled,
-:: RDNA 1/2) or the system HIP SDK 6.x (RDNA 3/4, or when therock_sdk is absent).
+:: RDNA 1/2) or the system HIP SDK (RDNA 3/4, or when therock_sdk is absent).
 :: gfx1031 (RX 6700/6750 XT, 6700M/6800M/6850M XT) also gets the bundled gfx1031
 :: rocBLAS kernels - other GPUs must not.
 set "HIP_FOUND=0"
@@ -132,11 +132,12 @@ if "!USE_NATIVE!"=="1" (
     if defined ROCM_NOTE echo [WARN] !ROCM_NOTE!
 ) else if "!USE_ZLUDA!"=="1" (
     echo.
-    echo [WARN] No usable AMD HIP runtime found ^(bundled therock_sdk or HIP SDK 6.x^).
+    echo [WARN] No usable AMD HIP runtime found ^(bundled therock_sdk or a system HIP SDK^).
     echo.
     echo  To fix this, install the AMD HIP SDK 6.4 ^(installer\hip_sdk_installer.exe if
     echo  your copy includes it, or https://www.amd.com/en/developer/resources/rocm-hub/hip-sdk.html^)
-    echo  and re-run this launcher. Continuing without ZLUDA GPU support...
+    echo  and re-run this launcher. On an RX 9070 XT or a 780M, run install_rocm.bat instead: it needs no HIP SDK.
+    echo  Continuing without ZLUDA GPU support...
     echo.
     set "USE_ZLUDA=0"
 )
@@ -219,6 +220,7 @@ if not "!APP_EXIT!"=="0" (
         echo.
         echo  The most likely cause is missing AMD ROCm DLLs - install the AMD HIP SDK 6.4
         echo  ^(installer\hip_sdk_installer.exe if included^), then re-run this launcher.
+        echo  On an RX 9070 XT or a 780M, run install_rocm.bat instead.
     ) else (
         echo  Run install.bat first if Python dependencies are missing.
     )
