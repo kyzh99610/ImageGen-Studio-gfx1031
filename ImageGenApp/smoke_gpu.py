@@ -24,6 +24,12 @@ from PIL import Image, ImageDraw  # noqa: E402
 RESULTS = []
 
 
+def _loaded(msg):
+    """load_model returns a refusal (not enough free memory ...) as text: that is a failed check."""
+    assert msg.startswith("✅"), msg[:300]
+    return msg[:60]
+
+
 def check(name, fn):
     t0 = time.time()
     try:
@@ -77,7 +83,7 @@ def main() -> int:
     gen = lambda **k: sd.txt2img(**{**dict(prompt=P, negative_prompt=N, width=384, height=512, steps=10,
                                              cfg_scale=7, seed=1234, scheduler="DPM++ 2M Karras"), **k})[0]
 
-    check("load model", lambda: sd.load_model(ckpt)[:60])
+    check("load model", lambda: _loaded(sd.load_model(ckpt)))
 
     def t_gen():
         state["img"] = gen()[0]
@@ -144,7 +150,7 @@ def main() -> int:
             print("  (no SDXL checkpoint — SDXL round skipped)")
         else:
             xl = SDXLPipeline()
-            check(f"SDXL load {os.path.basename(xl_ckpt)}", lambda: xl.load_model(xl_ckpt)[:60])
+            check(f"SDXL load {os.path.basename(xl_ckpt)}", lambda: _loaded(xl.load_model(xl_ckpt)))
             check("SDXL txt2img 768×768", lambda: ok_image(
                 xl.txt2img(prompt=P, negative_prompt=N, width=768, height=768, steps=8, cfg_scale=6, seed=1,
                            scheduler="DPM++ 2M AYS")[0][0], "SDXL") is not None and None)
