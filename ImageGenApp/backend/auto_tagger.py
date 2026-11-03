@@ -17,6 +17,13 @@ _blip_model = None
 _blip_processor = None
 
 
+def _blip_device() -> str:
+    """Native ROCm's torch has no MKL: a caption took 42-58 s on the CPU, 0.3-0.4 s on the GPU (RX 9070 XT), the same words. ZLUDA's torch stays on the CPU."""
+    import config
+    device = str(config.DEVICE)
+    return device if getattr(config, "NATIVE_ROCM", False) and device.startswith("cuda") else "cpu"
+
+
 def _load_blip():
     """Lazy-load BLIP captioning model (~1 GB on first download)."""
     global _blip_model, _blip_processor
@@ -30,7 +37,7 @@ def _load_blip():
     print("[AutoTag] Loading BLIP model …")
     _blip_processor = BlipProcessor.from_pretrained(model_id)
     _blip_model = BlipForConditionalGeneration.from_pretrained(
-        model_id, torch_dtype=torch.float32)
+        model_id, torch_dtype=torch.float32).to(_blip_device())
     _blip_model.eval()
     print("[AutoTag] BLIP ready")
 
@@ -51,6 +58,7 @@ def caption_image(image_path: str | Path, prefix: str = "") -> str:
     else:
         inputs = _blip_processor(img, return_tensors="pt")
 
+    inputs = inputs.to(_blip_model.device)
     with torch.no_grad():
         ids = _blip_model.generate(
             **inputs, max_new_tokens=75, num_beams=3,
@@ -90,3 +98,9 @@ def unload_blip():
     _blip_model = None
     _blip_processor = None
     gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass

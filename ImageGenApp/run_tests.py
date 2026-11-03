@@ -1507,6 +1507,308 @@ def _():
     assert "ROCM_NATIVE_PY" not in R._bat({"arch": "gfx1031", "runtime": "", "gpu_index": 0, "rocm_bin": "", "hip_path": "", "tensile": "", "note": ""})
 
 
+@test("Native ROCm: Settings' GPU choice shows the GPU in use and lists an iGPU once; another GPU means a restart, with the right --gpu number")
+def _():
+    import os
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import MagicMock, patch
+    import config as C
+    import app as _app
+    from backend import hardware_detector as HD, rocm_env as R
+    gb = 1024 ** 3
+
+    def profile(cuda, native):
+        wmic = [("AMD Radeon RX 9070 XT", 16 * gb), ("AMD Radeon 780M Graphics", 512 * 1024 ** 2)]
+        with patch.object(C, "NATIVE_ROCM", native), patch.object(HD, "_cpu_name", lambda: "CPU x"), patch.object(HD, "_ram_gb", lambda: 32), \
+                patch.object(HD, "_cuda_gpus", lambda: cuda), patch.object(HD, "_directml_available", lambda: True), \
+                patch.object(HD, "_detect_npu", HD.NPUInfo), patch.object(HD, "_wmic_gpus", lambda: wmic):
+            return HD.detect_hardware()
+    # --gpu 1: this process runs on the iGPU, whose HIP name is Radeon 7; the far stronger card is not what it runs on
+    on_igpu = profile([("Radeon 7", 12 * gb)], True)
+    assert [(g.name, g.backend) for g in on_igpu.gpus] == [("AMD Radeon 780M Graphics", "cuda_zluda"), ("AMD Radeon RX 9070 XT", "directml")], on_igpu.gpus
+    assert on_igpu.best_gpu is on_igpu.gpus[0]
+    on_card = profile([("AMD Radeon RX 9070 XT", 16 * gb)], True)
+    assert [(g.name, g.backend) for g in on_card.gpus] == [("AMD Radeon RX 9070 XT", "cuda_zluda"), ("AMD Radeon 780M Graphics", "directml")], on_card.gpus
+    # ZLUDA sees both: the card leads, the iGPU is listed once
+    zl = profile([("AMD Radeon RX 9070 XT [ZLUDA]", 16 * gb), ("Radeon 7 [ZLUDA]", 12 * gb)], False)
+    assert len(zl.gpus) == 2 and not zl.best_gpu.is_igpu and zl.gpus[1].is_igpu, zl.gpus
+    # the number to restart with comes from what the PC has, not from this process's filtered list
+    one = "device#   0\nName: A\ntotalGlobalMem: 16.00 GB\nisIntegrated: 0\ngcnArchName: gfx1201\n"
+    seen = []
+
+    def fake(cmd, **k):
+        seen.append(k["env"].get("HIP_VISIBLE_DEVICES"))
+        return MagicMock(stdout=one)
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "hipInfo.exe").write_bytes(b"")
+        with patch.dict(os.environ, {"HIP_VISIBLE_DEVICES": "1"}), patch("subprocess.run", fake):
+            R.gpu_devices([Path(tmp)])
+            R.gpu_devices([Path(tmp)], unfiltered=True)
+    assert seen == ["1", None], seen
+    devs = [{"name": "AMD Radeon RX 9070 XT", "arch": "gfx1201", "mem_gb": 16.0, "integrated": False}, {"name": "Radeon 7", "arch": "gfx1103", "mem_gb": 12.0, "integrated": True}]
+    with patch.object(HD, "_PROFILE", on_igpu), patch.object(C, "NATIVE_ROCM", True), patch.object(C, "DEVICE", "cuda:0"), patch.object(R, "gpu_devices", lambda *a, **k: devs):
+        blocks = _app.build_app()
+        radio = next(b for b in blocks.blocks.values() if getattr(b, "label", "") == "Active GPU for inference")
+        assert radio.interactive is False and "AMD Radeon 780M Graphics" in radio.value and "--gpu 0 = AMD Radeon RX 9070 XT" in radio.info, (radio.value, radio.info)
+        by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in blocks.fns}
+        out = by["on_gpu_select"].fn(_app._gpu_choice_label(next(g for g in on_igpu.gpus if "RX 9070 XT" in g.name)))
+        assert "--gpu 0 = AMD Radeon RX 9070 XT" in out and "--gpu 1 = Radeon 7" in out and "torch-directml" not in out and C.DEVICE == "cuda:0", out
+
+
+@test("Bridge: short of free commit it holds one model at a time and keeps the SDXL LoRAs; with room it keeps both; a refused SDXL load shows its reason")
+def _():
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    from PIL import Image
+    import app as _app
+    from backend import model_manager as MM
+
+    class Fake:
+        def __init__(self, name, model, log):
+            self.name, self.model, self.log = name, model, log
+            self.pipe = object() if model else None
+            self.current_model = model
+            self._lora_adapters, self.force_tiled_decode, self.last_seeds, self.refuse = {}, False, [5], False
+
+        def _unload(self):
+            self.log.append(f"unload {self.name}")
+            self.pipe, self.current_model, self._lora_adapters = None, None, {}
+
+        def load_model(self, path, vae=None):
+            self.log.append(f"load {self.name}")
+            if self.refuse:
+                return "❌ Not enough free memory"
+            self.pipe, self.current_model = object(), path
+            return "✅"
+
+        def _snapshot_clean_state(self):
+            pass
+
+        def _reload_all_loras(self):
+            self.log.append(f"loras {self.name} {sorted(self._lora_adapters)}")
+
+        def txt2img(self, *a, **k):
+            self.log.append("txt2img")
+            return [Image.new("RGB", (64, 64))], "s1"
+
+        def img2img(self, *a, **k):
+            self.log.append("img2img")
+            return [Image.new("RGB", (64, 64))], "s2"
+    fn = next(f.fn for f in _app.build_app().fns if getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "") == "do_bridge")
+    args = ("sd.safetensors", "1girl", "bad", 12, 7.0, 512, 512, "DPM++ 2M", 5, "xl.safetensors", "", 12, 6.0, 832, 1216, 0.4, "DPM++ 2M")
+
+    def run(free, refuse=False):
+        log = []
+        sd, xl = Fake("sd", None, log), Fake("xl", "xl.safetensors", log)
+        xl._lora_adapters = {0: ("a", "a.safetensors", 0.5)}
+        xl.refuse = refuse
+        with tempfile.TemporaryDirectory() as tmp, patch.object(_app, "_sd15", sd), patch.object(_app, "_sdxl", xl), patch.object(_app, "_save_outputs", lambda *a, **k: []), \
+                patch.object(_app, "_LAST_BRIDGE_FILE", Path(tmp) / "b.json"), patch.object(MM, "avail_commit_gb", lambda: free):
+            out = fn(*args, progress=lambda *a, **k: None)
+        return log, out[3]
+    log, status = run(30.0)
+    assert log == ["load sd", "txt2img", "img2img"] and "held one model" not in status, (log, status)
+    log, status = run(3.0)
+    assert log == ["unload xl", "load sd", "txt2img", "unload sd", "load xl", "loras xl [0]", "img2img"] and "held one model" in status, (log, status)
+    log, status = run(3.0, refuse=True)
+    assert "img2img" not in log and "Not enough free memory" in status, (log, status)
+
+
+@test("Watermark SD inpainting: the prompt names no text (it drew new letters), the Watermark tab starts from the same words")
+def _():
+    import re
+    import app as _app
+    from backend import watermark_remover as WR
+    assert not re.search(r"\b(text|watermark|logo|letters?)\b", WR.SD_INPAINT_PROMPT, re.I), WR.SD_INPAINT_PROMPT
+    box = next(b for b in _app.build_app().blocks.values() if getattr(b, "label", "") == "SD Inpainting Prompt (SD method only)")
+    assert box.value == WR.SD_INPAINT_PROMPT, box.value
+
+
+@test("ONNX exports: the TorchScript exporter on any torch, a failed export leaves no file and puts the model back on its device")
+def _():
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import MagicMock, patch
+    import torch
+    from backend import onnx_tools as OT, smartsplit_pipeline as SP, sdxl_pipeline as XL
+    seen = {}
+
+    def new_torch(model, args, path, dynamo=True, **k):
+        seen.update(k, dynamo=dynamo)
+
+    def old_torch(model, args, path, **k):
+        seen.update(k)
+
+    def bad(model, args, path, **k):
+        Path(path).write_bytes(b"half")
+        raise RuntimeError("export failed")
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "x.onnx"
+        with patch("torch.onnx.export", new_torch):
+            OT.export_onnx(object(), (), target, opset_version=17)
+        assert seen == {"opset_version": 17, "dynamo": False}, seen
+        seen.clear()
+        with patch("torch.onnx.export", old_torch):
+            OT.export_onnx(object(), (), target, opset_version=17)
+        assert seen == {"opset_version": 17}, seen
+        with patch("torch.onnx.export", bad):
+            try:
+                OT.export_onnx(object(), (), target)
+                raise AssertionError("no error")
+            except RuntimeError:
+                pass
+        assert not target.exists()
+
+        class Part(torch.nn.Linear):
+            def __init__(self):
+                super().__init__(1, 1)
+                self.moves = []
+
+            def cpu(self):
+                self.moves.append("cpu")
+                return self
+
+            def to(self, *a, **k):
+                self.moves.append(str(a[0]) if a else "to")
+                return self
+
+            def half(self):
+                return self
+
+            def float(self):
+                return self
+
+            def parameters(self, recurse=True):
+                return iter([MagicMock(device="cuda:7")])
+        te, vae = Part(), Part()
+        vae.config = MagicMock(latent_channels=4)
+        pipe = MagicMock(text_encoder=te, text_encoder_2=te, vae=vae)
+        pipe.tokenizer.return_value = {"input_ids": torch.zeros(1, 77, dtype=torch.long)}
+        pipe.tokenizer.model_max_length = pipe.tokenizer_2.model_max_length = 77
+        with patch.object(SP, "ONNX_CACHE_DIR", Path(tmp)), patch.object(XL, "ONNX_CACHE_DIR", Path(tmp)), patch.object(XL, "_force_eager_attention", lambda t: None), \
+                patch.object(SP, "export_onnx", bad), patch.object(XL, "export_onnx", bad):
+            for fn, part in ((SP._export_text_encoder_to_onnx, te), (SP._export_vae_decoder_to_onnx, vae), (XL._export_sdxl_te1_to_onnx, te), (XL._export_sdxl_te2_to_onnx, te)):
+                part.moves.clear()
+                try:
+                    fn(pipe, "stem")
+                    raise AssertionError("no error")
+                except RuntimeError:
+                    pass
+                assert part.moves[0] == "cpu" and part.moves[-1] == "cuda:7", (fn.__name__, part.moves)
+
+
+@test("SmartSplit says where a stage really runs; VAE → CPU decodes on the CPU in fp32 and leaves the shared VAE alone")
+def _():
+    from unittest.mock import MagicMock, patch
+    import torch
+    from backend import smartsplit_pipeline as SP
+    D = SP._session_device
+    assert D(None, "npu") == "dGPU" and D(MagicMock(get_providers=lambda: ["CPUExecutionProvider"]), "npu") == "CPU"
+    assert D(MagicMock(get_providers=lambda: ["DmlExecutionProvider", "CPUExecutionProvider"]), "igpu_directml") == "IGPU_DIRECTML"
+    assert D(SP._NPUSessionProxy(None, "x"), "npu") == "NPU"
+    with patch.object(SP.SmartSplitPipeline, "_setup", lambda self: None):
+        sp = SP.SmartSplitPipeline(object(), SP.SmartSplitConfig(enabled=True, text_encoder_device="igpu_directml", unet_device="cuda", vae_device="cpu"), "s")
+    assert (sp.te_on, sp.vae_on) == ("dGPU", "CPU")
+    sp.cfg, sp._te_session = SP.SmartSplitConfig(enabled=True, text_encoder_device="npu", unet_device="cuda", vae_device="cpu"), SP._NPUSessionProxy(None, "x")
+    for xdna1, want in ((True, "CPU"), (False, "NPU")):
+        with patch("backend.npu_bridge.is_xdna1", lambda: xdna1):
+            assert sp.te_on == want, xdna1
+    sp.cfg, sp._te_session = SP.SmartSplitConfig(enabled=True, text_encoder_device="igpu_directml", unet_device="cuda", vae_device="cpu"), None
+    assert "Text(dGPU)" in sp.timing_html({}) and "VAE(CPU)" in sp.timing_html({})
+
+    class VAE(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = torch.nn.Parameter(torch.ones(1, dtype=torch.float16))
+            self.config = MagicMock(scaling_factor=0.5)
+
+        def enable_tiling(self):
+            pass
+
+        def enable_slicing(self):
+            pass
+
+        def decode(self, z):
+            assert z.dtype == torch.float32 and self.w.dtype == torch.float32 and z.device.type == "cpu"
+            return MagicMock(sample=torch.zeros(1, 3, 8, 8))
+    sp.pipe = MagicMock(vae=VAE())
+    with patch.object(SP.gc, "collect", lambda: 0):
+        out = sp.decode_latents(torch.zeros(1, 4, 1, 1, dtype=torch.float16))
+    assert len(out) == 1 and out[0].size == (8, 8) and sp.pipe.vae.w.dtype == torch.float16
+
+
+@test("BLIP: on the GPU on native ROCm, on the CPU otherwise; captions make room when free commit is short")
+def _():
+    from unittest.mock import MagicMock, patch
+    import config as C
+    import app as _app
+    from backend import auto_tagger as AT, dataset_manager as DM, model_manager as MM
+    for native, device, want in ((True, "cuda:0", "cuda:0"), (True, "cpu", "cpu"), (False, "cuda:0", "cpu")):
+        with patch.object(C, "NATIVE_ROCM", native), patch.object(C, "DEVICE", device):
+            assert AT._blip_device() == want, (native, device)
+    fn = next(f.fn for f in _app.build_app().fns if getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "") == "do_autocaption")
+    for free, unloads in ((3.0, 1), (30.0, 0)):
+        sd, xl = MagicMock(), MagicMock()
+        with patch.object(_app, "_sd15", sd), patch.object(_app, "_sdxl", xl), patch.object(MM, "avail_commit_gb", lambda: free), patch.object(AT, "caption_batch", lambda *a, **k: {}), \
+                patch.object(DM, "scan_images", lambda f: [{"path": "x.png"}]):
+            assert "Captioned" in fn(".", "t", "p", progress=lambda *a, **k: None)
+        assert sd._unload.call_count == unloads and xl._unload.call_count == unloads
+
+
+@test("NPU bridge: a worker that says nothing is killed after the timeout instead of freezing the app, its stderr isn't a pipe nobody reads; accelerated text encoding exports nothing without an iGPU")
+def _():
+    import inspect
+    import subprocess
+    import sys
+    import time
+    from unittest.mock import patch
+    from backend import npu_bridge as NB, sdxl_pipeline as XL
+    b = NB.NPUBridge()
+    b._process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        t0 = time.time()
+        try:
+            b._recv(timeout=0.5)
+            raise AssertionError("no timeout")
+        except TimeoutError:
+            pass
+        assert time.time() - t0 < 10 and b._process.wait(timeout=10) is not None
+    finally:
+        b._process.kill()
+    assert "stderr=subprocess.PIPE" not in inspect.getsource(NB.NPUBridge.start)
+    b._process = None
+    called = []
+    with patch.object(XL, "_dml_igpu_id", lambda: (_ for _ in ()).throw(RuntimeError("no iGPU"))), patch.object(XL, "_export_sdxl_te1_to_onnx", lambda *a: called.append(1)), \
+            patch.object(XL, "_cached_model_stem", None):
+        try:
+            XL._get_ort_sessions(object(), "stem")
+            raise AssertionError("no error")
+        except RuntimeError:
+            pass
+    assert not called
+
+
+@test("Pause while hot: a PC with no thermal zone gets a warning, not a ✅, for a limit that can never wait")
+def _():
+    from unittest.mock import patch
+    import app as _app
+    from backend import sampling, thermal, ui_settings
+    keep_limit, keep_cool = thermal.GUARD["limit"], sampling.COOL["factor"]
+    try:
+        for temp, expect in ((None, "no thermal zone"), (61.0, "✅ Pausing above 88")):
+            with patch.object(thermal, "read_temp", lambda: temp), patch.object(_app, "_save_pref", lambda *a: None):
+                by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+                status = by["on_therm"].fn(88)[0]
+                assert expect in status and ("✅" in status) == (temp is not None), status
+                power = by["on_power_profile"].fn(ui_settings.POWER_LABELS["limited"])[0]
+                assert ("⚠ no wait above 88" in power) == (temp is None) and ("resume at 80" in power) == (temp is not None), power
+        assert "off" in ui_settings.pause_status(0, None)
+    finally:
+        thermal.GUARD["limit"], sampling.COOL["factor"] = keep_limit, keep_cool
+
+
 @test("Native ROCm: flash attention and cuDNN stay on, attention slicing stays off, ZLUDA's environment isn't forced; ZLUDA keeps all of it")
 def _():
     from unittest import mock

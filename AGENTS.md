@@ -31,7 +31,7 @@ AMD's native ROCm PyTorch instead (Python 3.12, no ZLUDA; see "Native ROCm PyTor
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 216-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 224-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -55,7 +55,7 @@ AMD's native ROCm PyTorch instead (Python 3.12, no ZLUDA; see "Native ROCm PyTor
 │       ├── wd_tagger.py           ← WD14 (wd-vit-tagger-v3 ONNX, CPU) image → Danbooru tags
 │       ├── model_hash.py          ← background SHA-256 cache (settings/_hash_cache.json) → A1111 "Model hash"
 │       ├── civitai_client.py, model_manager.py, tag_fetcher.py, trigger_reader.py
-│       ├── npu_bridge.py, vram_estimator.py, rocm_env.py (runtime + rocBLAS kernels per GPU arch)
+│       ├── npu_bridge.py, vram_estimator.py, rocm_env.py (runtime + rocBLAS kernels per GPU arch), onnx_tools.py (torch.onnx.export on either torch)
 │       └── help_content.py        ← bilingual (EN/中文) in-app Help tab — keep in sync with behaviour
 ├── installer/                     ← setup.bat/ps1 (fresh-PC bootstrap: Python, packages, ZLUDA, gfx1031 kernels)
 ├── python-3.10/                   ← portable Python (use this, not system python)
@@ -76,7 +76,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--zluda] [--gpu N] 
 ImageGenApp\install_rocm.bat                    :: native ROCm PyTorch in python-rocm\ (RX 9070 XT, 780M): launch.bat then uses it, --zluda keeps ZLUDA
 ImageGenApp\run_rocm.bat selftest_zluda.py      :: the same checks on native ROCm (run_rocm.bat smoke_gpu.py --sdxl too)
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 216 tests; NPU tests skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 224 tests; NPU tests skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -166,7 +166,13 @@ What differs from ZLUDA (`config.NATIVE_ROCM`, true when the `rocm_sdk` package 
 - **How many pictures:** a character LoRA from 9 pictures scored no better than no LoRA (CCIP 0.872 against 0.866, 405 steps); from 57 pictures, 570 steps, 0.905 against 0.881 at weight 0.8, and 0.886 at 1.0.
 - **A PC with only `python-rocm\`** (no `python-3.10\`, no ZLUDA): the launchers use that environment's Python to run `rocm_env.py`; `launch.bat` used to skip the GPU choice there and start on the system Python. `install_rocm.bat` refuses a folder too deep for the kernels' file names (`rocm_env.native_path_problem`): `python-rocm\` plus its longest file, 183 characters, must fit in Windows' 259 unless long paths are on, so the repo folder's path has about 63 characters to use. pip's own error for this is "No such file or directory".
 
+- **This torch has no MKL**, so CPU work is far slower than on `python-3.10\` (three 1500×1500 matmuls on the 8700G: 0.74 s against 0.05 s). A BLIP caption took 42-58 s on the CPU and 0.3-0.4 s on the GPU with the same words (14 s for the first, kernels), so BLIP runs on the GPU here. An SD 1.5 VAE decode on the CPU takes 44 s.
+- **Settings' GPU choice is read-only here** and says which `--gpu N` is which: the other GPUs aren't visible to this process (see "One visible GPU"). `detect_hardware` ranks the GPU in use first and treats a Windows-named iGPU as the one HIP lists ("Radeon 7" / "AMD Radeon 780M Graphics").
+- **ONNX exports** go through `onnx_tools.export_onnx`, because torch 2.14's default exporter needs onnxscript. SmartSplit then works here (SD 1.5, RX 9070 XT + 780M): text encoder on the iGPU 0.14 s, VAE on the iGPU 1.8 s against 0.29 s on the card. Its iGPU session takes DirectML's first adapter, since looking the iGPU up by name takes torch-directml: that is the 780M on this PC and isn't checked on any other. Accelerated SDXL text encoding needs that lookup, so it stays off here and says so.
+
 The real app driven over HTTP on native ROCm (8 Generate calls with Polish Cowboy shot / Full body / Full body — max detail / Wide shot, two LoRAs fused, two SDXL checkpoint switches): every call succeeded, the same recipe and seed after a switch there and back was identical (0.00/255), a repeat Cowboy shot with the eye pass took 5.8 s, a switch 27-30 s, free commit never under 4.6 GB. Each new picture size still costs its one-time kernel compile (Full body 40 s, Wide shot 79 s the first time).
+
+Every GPU handler was then driven through the real app on native ROCm (2026-11-02, RX 9070 XT, the default small page file): X/Y grid with CFG, Steps and Checkpoint axes, Auto-Loop with and without Stop, Inpaint (0/255 change more than 48 px outside the mask), Upscale with Real-ESRGAN and with the SD detail pass, folder upscale, watermark detect / LaMa / TELEA / SD / folder, Bridge, BLIP captions, Train Prepare + Start (SD 1.5, 12 steps), SmartSplit and the accelerated text encoder toggle. Each failure found is in Fix history, from the item on Settings' GPU choice on. Through `launch.bat --gpu 1` on the 780M: SD 1.5 512×768 20 steps 67 s, SDXL 832×1216 12 AYS steps with two LoRAs 156 s, lowest free commit 4.6 GB. The app has had no soak on this machine, and the machine's five Kernel-Power 41 resets of 2026-11-01 remain unexplained (none during this round).
 
 A process that spilled VRAM silently draws stripe garbage afterwards (seen under ZLUDA after an untiled 1248×1824 VAE decode: every later SD 1.5 picture, std 61, no error, RAM full and the SSD at 100 % during the spill). The app's tiled decode doesn't get there, and `smoke_gpu.py` now rejects such pictures by row noise (garbage 65, real pictures 1-12): its old std check passed them.
 
@@ -798,13 +804,14 @@ The Olive converter was convert-only: no generation path ever loaded its output.
 On <14 GB cards stage 2 frees SD 1.5 first (its LoRAs are restored at the start of the next run) and stage 1 uses a
 tiled VAE decode while SDXL is resident — otherwise the pair plus SDXL activations exceed 12 GB and WDDM spills.
 `[Bridge] …` lines in the console log allocated/reserved VRAM per stage. Runs take ~20 s warm.
+Both models also count against Windows' commit limit: each stage checks free commit (`BRIDGE_COMMIT_SD15_GB` 7, `BRIDGE_COMMIT_SDXL_GB` 5) and, when short, holds one model at a time, puts the SDXL LoRAs back and says so in the result. Lowest free commit 1.9 GB, against 0.3 GB before, on a 32 GB PC with the default page file (RX 9070 XT, native ROCm).
 
 ### SmartSplit & NPU
 SmartSplit is SD 1.5 only. XDNA1 NPU (8700G), measured on Ryzen AI 1.9.0: AMD's quantized test model runs on it (3.5 ms against 7.6 on
 the CPU, driver submissions counted) with AMD's quicktest options only (`target` X1 + an `xclbin` key, whose file 1.9.0 does not ship; a
 `config_file` session fails with `0xc01e0009`, `target` alone times out). SD's float CLIP opens no hardware context and takes the CPU's time
 (29.1 ms against 28.7) after a 25 s session build, so `SmartSplitConfig.auto` gives XDNA1 the iGPU instead. The worker's reported provider
-says VitisAI even then: judge by `xrt-smi examine --report aie-partitions`. The app's YOLO detectors get nothing either: a correctly quantized face detector keeps its boxes (241 of 241) but all 630 operators stay on the CPU, where it takes 13 ms anyway. AMD's `GenAI-SD` needs Strix / Krackan. So nothing in this pipeline runs on XDNA1 today. NPU tests skip when the Ryzen AI environment is absent.
+says VitisAI even then: judge by `xrt-smi examine --report aie-partitions`. The app's YOLO detectors get nothing either: a correctly quantized face detector keeps its boxes (241 of 241) but all 630 operators stay on the CPU, where it takes 13 ms anyway. AMD's `GenAI-SD` needs Strix / Krackan. So nothing in this pipeline runs on XDNA1 today, and SmartSplit reports a manual Text Encoder → NPU as CPU there (25 s for the session build on the first picture). NPU tests skip when the Ryzen AI environment is absent.
 
 ### Measured on RX 6800M (2026-09-26)
 Warm (2nd+ generation in a session): SD 1.5 512×768 20 steps: ~36 s → **7.5 s** · SD 1.5 img2img 5.5 s ·
@@ -865,7 +872,7 @@ Endpoints: `/models?query=&types=Checkpoint&baseModels=Pony&sort=Most+Downloaded
 
 Detection: EasyOCR text boxes → corner edge-density heuristic → logo expansion (Canny + contours) →
 merge boxes within 30 px → drop >50 % IoU duplicates. Inpainting: OpenCV TELEA/NS, LaMa ONNX (CPU only, ~2 s —
-DML still fails on its FFC MatMul with onnxruntime-directml 1.23, re-checked 2026-09-26), SD inpainting (uses loaded checkpoint). Blending: `cv2.seamlessClone`,
+DML still fails on its FFC MatMul with onnxruntime-directml 1.23, re-checked 2026-09-26), SD inpainting (uses loaded checkpoint; from a TELEA fill at strength 0.6, because from noise it drew letters, clothes or a face over the band). On a band across a character, mean difference from the clean picture: mark 38, LaMa 17, TELEA 26, SD 27. Blending: `cv2.seamlessClone`,
 feathered Gaussian fallback at image borders.
 
 ---
@@ -984,6 +991,14 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
 29. **`install_rocm.bat` couldn't find `rocm_env.py`** (2026-11-02): a stray carriage return in the path; the launcher test counts bare CRs now.
 30. **`smoke_gpu.py` passed a refused model load** (2026-11-02): it now asserts that the load message starts with ✅.
 31. **`launch.bat` never used native ROCm on a PC with only `python-rocm\`, and pip failed on too deep a folder with "No such file or directory"** (2026-11-02): see "Native ROCm PyTorch". Found on a fresh clone; a used checkout hid both.
+32. **Settings offered GPUs native ROCm can't reach** (2026-11-02): picking one said "install torch-directml"; under `--gpu 1` the card showed as selected and the 780M twice, and the upscaler and the VRAM estimate read the card's memory. See "Native ROCm PyTorch".
+33. **Pause while hot showed ✅ on a PC with no thermal zone**, where nothing can ever wait: a warning now.
+34. **The Bridge counted VRAM, not commit:** on a 16 GB card it held both models and took free commit to 0.3 GB. See "SD→SDXL Bridge".
+35. **SD watermark removal drew new letters** over the mark, with "no text, no watermark" in its prompt and a ✅ on screen; at strength 1.0 it also drew clothes or a face. See "Watermark remover".
+36. **Every ONNX export failed on torch 2.14, and a failed export on any backend left the model on the CPU:** the next picture died with "Expected all tensors to be on the same device". SmartSplit's status said ✅ all the same.
+37. **The NPU worker froze the app:** `NPUBridge._recv` never enforced its timeout and nothing read the worker's stderr pipe, which its 1200 lines of start-up output filled.
+38. **SmartSplit's labels and devices:** "VAE → CPU" ran on the dGPU and was labelled CPU; "Text Encoder → CPU" stayed on the CPU after SmartSplit was turned off; the worker stayed in memory; the labels now say where a stage really runs (XDNA1's float CLIP = CPU, see "SmartSplit & NPU").
+39. **Auto-Loop counted the batch a Stop interrupted** ("2 batches, 1 image"); accelerated text encoding exported 3 GB before finding out there was no iGPU; BLIP's load could take free commit to 0.5 GB beside an SDXL model (a generation model is unloaded first when under 5 GB).
 
 ## Troubleshooting
 

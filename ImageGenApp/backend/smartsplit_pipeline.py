@@ -37,6 +37,7 @@ from typing import Callable, Optional
 import numpy as np
 from PIL import Image
 
+from backend.onnx_tools import export_onnx
 from config import APP_DIR, get_torch_dtype
 
 ONNX_CACHE_DIR = APP_DIR / "onnx_cache"
@@ -270,39 +271,40 @@ def _export_text_encoder_to_onnx(pipe, model_stem: str) -> Path:
     # ONNX export must run on CPU — temporarily move there
     original_device = next(te.parameters()).device
     te.cpu()
+    try:
+        # torch 2.4's exporter crashes on CLIP's SDPA attention ("z_(): incompatible function arguments"): export an eager copy (same maths, rel. err 8e-7)
+        export_te = te
+        cfg = getattr(te, "config", None)
+        if getattr(cfg, "_attn_implementation", None) == "sdpa":
+            import copy
+            from transformers import CLIPTextModel
+            cfg = copy.copy(cfg)
+            cfg._attn_implementation = "eager"
+            export_te = CLIPTextModel(cfg).eval()
+            export_te.load_state_dict(te.state_dict())
 
-    # torch 2.4's exporter crashes on CLIP's SDPA attention ("z_(): incompatible function arguments"): export an eager copy (same maths, rel. err 8e-7)
-    export_te = te
-    cfg = getattr(te, "config", None)
-    if getattr(cfg, "_attn_implementation", None) == "sdpa":
-        import copy
-        from transformers import CLIPTextModel
-        cfg = copy.copy(cfg)
-        cfg._attn_implementation = "eager"
-        export_te = CLIPTextModel(cfg).eval()
-        export_te.load_state_dict(te.state_dict())
+        tokenizer = pipe.tokenizer
 
-    tokenizer = pipe.tokenizer
+        dummy = tokenizer(
+            ["dummy"], padding="max_length",
+            max_length=tokenizer.model_max_length,
+            return_tensors="pt",
+        )
+        input_ids = dummy["input_ids"]
 
-    dummy = tokenizer(
-        ["dummy"], padding="max_length",
-        max_length=tokenizer.model_max_length,
-        return_tensors="pt",
-    )
-    input_ids = dummy["input_ids"]
-
-    torch.onnx.export(
-        export_te,
-        (input_ids,),
-        str(onnx_path),
-        input_names=["input_ids"],
-        output_names=["last_hidden_state", "pooler_output"],
-        dynamic_axes={"input_ids": {0: "batch"}, "last_hidden_state": {0: "batch"}},
-        opset_version=17,
-        do_constant_folding=True,
-    )
-    # Restore original device
-    te.to(original_device)
+        export_onnx(
+            export_te,
+            (input_ids,),
+            onnx_path,
+            input_names=["input_ids"],
+            output_names=["last_hidden_state", "pooler_output"],
+            dynamic_axes={"input_ids": {0: "batch"}, "last_hidden_state": {0: "batch"}},
+            opset_version=17,
+            do_constant_folding=True,
+        )
+    finally:
+        # Restore original device: a failed export must not leave the encoder on the CPU, the dGPU path uses it next
+        te.to(original_device)
     print("[SmartSplit] Text encoder ONNX export done.")
     return onnx_path
 
@@ -320,8 +322,9 @@ def _export_vae_decoder_to_onnx(pipe, model_stem: str) -> Path:
     vae = pipe.vae.eval()
 
     # ONNX export must run on CPU — temporarily move there
-    original_device = next(vae.parameters()).device
-    vae.cpu()
+    first = next(vae.parameters())
+    original_device, original_dtype = first.device, first.dtype
+    vae.cpu().float()       # an fp16 VAE refuses the fp32 latents, and the session gets fp32 latents too
 
     # Wrap decode step (latents → image)
     class VAEDecodeWrapper(torch.nn.Module):
@@ -336,23 +339,35 @@ def _export_vae_decoder_to_onnx(pipe, model_stem: str) -> Path:
     latent_channels = vae.config.latent_channels
     dummy_latent = torch.randn(1, latent_channels, 64, 64)
 
-    torch.onnx.export(
-        wrapper,
-        (dummy_latent,),
-        str(onnx_path),
-        input_names=["latents"],
-        output_names=["images"],
-        dynamic_axes={
-            "latents": {0: "batch", 2: "height", 3: "width"},
-            "images":  {0: "batch", 2: "img_height", 3: "img_width"},
-        },
-        opset_version=17,
-        do_constant_folding=True,
-    )
-    # Restore original device
-    vae.to(original_device)
+    try:
+        export_onnx(
+            wrapper,
+            (dummy_latent,),
+            onnx_path,
+            input_names=["latents"],
+            output_names=["images"],
+            dynamic_axes={
+                "latents": {0: "batch", 2: "height", 3: "width"},
+                "images":  {0: "batch", 2: "img_height", 3: "img_width"},
+            },
+            opset_version=17,
+            do_constant_folding=True,
+        )
+    finally:
+        # Restore original device
+        vae.to(original_device, dtype=original_dtype)
     print("[SmartSplit] VAE decoder ONNX export done.")
     return onnx_path
+
+
+def _session_device(session, asked: str) -> str:
+    """Where an offloaded stage really runs: no session = the dGPU (its export failed), a session that fell back to the CPU provider = the CPU."""
+    if session is None:
+        return "dGPU"
+    providers = getattr(session, "get_providers", None)
+    if providers and providers()[0] == "CPUExecutionProvider":
+        return "CPU"
+    return asked.upper()
 
 
 def _ort_session(onnx_path: Path, ep: str):
@@ -468,6 +483,20 @@ class SmartSplitPipeline:
                 print(f"[SmartSplit] VAE offload failed ({e}), using dGPU")
                 self._vae_session = None
 
+    @property
+    def te_on(self) -> str:
+        asked = self.cfg.text_encoder_device
+        if asked == "npu" and isinstance(self._te_session, _NPUSessionProxy):
+            from backend.npu_bridge import is_xdna1
+            if is_xdna1():      # SD's float CLIP opens no hardware context there and takes the CPU's time, though the provider says VitisAI
+                return "CPU"
+        return _session_device(self._te_session, asked) if asked in ("npu", "igpu_directml") else asked.upper()
+
+    @property
+    def vae_on(self) -> str:
+        asked = self.cfg.vae_device
+        return _session_device(self._vae_session, asked) if asked == "igpu_directml" else asked.upper()
+
     # ── NPU bridge setup ─────────────────────────────────────────────────────
     def _setup_npu_te(self, onnx_path: Path):
         """Start NPU bridge and return a proxy that quacks like an ort session."""
@@ -551,6 +580,24 @@ class SmartSplitPipeline:
                 return torch.cat([neg, pos])
 
     # ── VAE decoding ──────────────────────────────────────────────────────────
+    def _decode_on_cpu(self, latents) -> list[Image.Image]:
+        import torch
+        scale = getattr(self.pipe.vae.config, "scaling_factor", 0.18215)
+        # Cast to float32: VAE was loaded in fp16 for the GPU, but CPU needs fp32
+        vae_cpu = copy.deepcopy(self.pipe.vae).to("cpu").float()
+        lat_cpu = latents.cpu().float()
+        vae_cpu.enable_tiling()
+        vae_cpu.enable_slicing()
+        with torch.no_grad():
+            decoded = vae_cpu.decode(lat_cpu / scale).sample
+        del vae_cpu, lat_cpu
+        gc.collect()
+        decoded = ((decoded / 2 + 0.5).clamp(0, 1) * 255).byte()
+        return [
+            Image.fromarray(decoded[i].permute(1, 2, 0).numpy())
+            for i in range(decoded.shape[0])
+        ]
+
     def decode_latents(self, latents) -> list[Image.Image]:
         """Decode latents using iGPU DirectML ONNX session or dGPU."""
         import torch
@@ -573,24 +620,13 @@ class SmartSplitPipeline:
             except Exception as e:
                 print(f"[SmartSplit] VAE decode failed on GPU ({e}), falling back to CPU VAE decode (slow but safe)...")
                 try:
-                    scale = getattr(self.pipe.vae.config, "scaling_factor", 0.18215)
-                    # Cast to float32: VAE was loaded in fp16 for DML, but CPU needs fp32
-                    vae_cpu = copy.deepcopy(self.pipe.vae).to("cpu").float()
-                    lat_cpu = latents.cpu().float()
-                    vae_cpu.enable_tiling()
-                    vae_cpu.enable_slicing()
-                    with torch.no_grad():
-                        decoded = vae_cpu.decode(lat_cpu / scale).sample
-                    del vae_cpu, lat_cpu
-                    gc.collect()
-                    decoded = ((decoded / 2 + 0.5).clamp(0, 1) * 255).byte()
-                    return [
-                        Image.fromarray(decoded[i].permute(1, 2, 0).numpy())
-                        for i in range(decoded.shape[0])
-                    ]
+                    return self._decode_on_cpu(latents)
                 except Exception as e2:
                     print(f"[SmartSplit] CPU VAE fallback also failed: {e2}")
                     raise
+
+        if self.cfg.vae_device == "cpu":
+            return self._decode_on_cpu(latents)
 
         if self._vae_session is not None:
             # Transfer latents from dGPU to CPU numpy for iGPU ONNX session
@@ -807,9 +843,9 @@ class SmartSplitPipeline:
         """Return a one-line description of the active split for display."""
         if not self.cfg.enabled:
             return "SmartSplit: off"
-        te  = self.cfg.text_encoder_device.upper()
+        te  = self.te_on
         un  = self.cfg.unet_device.upper()
-        vae = self.cfg.vae_device.upper()
+        vae = self.vae_on
         return f"SmartSplit: Text→{te}  UNet→{un}  VAE→{vae}"
 
     def timing_html(self, timing: dict[str, float]) -> str:
@@ -819,8 +855,8 @@ class SmartSplitPipeline:
         tot = timing.get("total_s", 0)
         return (
             f'<span style="font-size:13px;color:#a6adc8;">'
-            f'Text({self.cfg.text_encoder_device.upper()}):{te:.2f}s  '
+            f'Text({self.te_on}):{te:.2f}s  '
             f'UNet({self.cfg.unet_device.upper()}):{un:.1f}s  '
-            f'VAE({self.cfg.vae_device.upper()}):{vae:.2f}s  '
+            f'VAE({self.vae_on}):{vae:.2f}s  '
             f'Total:{tot:.1f}s</span>'
         )

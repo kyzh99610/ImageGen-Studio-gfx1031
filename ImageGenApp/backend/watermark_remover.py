@@ -577,6 +577,10 @@ def inpaint_lama(
     return result
 
 
+SD_INPAINT_PROMPT = "seamless background, clean"       # never name text here: "no text, no watermark" in the prompt drew new letters where the mark was
+SD_INPAINT_STRENGTH = 0.6       # over an OpenCV fill: at 1.0 the model redrew the band from noise and invented clothes, a face or letters
+
+
 def inpaint_sd(
     image: Image.Image,
     mask: Image.Image,
@@ -628,7 +632,7 @@ def inpaint_sd(
         cy = (y1 + y2) // 2
         y1 = max(0, min(H - min_side, cy - min_side // 2)); y2 = y1 + min_side
     box = (int(x1), int(y1), int(x2), int(y2))
-    crop, crop_mask = image.crop(box), mask.convert("L").crop(box)
+    crop, crop_mask = inpaint_opencv(image, mask).crop(box), mask.convert("L").crop(box)
 
     # Scale the crop so its long side is the model's native size (multiple of 8)
     cw, ch = crop.size
@@ -640,19 +644,22 @@ def inpaint_sd(
     # from_pipe defaults to float32 and would upcast the shared generation model
     inp_pipe = _Inpaint.from_pipe(sd_pipeline.pipe, torch_dtype=sd_pipeline.dtype)
 
+    run_steps = max(1, int(steps * SD_INPAINT_STRENGTH))
+
     def _cb(pipe, i, t, kw):
         if progress_callback:
-            progress_callback(0.1 + 0.75 * (i + 1) / steps, f"SD inpainting step {i + 1}/{steps}")
+            progress_callback(0.1 + 0.75 * (i + 1) / run_steps, f"SD inpainting step {i + 1}/{run_steps}")
         return kw
 
     if progress_callback:
         progress_callback(0.1, f"Inpainting a {cw}×{ch} region at {rw}×{rh}…")
     with torch.inference_mode():
         out = inp_pipe(
-            prompt=prompt or "seamless background, clean, no text, no watermark",
+            prompt=prompt or SD_INPAINT_PROMPT,
             negative_prompt="text, watermark, logo, letters, signature",
             image=crop.resize((rw, rh), Image.LANCZOS),
             mask_image=crop_mask.resize((rw, rh), Image.NEAREST),
+            strength=SD_INPAINT_STRENGTH,
             width=rw, height=rh,
             num_inference_steps=steps,
             guidance_scale=7.5,

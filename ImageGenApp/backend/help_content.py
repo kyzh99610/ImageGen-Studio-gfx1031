@@ -676,13 +676,13 @@ def parameters_html() -> str:
             ["🌉 SD→SDXL Bridge",
              "A base picture from an SD 1.5 model refined by an SDXL / Pony / Illustrious model (img2img, denoise ~0.4): the same seed in both stages, an SDXL prompt of its own (empty = the stage-1 prompt), "
              "<code>&lt;lora:name:0.8&gt;</code> tags in the prompt go to the SD 1.5 stage, {a|b} / __name__ wildcards are resolved from the seed (the same picks in both stages; both PNGs keep the template). "
-             "On a 12 GB card the SD 1.5 model is freed before stage 2 and reloads with its LoRAs on the next run. Measured with 24 + 24 steps, 512×768 → 832×1216: ~83 s cold, ~55 s warm, no memory spill. Both stages are saved with their records (stage 1 txt2img, stage 2 img2img with the stage-1 picture as its source).",
+             "On a 12 GB card, or whenever free memory (RAM + page file) is short, one model is freed before the other stage and reloads with its LoRAs. Measured with 24 + 24 steps, 512×768 → 832×1216: ~83 s cold, ~55 s warm, no memory spill. Both stages are saved with their records (stage 1 txt2img, stage 2 img2img with the stage-1 picture as its source).",
              _cn("用 SD 1.5 模型出底图，再用 SDXL / Pony / Illustrious 模型以图生图精修（降噪约 0.4）：两个阶段用同一个种子，SDXL 阶段可有自己的提示词（留空 = 沿用第一阶段）；提示词里的 <lora:名称:0.8> 标签用于 SD 1.5 阶段；{a|b} / __name__ 通配符按种子解析（两个阶段选择相同，两张图都保存模板）。"
-                 "12 GB 显卡上，第二阶段前会释放 SD 1.5 模型，下次运行时连同 LoRA 重新加载。24 + 24 步、512×768 → 832×1216 实测：冷启动约 83 秒，之后约 55 秒，无内存溢出。两个阶段都保存各自的记录。")],
+                 "12 GB 显卡上，或可用内存（RAM + 页面文件）不足时，会先释放另一个模型，之后连同 LoRA 重新加载。24 + 24 步、512×768 → 832×1216 实测：冷启动约 83 秒，之后约 55 秒，无内存溢出。两个阶段都保存各自的记录。")],
             ["🗑 Watermark remover",
              "Auto-detect (EasyOCR text regions + a corner heuristic, grown over surrounding graphics) plus a red brush for what it misses; switch OCR off to paint the regions yourself and keep wanted text. "
-             "Methods: LaMa (default, ~7 s, CPU), OpenCV (instant, thin text only), SD inpainting (repaints with the loaded model, can invent objects). 📁 Batch cleans a whole folder into outputs/cleaned_<folder>/. Saved as <source>_clean.png, never over an earlier result.",
-             _cn("自动检测（EasyOCR 文字区域 + 角落启发式，并向周围图形扩展），漏掉的用红色画笔补涂；关闭 OCR 可只手动涂抹、保留需要的文字。方法：LaMa（默认，约 7 秒，CPU）、OpenCV（瞬间，只适合细字）、SD 局部重绘（用已加载模型重画，可能凭空多出物体）。📁 批量：整个文件夹清理到 outputs/cleaned_<文件夹>/。保存为 <原名>_clean.png，不会覆盖旧结果。")],
+             "Methods: LaMa (default, ~7 s, CPU), OpenCV (instant, thin text only), SD inpainting (fills the mask, then repaints it with the loaded model; LaMa stays cleaner on a long mark). 📁 Batch cleans a whole folder into outputs/cleaned_<folder>/. Saved as <source>_clean.png, never over an earlier result.",
+             _cn("自动检测（EasyOCR 文字区域 + 角落启发式，并向周围图形扩展），漏掉的用红色画笔补涂；关闭 OCR 可只手动涂抹、保留需要的文字。方法：LaMa（默认，约 7 秒，CPU）、OpenCV（瞬间，只适合细字）、SD 局部重绘（先填充再用已加载模型重画；长条水印仍是 LaMa 更干净）。📁 批量：整个文件夹清理到 outputs/cleaned_<文件夹>/。保存为 <原名>_clean.png，不会覆盖旧结果。")],
             ["🌐 Civitai Hub",
              "Search / filter (type, base model, rating, sort) and download models and LoRAs; files go to the right folders and show up in the Generate tab at once. Downloads are written as .part and renamed when complete, an interrupted one resumes where it stopped. "
              "An API key (saved on this PC) is needed for adult content and some downloads; the app says so when a download was refused for lack of one.",
@@ -1144,7 +1144,7 @@ def hardware_html() -> str:
              _cn("将CUDA指令翻译为AMD HIP，让PyTorch/Diffusers把你的AMD GPU当作NVIDIA使用。由launch.bat自动启用。主要后端。")],
             ["<b>Native ROCm</b>",
              "AMD's own PyTorch for an RX 9070 XT or a 780M: about twice as fast, no ZLUDA. Run <code>install_rocm.bat</code> once and <code>launch.bat</code> uses it by itself "
-             "(<code>launch.bat --zluda</code> keeps ZLUDA). cuDNN/MIOpen stays on there.",
+             "(<code>launch.bat --zluda</code> keeps ZLUDA). cuDNN/MIOpen stays on there. One GPU per start: <code>launch.bat --gpu N</code> picks it, Settings only shows it.",
              _cn("AMD官方PyTorch，适用于RX 9070 XT和780M：速度约为ZLUDA的两倍，不需要ZLUDA。运行一次 install_rocm.bat，之后 launch.bat 会自动使用（launch.bat --zluda 可继续用ZLUDA）。此时cuDNN/MIOpen保持开启。")],
             ["<b>dGPU (RX 6800M / RX 6800 XT / RX 9070 XT)</b>",
              "Runs text encoders, UNet and VAE decode via ZLUDA or native ROCm. Under ZLUDA cuDNN/MIOpen is disabled "
@@ -1195,7 +1195,7 @@ def hardware_html() -> str:
 
     h += '<div class="hg-h3">SmartSplit (SD 1.5 Only) &nbsp;<span class="cn">多设备分流（仅SD 1.5）</span></div>'
     h += """<ol style="color:#cdd6f4;font-size:13px;line-height:2;">
-<li>Launch via <code>launch.bat</code> (ZLUDA must be active for dGPU detection).</li>
+<li>Launch via <code>launch.bat</code> (ZLUDA or native ROCm must be active for dGPU detection).</li>
 <li>Go to <b>⚙️ Settings</b> tab → <b>SmartSplit</b> section.</li>
 <li>If it shows as <em>capable</em>, check <b>Enable SmartSplit</b>.</li>
 <li>Choose Text Encoder device (CPU / iGPU — or NPU when one is detected) and VAE device (CPU / iGPU).</li>

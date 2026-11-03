@@ -187,6 +187,10 @@ civitai  = CivitaiClient()
 
 # ── Bridge: SD 1.5 LoRAs to restore after the model was freed for the SDXL stage ──
 _bridge_sd15_loras: dict[str, dict] = {}
+# Both models stay loaded on a big card, but they also count against Windows' commit limit: with an SDXL model and earlier jobs' memory held, a Bridge run on a
+# 32 GB PC with the default page file reached 0.3 GB free (RX 9070 XT, native ROCm). Free commit (GB) a stage wants before the other model is let go: an SD 1.5 load + first picture took 5.4.
+BRIDGE_COMMIT_SD15_GB = 7.0
+BRIDGE_COMMIT_SDXL_GB = 5.0
 
 # ── SmartSplit state ───────────────────────────────────────────────────────────
 _smartsplit_cap:    SmartSplitCapability | None = None
@@ -275,6 +279,14 @@ def _gpu_choice_label(g: GPUInfo) -> str:
     rdna = f"RDNA{g.rdna_gen}" if g.rdna_gen else "GPU"
     star = "★ " if g == get_profile().best_gpu else ""
     return f"{star}GPU {g.index}: {g.name}  {tag}  {vram}  {rdna}"
+
+
+def _native_gpu_note() -> str:
+    """Native ROCm runs one GPU per start (config.py hides the rest before torch loads), so another GPU means a restart: which --gpu number is which."""
+    from backend import rocm_env
+    devs = rocm_env.gpu_devices(unfiltered=True)
+    picks = ", ".join(f"--gpu {i} = {d['name']} ({d['arch']})" for i, d in enumerate(devs)) or "--gpu N"
+    return f"★ = in use. Native ROCm runs one GPU per start: to use another one, close the app and start launch.bat with {picks}."
 
 
 def _npu_badge(npu: NPUInfo) -> str:
@@ -2665,6 +2677,7 @@ def _build_generate_tab():
         max_batches = int(max_batches) if max_batches else 0
         delay = max(0, float(delay))
         batch_num = 0
+        done = 0
         total_images = 0
         last_error = ""
         start_time = time.time()
@@ -2695,6 +2708,7 @@ def _build_generate_tab():
                         init_img, strength, use_i2i, auto_quality=auto_quality, extra=extra,
                     )
                     total_images += len(imgs)
+                    done += 1 if imgs else 0
                 except _GenerationAborted:
                     break
                 except Exception as exc:
@@ -2732,9 +2746,6 @@ def _build_generate_tab():
             _generation_abort.clear()
 
         elapsed = _fmt_elapsed(time.time() - start_time)
-        done = batch_num - (1 if last_error else 0)
-        if max_batches > 0:
-            done = min(done, max_batches)
         if last_error:
             final_html = (
                 f'<p style="color:#f38ba8;font-size:13px;">❌ <b>Auto-Loop stopped</b> — {last_error} '
@@ -4529,6 +4540,17 @@ def _build_bridge_tab():
                 pass
             if not sd15_model:
                 return None, None, [], '<p style="color:#f38ba8;">❌ Pick an SD 1.5 model.</p>'
+
+            def _commit_short(gb):
+                from backend.model_manager import avail_commit_gb
+                free = avail_commit_gb()
+                return free is not None and free < gb
+
+            xl_kept = None
+            if _sdxl.pipe is not None and _commit_short(BRIDGE_COMMIT_SD15_GB):
+                xl_kept = (_sdxl.current_model, dict(_sdxl._lora_adapters))
+                _sdxl._unload()
+                _vram_log("SDXL freed (free commit is short)")
             if _sd15.current_model != sd15_model or _sd15.pipe is None:
                 progress(0.0, desc=f"Loading {Path(str(sd15_model)).stem}…")
                 msg = _sd15.load_model(str(sd15_model))
@@ -4615,10 +4637,18 @@ def _build_bridge_tab():
                 **({"prompt_template": wc_template["prompt"], "negative_template": wc_template["negative"] or None} if wc_template else {}),
             ), pipe=_sd15)
 
+            model_path = sdxl_model_choice or (xl_kept[0] if xl_kept else None)
+            # Extract path from tuple if needed (dropdown returns tuple value)
+            if isinstance(model_path, (list, tuple)):
+                model_path = model_path[1] if len(model_path) > 1 else model_path[0]
+            xl_must_load = _sdxl.pipe is None or (model_path and _sdxl.current_model != model_path)
+            from backend.model_manager import commit_problem
+            commit_short = _commit_short(BRIDGE_COMMIT_SDXL_GB) or bool(xl_must_load and model_path and commit_problem(model_path))
+
             # SD 1.5 + SDXL + SDXL's working memory don't fit in 12 GB: Windows would
             # spill to system RAM (stage 2 went from ~6 s to ~60 s). Free SD 1.5 on
-            # smaller cards; it reloads (with its LoRAs) at the start of the next run.
-            if small_card:
+            # smaller cards, or when commit is short; it reloads (with its LoRAs) at the start of the next run.
+            if small_card or commit_short:
                 _bridge_sd15_loras[str(_sd15.current_model)] = dict(_sd15._lora_adapters)
                 progress(0.44, desc="Freeing SD 1.5 VRAM for the SDXL stage…")
                 _sd15._unload()
@@ -4630,20 +4660,26 @@ def _build_bridge_tab():
             progress(0.45, desc="Stage 2: Preparing SDXL…")
 
             # Load the chosen SDXL model if it isn't the one in memory
-            if _sdxl.pipe is None or (sdxl_model_choice and _sdxl.current_model != sdxl_model_choice):
-                if sdxl_model_choice:
-                    # Extract path from tuple if needed (dropdown returns tuple value)
-                    model_path = sdxl_model_choice
-                    if isinstance(model_path, (list, tuple)):
-                        model_path = model_path[1] if len(model_path) > 1 else model_path[0]
+            if xl_must_load:
+                if model_path:
                     progress(0.45, desc="Stage 2: Loading SDXL model…")
                     try:
-                        _sdxl.load_model(str(model_path))
+                        load_msg = _sdxl.load_model(str(model_path))
                     except Exception as e:
                         return (
                             base_image, None, [base_image],
                             f'<p style="color:#f38ba8;">❌ Failed to load SDXL model: {e}</p>'
                         )
+                    if _sdxl.pipe is None:      # refused: not enough free memory
+                        return base_image, None, [base_image], f'<p style="color:#f38ba8;">{load_msg}</p>'
+                    if xl_kept and xl_kept[1] and str(model_path) == str(xl_kept[0]):
+                        _sdxl._lora_adapters = dict(xl_kept[1])
+                        _sdxl._snapshot_clean_state()
+                        try:
+                            _sdxl._reload_all_loras()
+                        except Exception as e:
+                            print(f"[Bridge] Could not re-apply SDXL LoRAs: {e}")
+                            _sdxl._lora_adapters = {}
                 else:
                     return (
                         base_image, None, [base_image],
@@ -4703,6 +4739,9 @@ def _build_bridge_tab():
                     status += ('<p style="color:#f9e2af;font-size:13px;">⚠ Unknown wildcard(s): '
                                + ", ".join(f"<code>__{html.escape(m)}__</code>" for m in dict.fromkeys(wc_missing))
                                + " — add a .txt file to ImageGenApp/wildcards/ or models/wildcards/</p>")
+            if xl_kept or (commit_short and not small_card):
+                status += ('<p style="color:#f9e2af;font-size:13px;">ℹ Free memory (RAM + page file) was short, so the Bridge held one '
+                           'model at a time; a larger page file avoids the reload.</p>')
             if tag_notes:
                 status += ('<p style="color:#89b4fa;font-size:13px;">🧬 LoRA tags from the prompt: '
                            + " · ".join(tag_notes) + "</p>")
@@ -5067,7 +5106,7 @@ def _build_watermark_tab():
     from backend.watermark_remover import (
         detect_all, build_mask, merge_masks,
         overlay_detections, regions_to_text,
-        inpaint_opencv, inpaint_lama, inpaint_sd,
+        inpaint_opencv, inpaint_lama, inpaint_sd, SD_INPAINT_PROMPT,
         is_ocr_available, is_lama_available,
     )
 
@@ -5188,7 +5227,7 @@ def _build_watermark_tab():
                 )
                 wm_sd_prompt = gr.Textbox(
                     label="SD Inpainting Prompt (SD method only)",
-                    value="seamless background, clean, no text, no watermark",
+                    value=SD_INPAINT_PROMPT,
                     visible=False,
                     info="Describes what should replace the watermark. Only used "
                          "with the SD Inpainting method.",
@@ -6364,11 +6403,14 @@ def _build_settings_tab():
                 best_idx    = next(
                     (i for i, g in enumerate(profile.gpus) if g == profile.best_gpu), 0
                 )
+                import config as _gpu_cfg
+                native_run = _gpu_cfg.NATIVE_ROCM and str(_gpu_cfg.DEVICE).startswith("cuda")
                 gpu_radio = gr.Radio(
                     choices=gpu_choices,
                     value=gpu_choices[best_idx] if gpu_choices else None,
                     label="Active GPU for inference",
-                    info="★ = auto-selected best GPU. You can override this.",
+                    info=_native_gpu_note() if native_run else "★ = auto-selected best GPU. You can override this.",
+                    interactive=not native_run,
                 )
                 gpu_status = gr.HTML("")
 
@@ -6504,6 +6546,9 @@ def _build_settings_tab():
                     global _smartsplit_cfg, _smartsplit_pipe
                     _cap_now = _get_smartsplit_cap()
                     is_dml_split = enabled and _cap_now.dgpu_dml_idx >= 0
+                    if not enabled or te_dev != "npu":      # the worker and its session would stay in memory for nothing
+                        from backend.npu_bridge import get_npu_bridge
+                        get_npu_bridge().stop()
 
                     if is_dml_split:
                         # DirectML multi-GPU mode — auto-configured, no ZLUDA needed
@@ -6553,6 +6598,10 @@ def _build_settings_tab():
                                 stem = Path(prev).stem
                                 _smartsplit_pipe = SmartSplitPipeline(sd.pipe, _smartsplit_cfg, stem)
                                 msg = f'<p style="color:#a6e3a1;">✅ {_smartsplit_cfg.describe()}{reload_msg}</p>'
+                                te_on, vae_on = _smartsplit_pipe.te_on, _smartsplit_pipe.vae_on
+                                if not is_dml_split and (te_on, vae_on) != (te_dev.upper(), vae_dev.upper()):
+                                    msg += (f'<p style="color:#f9e2af;">⚠ It really runs: Text Encoder → {te_on}, VAE Decode → {vae_on}. '
+                                            f'The console says why.</p>')
                             except Exception as e:
                                 msg = f'<p style="color:#f38ba8;">❌ SmartSplit init failed: {e}</p>'
                         else:
@@ -6560,6 +6609,8 @@ def _build_settings_tab():
                     elif enabled:
                         msg = '<p style="color:#f5c6a0;">⚠ Load a model in Generate first, then re-apply.</p>'
                     else:
+                        if _sd15.pipe is not None and hasattr(_sd15.pipe, "text_encoder"):      # "Text Encoder → cpu" moved it off the GPU
+                            _sd15.pipe.text_encoder.to(_sd15.device)
                         msg = '<p style="color:#a6adc8;">SmartSplit disabled.</p>'
                     return msg
 
@@ -6578,12 +6629,15 @@ def _build_settings_tab():
 
             # ── Accelerated TE toggle handler ─────────────────────────────
             def on_accel_te_toggle(enabled):
-                from backend.sdxl_pipeline import set_sdxl_npu_te
+                from backend.sdxl_pipeline import set_sdxl_npu_te, _get_igpu_device
+                if enabled and _get_igpu_device() is None:      # finding the iGPU's DirectML number takes torch-directml, which native ROCm's environment doesn't have
+                    set_sdxl_npu_te(False)
+                    return gr.update(value=False, info="⚠ No iGPU reachable through torch-directml here, so this stays off. The text encoders run on the GPU as usual.")
                 set_sdxl_npu_te(enabled)
                 state = "✅ enabled — iGPU DML" if enabled else "disabled"
                 return gr.update(info=f"Accelerated text encoding {state}")
 
-            npu_sdxl_te.change(
+            npu_sdxl_te.input(
                 on_accel_te_toggle,
                 [npu_sdxl_te],
                 [npu_sdxl_te],
@@ -6597,6 +6651,8 @@ def _build_settings_tab():
         g = next((g for g in profile.gpus if f"GPU {g.index}:" in (choice or "")), None)
         if g is None:
             return '<p style="color:#f38ba8;">❌ Unknown GPU selection.</p>'
+        if _cfg.NATIVE_ROCM and g.backend != "cuda_zluda":      # the radio is read-only there, the API isn't
+            return f'<p style="color:#f9e2af;">{_native_gpu_note()}</p>'
         if g.backend == "cuda_zluda":
             set_active_gpu(max(g.hip_index, 0), backend="cuda")
         elif g.backend == "directml":

@@ -18,6 +18,7 @@ import numpy as np
 from PIL import Image
 
 import config as _cfg
+from backend.onnx_tools import export_onnx
 from backend.prompt_syntax import plain_prompt
 from config import (
     CHECKPOINTS_DIR, LORAS_DIR,
@@ -267,15 +268,17 @@ def _export_sdxl_te1_to_onnx(pipe, model_stem: str) -> Path:
             warnings.filterwarnings("ignore", category=TracerWarning)
         except ImportError:
             pass
-        torch.onnx.export(
-            wrapper, (dummy,), str(onnx_path),
-            input_names=["input_ids"],
-            output_names=["hidden_states"],
-            dynamic_axes={"input_ids": {0: "batch"}, "hidden_states": {0: "batch"}},
-            opset_version=17,
-            do_constant_folding=True,
-        )
-    te.half().to(orig_dev)
+        try:
+            export_onnx(
+                wrapper, (dummy,), onnx_path,
+                input_names=["input_ids"],
+                output_names=["hidden_states"],
+                dynamic_axes={"input_ids": {0: "batch"}, "hidden_states": {0: "batch"}},
+                opset_version=17,
+                do_constant_folding=True,
+            )
+        finally:    # a failed export must not leave the encoder on the CPU: the normal path uses it next
+            te.half().to(orig_dev)
     print(f"[SDXL Accel-TE] CLIP-L export done ({onnx_path.stat().st_size // 1024 // 1024} MB)")
     return onnx_path
 
@@ -320,19 +323,21 @@ def _export_sdxl_te2_to_onnx(pipe, model_stem: str) -> Path:
             warnings.filterwarnings("ignore", category=TracerWarning)
         except ImportError:
             pass
-        torch.onnx.export(
-            wrapper, (dummy,), str(onnx_path),
-            input_names=["input_ids"],
-            output_names=["hidden_states", "text_embeds"],
-            dynamic_axes={
-                "input_ids": {0: "batch"},
-                "hidden_states": {0: "batch"},
-                "text_embeds": {0: "batch"},
-            },
-            opset_version=17,
-            do_constant_folding=True,
-        )
-    te.half().to(orig_dev)
+        try:
+            export_onnx(
+                wrapper, (dummy,), onnx_path,
+                input_names=["input_ids"],
+                output_names=["hidden_states", "text_embeds"],
+                dynamic_axes={
+                    "input_ids": {0: "batch"},
+                    "hidden_states": {0: "batch"},
+                    "text_embeds": {0: "batch"},
+                },
+                opset_version=17,
+                do_constant_folding=True,
+            )
+        finally:
+            te.half().to(orig_dev)
 
     # Total size includes external data files
     total_bytes = sum(f.stat().st_size for f in model_dir.iterdir())
@@ -389,10 +394,10 @@ def _get_ort_sessions(pipe, model_stem: str):
 
     import onnxruntime as ort
 
+    dml_id = _dml_igpu_id()     # first: without an iGPU the exports below are 3 GB of nothing
     te1_path = _export_sdxl_te1_to_onnx(pipe, model_stem)
     te2_path = _export_sdxl_te2_to_onnx(pipe, model_stem)
 
-    dml_id = _dml_igpu_id()
     opts = ort.SessionOptions()
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     providers = [

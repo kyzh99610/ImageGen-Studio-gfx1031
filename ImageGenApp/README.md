@@ -117,7 +117,7 @@ Also:
 - **Prompt presets**, **My Saved Prompts**, **Save / Load Settings** (restores the checkpoint too), **Quick Tags**
 - **Compel long-prompt encoding** with weighted/blended syntax `(word:1.3)`, `(word1|word2)`
 - **📂 Show in folder** under the gallery opens Explorer with the selected image highlighted
-- **Accelerated SDXL text encoding** (optional, Settings tab): CLIP-L and OpenCLIP-G on the integrated GPU via ONNX DirectML — mainly useful for the DirectML backend
+- **Accelerated SDXL text encoding** (optional, Settings tab): CLIP-L and OpenCLIP-G on the integrated GPU via ONNX DirectML — mainly useful for the DirectML backend (it stays off on native ROCm, which has no torch-directml to find the iGPU with)
 
 Every setting has a one-line hint; the **📖 Settings Guide** accordion has the full cheat sheet.
 
@@ -144,7 +144,7 @@ Remove watermarks, logos, and overlaid text from images:
 - **Removal methods:**
   - *LaMa ONNX* (default) — the cleanest result for almost every watermark (~7 s). Auto-downloads ~100 MB model on first use. CPU only (DML crashes on this model's MatMul ops).
   - *OpenCV TELEA/NS* — instant, but only good for thin text; large areas get smeared
-  - *SD Inpainting* — repaints a crop around the mask with the model loaded in Generate (SD 1.5 or SDXL, ~10 s) and blends it back; creative, so it can invent objects
+  - *SD Inpainting* — fills the mask, then repaints a crop around it at strength 0.6 with the model loaded in Generate (SD 1.5 or SDXL, ~10 s) and blends it back. It no longer invents objects there, but LaMa stays cleaner on a long mark
 - **Poisson seamless blending** — Inpainted regions use `cv2.seamlessClone` for gradient-matched compositing; falls back to feathered Gaussian blend at image edges.
 - **📁 Batch** — clean a whole folder (auto-detect + the chosen method) into `outputs/cleaned_<folder>/`; images where nothing is found are copied unchanged. Handy for LoRA training sets.
 - **Saved automatically** — as `<source>_clean.png` when the image came from this app (else `dewatermark_<time>.png`); earlier results are never overwritten.
@@ -230,7 +230,7 @@ For SD 1.5 models, SmartSplit distributes components across devices to reduce dG
 - **UNet** → dGPU via ZLUDA (or DirectML)
 - **VAE Decode** → CPU (float32 for compatibility)
 
-SmartSplit is **SD 1.5 only** — SDXL uses the standard single-GPU path with optional accelerated text encoding above.
+SmartSplit is **SD 1.5 only** — SDXL uses the standard single-GPU path with optional accelerated text encoding above. The status line warns when a stage can't go where you asked, and the result line says where each stage ran. On native ROCm (RX 9070 XT + 780M): text encoder on the iGPU 0.14 s, VAE on the iGPU 1.8 s, VAE on the CPU 44 s (that torch has no MKL).
 
 ### NPU Status (XDNA1, e.g. Ryzen 7 8700G)
 
@@ -308,6 +308,8 @@ the [main README](../README.md#troubleshooting).
 | Civitai download stuck | Large models (2–10 GB) take time; an API key helps. Check ETA in progress bar. |
 | ONNX export warnings on first run | Normal — TracerWarnings during ONNX export are suppressed; only appears once per model |
 | Accelerated TE shows "Session creation failed" | DmlExecutionProvider not available; check onnxruntime version (need 1.23+) |
+| Accelerated TE says no iGPU is reachable through torch-directml | Native ROCm has no torch-directml; the text encoders run on the GPU as usual |
+| Settings' GPU choice can't be clicked | Native ROCm runs one GPU per start: close the app and use `launch.bat --gpu N` (the hint under it says which number is which) |
 | Watermark remover white spots | Increase mask dilation to 30–40px; Poisson blending handles most edge artifacts |
 | EasyOCR "Using CPU" message | Only expected on DirectML/CPU, or if `IMAGEGEN_CUDNN=1` is set. Under ZLUDA OCR runs on the GPU |
 | Black images from generation | Check LoRA compatibility; mismatched base (e.g., SD1.5 LoRA on SDXL) causes this |

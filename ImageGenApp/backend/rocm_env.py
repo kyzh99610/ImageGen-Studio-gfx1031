@@ -97,9 +97,10 @@ def parse_hipinfo(txt: str) -> list[dict]:
     return devs
 
 
-def gpu_devices(bin_dirs: list[Path] | None = None) -> list[dict]:
+def gpu_devices(bin_dirs: list[Path] | None = None, unfiltered: bool = False) -> list[dict]:
     """The GPUs HIP can use, in HIP device order, via hipInfo.exe ([] without a runtime). The longest list wins: therock's
-    older hipInfo doesn't list a gfx1103 iGPU that the driver's HIP does, and a hidden device would shift nothing but can't be picked."""
+    older hipInfo doesn't list a gfx1103 iGPU that the driver's HIP does, and a hidden device would shift nothing but can't be picked.
+    unfiltered: what the PC has, from a process config.py limited to one GPU."""
     best: list[dict] = []
     for b in bin_dirs if bin_dirs is not None else [p for _, p in _candidates()]:
         exe = b / "hipInfo.exe"
@@ -107,6 +108,8 @@ def gpu_devices(bin_dirs: list[Path] | None = None) -> list[dict]:
             continue
         try:
             env = dict(os.environ, PATH=f"{b};{os.environ.get('PATH', '')}")
+            if unfiltered:
+                env.pop("HIP_VISIBLE_DEVICES", None)
             txt = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30,
                                  env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
         except Exception:

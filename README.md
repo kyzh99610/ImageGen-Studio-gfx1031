@@ -205,7 +205,7 @@ Reports from other cards are welcome.
 python-3.10\python.exe ImageGenApp\run_tests.py
 ```
 
-That runs 216 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload). On native ROCm, use `python-rocm\Scripts\python.exe` for the CPU tests and `ImageGenApp\run_rocm.bat` for the GPU ones.
+That runs 224 CPU tests (NPU tests skip without a Ryzen AI NPU; the tiny-pipeline sampler / LoRA checks need the SD 1.5 tokenizer in `.hf_cache`, which the first SD 1.5 load downloads). For the GPU, run `ImageGenApp\run_zluda.bat selftest_zluda.py` (ops) and, with the app closed, `ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl` (generate, LoRA restore, inpaint, detail, VRAM after unload). On native ROCm, use `python-rocm\Scripts\python.exe` for the CPU tests and `ImageGenApp\run_rocm.bat` for the GPU ones.
 
 ## Credits and licenses
 

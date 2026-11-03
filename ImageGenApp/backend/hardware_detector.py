@@ -64,7 +64,7 @@ _RDNA_PATTERNS: list[tuple[re.Pattern, int, bool]] = [
     (re.compile(r"RX\s*9[0-9]{3}", re.I),                  4, False),   # RX 9xxx dGPU RDNA4
     (re.compile(r"610M",           re.I),                   2, True),    # 610M iGPU RDNA2
     (re.compile(r"680M|660M",      re.I),                   2, True),    # Zen3+ iGPU RDNA2
-    (re.compile(r"780M|760M|740M|^Radeon \d+$", re.I),      3, True),    # Zen4 iGPU RDNA3 (HIP and the registry call the 780M "Radeon 7")
+    (re.compile(r"780M|760M|740M|^Radeon \d+(\s*\[ZLUDA\])?$", re.I),      3, True),    # Zen4 iGPU RDNA3 (HIP and the registry call the 780M "Radeon 7")
     (re.compile(r"890M|880M|870M|860M|850M|840M|830M|Strix Halo|Hawk Point", re.I), 3, True),  # Zen5 iGPU RDNA3.5
     (re.compile(r"Vega",           re.I),                   1, True),    # Vega iGPU (Zen3 and earlier)
 ]
@@ -482,6 +482,12 @@ def detect_hardware() -> HardwareProfile:
         if any(k in name.lower() for k in ("amd", "radeon", "vega", "intel", "nvidia")):
             if _norm(name) not in seen_names:
                 rdna_gen, is_igpu = _classify_gpu(name)
+                # HIP and Windows name an iGPU differently ("Radeon 7" / "AMD Radeon 780M Graphics"), and a PC has one
+                listed = next((g for g in profile.gpus if g.is_igpu), None) if is_igpu else None
+                if listed is not None:
+                    listed.name = name
+                    seen_names.add(_norm(name))
+                    continue
                 g = GPUInfo(
                     index=len(profile.gpus),
                     name=name,
@@ -520,6 +526,10 @@ def detect_hardware() -> HardwareProfile:
         if g.backend != "cuda_zluda":
             g.score -= 50  # slight penalty vs CUDA path
     profile.gpus.sort(key=lambda g: g.score, reverse=True)
+    # Native ROCm shows this process one GPU (config.py): that one is in use, whatever else the PC has
+    import config as _cfg
+    if _cfg.NATIVE_ROCM:
+        profile.gpus.sort(key=lambda g: g.backend == "cuda_zluda", reverse=True)
     profile.best_gpu = profile.gpus[0] if profile.gpus else None
 
     t_npu.join()

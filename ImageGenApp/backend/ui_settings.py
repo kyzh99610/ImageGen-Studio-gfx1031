@@ -16,6 +16,15 @@ POWER_INFO = ("Full power = cool 1.5 + pause above 88 °C, the cautious default.
               "on Manual with a 25 W CPU limit (29 % faster); not safe on Turbo with an unlimited CPU, before the service. Numbers: Help → Cool mode.")
 
 
+def pause_status(limit, temp_now) -> str:
+    """The Pause-while-hot status line. With no thermal zone nothing can ever wait, so a limit must not read as protection."""
+    if not limit:
+        return '<p style="color:#a6adc8;font-size:13px;">Pause while hot: off</p>'
+    if temp_now is None:
+        return f'<p style="color:#f9e2af;font-size:13px;">⚠ Saved {limit:g} °C, but this PC reports no thermal zone: nothing will wait.</p>'
+    return f'<p style="color:#a6e3a1;font-size:13px;">✅ Pausing above {limit:g} °C (resume at {limit - 8:g} °C)</p>'
+
+
 def power_choice():
     """The Power-profile radio value for the live cool factor + pause limit (a gr.update for the Settings radio)."""
     from backend import sampling, thermal
@@ -109,8 +118,7 @@ def build_prefs_section(ns) -> None:
     def on_therm(v):
         f = _thm.set_limit(v)
         ns._save_pref("thermal_limit", f)
-        return (f'<p style="color:#a6e3a1;font-size:13px;">✅ Pausing above {f:g} °C (resume at {f - 8:g} °C)</p>'
-                if f else '<p style="color:#a6adc8;font-size:13px;">Pause while hot: off</p>'), power_choice()
+        return pause_status(f, _t_now), power_choice()
     therm_sl.release(on_therm, [therm_sl], [therm_status, power_rb])
 
     def on_power_profile(choice):
@@ -122,8 +130,10 @@ def build_prefs_section(ns) -> None:
         cool, limit = got
         ns._save_pref("cool", cool)
         ns._save_pref("thermal_limit", limit)
+        wait = (f'wait above {limit:g} °C (resume at {limit - 8:g} °C)' if _t_now is not None
+                else f'⚠ no wait above {limit:g} °C: this PC reports no thermal zone')
         return (f'<p style="color:#a6e3a1;font-size:13px;">✅ {html.escape(POWER_LABELS[name])}: pause {cool:g}× the step time, '
-                f'wait above {limit:g} °C (resume at {limit - 8:g} °C)</p>', gr.update(value=cool), gr.update(value=limit))
+                f'{wait}</p>', gr.update(value=cool), gr.update(value=limit))
     power_rb.input(on_power_profile, [power_rb], [power_status, cool_sl, therm_sl])
 
     # 📇 Run manifest folders: pictures of runs that keep their recipes in manifest*.jsonl (backend/run_manifests.py) — dropped into

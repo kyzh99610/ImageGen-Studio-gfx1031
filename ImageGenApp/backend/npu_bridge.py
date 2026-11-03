@@ -28,6 +28,7 @@ import re
 import struct
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -309,7 +310,7 @@ class NPUBridge:
             [str(self._conda_python), str(self._worker_script)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=None,        # the app's console: nothing read a pipe here, and a full one would block the worker
             env=env,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
@@ -334,7 +335,8 @@ class NPUBridge:
         """Stop the NPU worker subprocess."""
         if self._process:
             try:
-                self._send({"cmd": "quit"})
+                if self._process.poll() is None:
+                    self._send({"cmd": "quit"})
                 self._process.wait(timeout=5)
             except Exception:
                 try:
@@ -405,7 +407,25 @@ class NPUBridge:
         self._process.stdin.flush()
 
     def _recv(self, timeout: float = 30) -> Optional[dict]:
-        """Receive a response from the worker (blocking; timeout not yet enforced)."""
+        """Receive a response from the worker. A worker that says nothing for `timeout` seconds is killed: a blocking read here froze the whole app."""
+        got: dict = {}
+
+        def read():
+            try:
+                got["response"] = self._read_response()
+            except Exception as e:
+                got["error"] = e
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        reader.join(timeout)
+        if reader.is_alive():
+            self._process.kill()
+            raise TimeoutError(f"the NPU worker said nothing for {timeout:g} s")
+        if "error" in got:
+            raise got["error"]
+        return got["response"]
+
+    def _read_response(self) -> Optional[dict]:
         import json as _json
 
         # Read header length

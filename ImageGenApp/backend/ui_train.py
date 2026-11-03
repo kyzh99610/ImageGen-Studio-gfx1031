@@ -13,6 +13,9 @@ from pathlib import Path
 import gradio as gr
 
 
+BLIP_COMMIT_GB = 5.0
+
+
 def build_handlers(ns, n_lora_dds):
     def do_scan(folder, res_choice):
         if not folder or not Path(folder).is_dir():
@@ -84,6 +87,12 @@ def build_handlers(ns, n_lora_dds):
         def cb(cur, tot, msg):
             progress(cur / max(tot, 1), desc=msg)
 
+        # BLIP's load took 3.4 GB of free commit, down to 0.5 GB beside an SDXL model; a generation model reloads by itself on the next Generate
+        from backend.model_manager import avail_commit_gb
+        free = avail_commit_gb()
+        if free is not None and free < BLIP_COMMIT_GB:
+            ns._sd15._unload()
+            ns._sdxl._unload()
         results = caption_batch(
             [i["path"] for i in imgs],
             trigger_word=trigger, prefix=prefix, callback=cb)
