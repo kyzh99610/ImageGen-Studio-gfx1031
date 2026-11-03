@@ -1790,6 +1790,14 @@ def _():
     assert not called
 
 
+@test("setup.bat: clears a PowerShell 7 PSModulePath before Windows PowerShell starts, and passes its arguments on")
+def _():
+    from pathlib import Path
+    raw = (Path(__file__).resolve().parent.parent / "installer" / "setup.bat").read_bytes()
+    assert raw.index(b'set "PSModulePath="') < raw.index(b"powershell.exe") and b'setup.ps1" %*' in raw, raw
+    assert raw.count(b"\n") == raw.count(b"\r\n"), "setup.bat must stay CRLF"
+
+
 @test("Pause while hot: a PC with no thermal zone gets a warning, not a ✅, for a limit that can never wait")
 def _():
     from unittest.mock import patch

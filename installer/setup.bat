@@ -8,7 +8,9 @@ echo  Starting ImageGen Studio setup...
 echo  This will install Python, packages, and optional models.
 echo.
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1"
+:: From a PowerShell 7 prompt this variable points Windows PowerShell at modules it can't load ("Get-FileHash is not recognized")
+set "PSModulePath="
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" %*
 
 if errorlevel 1 (
     echo.

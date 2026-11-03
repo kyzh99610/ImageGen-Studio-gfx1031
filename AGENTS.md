@@ -31,7 +31,7 @@ AMD's native ROCm PyTorch instead (Python 3.12, no ZLUDA; see "Native ROCm PyTor
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 224-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 225-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -76,7 +76,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--zluda] [--gpu N] 
 ImageGenApp\install_rocm.bat                    :: native ROCm PyTorch in python-rocm\ (RX 9070 XT, 780M): launch.bat then uses it, --zluda keeps ZLUDA
 ImageGenApp\run_rocm.bat selftest_zluda.py      :: the same checks on native ROCm (run_rocm.bat smoke_gpu.py --sdxl too)
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 224 tests; NPU tests skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 225 tests; NPU tests skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
