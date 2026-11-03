@@ -388,6 +388,14 @@ def _main_gpu() -> str:
     return "dGPU"
 
 
+def _step_kwargs(scheduler, generator) -> dict:
+    """The seed's generator for a scheduler whose step() draws noise (Euler a, DPM++ 2M SDE …), as diffusers' own pipelines pass it.
+    SmartSplit's loops didn't, so those samplers drew unseeded noise: the same seed gave another picture every run (Euler a through
+    the DirectML split on the RX 9070 XT, 25-28/255 between three runs)."""
+    import inspect
+    return {"generator": generator} if "generator" in inspect.signature(scheduler.step).parameters else {}
+
+
 def _session_device(session, asked: str) -> str:
     """Where an offloaded stage really runs: no session = the process's own GPU (its export failed), a session that fell back to the CPU provider = the CPU."""
     if session is None:
@@ -475,7 +483,7 @@ class SmartSplitPipeline:
         if not self.cfg.enabled:
             return
 
-        # ── DirectML split: UNet+VAE on dGPU DirectML, Text on CPU ──────────────
+        # ── DirectML split: UNet on dGPU DirectML; text encoder and VAE decode on the CPU ──
         if self.cfg.unet_device == "dgpu_directml":
             try:
                 import torch_directml as _tdml
@@ -486,8 +494,9 @@ class SmartSplitPipeline:
                 unet_dev = next(self.pipe.unet.parameters()).device
                 # Ensure attention slicing is 1-head to prevent OOM in custom loop
                 self.pipe.enable_attention_slicing(1)
-                print(f"[SmartSplit] UNet+VAE → {unet_dev} (dGPU DirectML)")
+                print(f"[SmartSplit] UNet     → {unet_dev} (dGPU DirectML)")
                 print(f"[SmartSplit] Text     → CPU  (saves ~500 MB dGPU VRAM)")
+                print(f"[SmartSplit] VAE      → CPU, fp32 (DirectML's fp16 decode came out ~9/255 off)")
                 if "cpu" not in str(te_dev).lower():
                     print(f"[SmartSplit] ⚠ text_encoder is on {te_dev} — "
                           f"reload the model to apply SmartSplit VRAM savings.")
@@ -641,27 +650,10 @@ class SmartSplitPipeline:
         import torch
 
         if self._dml_dgpu is not None:
-            # DirectML split — VAE is on DML, decode latents directly on DML.
-            # Enable tiling to avoid OOM at high resolutions (1024×768 etc.)
-            try:
-                scale = getattr(self.pipe.vae.config, "scaling_factor", 0.18215)
-                self.pipe.vae.enable_tiling()
-                self.pipe.vae.enable_slicing()
-                with torch.no_grad():
-                    decoded = self.pipe.vae.decode(latents / scale).sample
-                self.pipe.vae.disable_tiling()
-                decoded = ((decoded / 2 + 0.5).clamp(0, 1) * 255).byte()
-                return [
-                    Image.fromarray(decoded[i].permute(1, 2, 0).cpu().numpy())
-                    for i in range(decoded.shape[0])
-                ]
-            except Exception as e:
-                print(f"[SmartSplit] VAE decode failed on GPU ({e}), falling back to CPU VAE decode (slow but safe)...")
-                try:
-                    return self._decode_on_cpu(latents)
-                except Exception as e2:
-                    print(f"[SmartSplit] CPU VAE fallback also failed: {e2}")
-                    raise
+            # DirectML split: a CPU fp32 copy of the VAE decodes, as SDPipeline does on DirectML (Fix history 58). The fp16 decode on
+            # DirectML came out 8.99/255 off the fp32 decode of the same latents (RX 9070 XT, SD 1.5 384x512), while Settings, the
+            # banner and SmartSplitConfig.auto() all said "VAE → CPU".
+            return self._decode_on_cpu(latents)
 
         if self.cfg.vae_device == "cpu" and self._vae_session is None:
             return self._decode_on_cpu(latents)
@@ -713,10 +705,9 @@ class SmartSplitPipeline:
             seed = int(torch.randint(0, 2**32, (1,)).item())
 
         # ── DirectML path ──────────────────────────────────────────────────────
-        # Text encoder is on CPU; UNet + VAE are on DirectML.
-        # We pre-encode text on CPU, then hand off to the standard diffusers
-        # pipeline which runs denoising + VAE decode entirely on the DML device.
-        # This avoids any DML↔CPU tensor transfers mid-generation.
+        # Text encoder and VAE decode on the CPU, the UNet on DirectML. The scheduler keeps its timesteps on the CPU (each step's t goes
+        # to DirectML for the UNet only): with them on DirectML, PNDM's alphas_cumprod[timestep] (a CPU table indexed by a DirectML
+        # tensor) never returned, and SmartSplit hung at step 1 (RX 9070 XT); DPM++ 2M Karras ran either way, with the same picture.
         if self._dml_dgpu is not None:
             # Stage 1: Text encoding on CPU using compel (supports >77 tokens)
             t0 = time.time()
@@ -753,21 +744,23 @@ class SmartSplitPipeline:
             latent_w = width  // 8
             channels = self.pipe.unet.config.in_channels
 
-            # Randn on CPU (DML Generator unsupported), then move to DML
+            # Randn on CPU (DML Generator unsupported), then move to DML; the same generator seeds the steps' noise
+            gen = torch.Generator("cpu").manual_seed(seed)
             latents = torch.randn(
                 (batch_size, channels, latent_h, latent_w),
-                generator=torch.Generator("cpu").manual_seed(seed),
+                generator=gen,
                 device="cpu", dtype=dtype,
             ).to(dml_device)
 
             scheduler = self.pipe.scheduler
-            scheduler.set_timesteps(steps, device=dml_device)
+            scheduler.set_timesteps(steps, device="cpu")
             latents = latents * scheduler.init_noise_sigma
 
             # Pre-move embeds to DML (kept separate for sequential CFG)
             neg_dml = neg_embeds.to(dml_device)
             pos_dml = pos_embeds.to(dml_device)
             n_steps = len(scheduler.timesteps)
+            step_kw = _step_kwargs(scheduler, gen)
 
             if progress_callback:
                 progress_callback(0.05, "[Stage 2/3] Starting UNet denoising → dGPU DirectML")
@@ -794,15 +787,15 @@ class SmartSplitPipeline:
                         return_dict=False,
                     )[0]
                 noise_pred = noise_uncond + cfg_scale * (noise_cond - noise_uncond)
-                latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                latents = scheduler.step(noise_pred, t, latents, return_dict=False, **step_kw)[0]
 
             print()
             timing["unet_s"] = time.time() - t0
 
-            # Stage 3: VAE decode — VAE is on DML, latents already on DML
+            # Stage 3: VAE decode on the CPU (fp32)
             t0 = time.time()
             if progress_callback:
-                progress_callback(0.92, "[Stage 3/3] VAE decode → dGPU DirectML")
+                progress_callback(0.92, "[Stage 3/3] VAE decode → CPU")
             images = self.decode_latents(latents)
             timing["vae_decode_s"] = time.time() - t0
             timing["total_s"] = sum(timing.values())
@@ -844,6 +837,7 @@ class SmartSplitPipeline:
         latents = latents * pipe_scheduler.init_noise_sigma
 
         n_steps = len(pipe_scheduler.timesteps)
+        step_kw = _step_kwargs(pipe_scheduler, generator)
         for i, t in enumerate(pipe_scheduler.timesteps):
             if progress_callback:
                 progress_callback(
@@ -863,7 +857,7 @@ class SmartSplitPipeline:
 
             noise_uncond, noise_cond = noise_pred.chunk(2)
             noise_pred = noise_uncond + cfg_scale * (noise_cond - noise_uncond)
-            latents = pipe_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+            latents = pipe_scheduler.step(noise_pred, t, latents, return_dict=False, **step_kw)[0]
 
         if latents.device.type == "cuda":
             # The steps only queue GPU work: without this the UNet's time ran on into the VAE stage (780M: UNet 3.4 s, VAE 30 s)

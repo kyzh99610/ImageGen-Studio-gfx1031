@@ -2213,6 +2213,98 @@ def _():
         assert cap.reason.startswith("Nothing to offload to") and "Vega-class" in cap.reason, cap.reason
 
 
+@test("SmartSplit's DirectML split runs the text encoder and the VAE decode on the CPU and says so: Apply set igpu_directml for both while Settings, the banner and auto() said CPU, and the VAE decoded on DirectML in fp16 (8.99/255 off the fp32 decode, RX 9070 XT); its scheduler keeps the timesteps on the CPU (PNDM hung at step 1 with them on DirectML)")
+def _():
+    import torch
+    from types import SimpleNamespace
+    import app as _app
+    from backend import sd_pipeline as SDP, smartsplit_pipeline as SSP
+    from diffusers import PNDMScheduler
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    fn = getattr(by["on_apply_split"].fn, "__wrapped__", by["on_apply_split"].fn)
+    cap = SSP.SmartSplitCapability(possible=True, dgpu_available=True, dgpu_dml_idx=1, igpu_dml_idx=0,
+                                   dgpu_name="AMD Radeon RX 9070 XT", igpu_name="AMD Radeon 780M Graphics")
+    saved = (_app.sd, _app._smartsplit_pipe, _app._smartsplit_cfg, _app._sd15.unet_only_dml)
+    try:
+        _app.sd = object.__new__(SDP.SDPipeline)
+        _app.sd.current_model = None                                   # no reload: only the config Apply builds
+        with patch.object(_app, "_get_smartsplit_cap", lambda: cap):
+            fn(True, "igpu_directml", "igpu_directml")
+        c = _app._smartsplit_cfg
+        assert (c.text_encoder_device, c.unet_device, c.vae_device, c.dgpu_dml_idx) == ("cpu", "dgpu_directml", "cpu", 1), c
+        auto = SSP.SmartSplitConfig.auto(cap)
+        assert (auto.text_encoder_device, auto.vae_device) == (c.text_encoder_device, c.vae_device), auto
+        assert "Text Encoder → CPU" in c.describe() and "VAE Decode   → CPU" in c.describe(), c.describe()
+    finally:
+        _app.sd, _app._smartsplit_pipe, _app._smartsplit_cfg, _app._sd15.unet_only_dml = saved
+
+    class Unet(torch.nn.Module):
+        config = SimpleNamespace(in_channels=4)
+
+        def __init__(self):
+            super().__init__()
+            self.w = torch.nn.Parameter(torch.zeros(1))
+
+        def forward(self, lat, t, encoder_hidden_states=None, return_dict=False):
+            return (lat * 0.1 + encoder_hidden_states.mean() * 0,)
+    sched = PNDMScheduler(skip_prk_steps=True)
+    devices, decoded = [], []
+    real_set = sched.set_timesteps
+    sched.set_timesteps = lambda n, device=None: devices.append(str(device)) or real_set(n, device=device)
+    ss = object.__new__(SSP.SmartSplitPipeline)
+    ss.cfg = SSP.SmartSplitConfig(enabled=True, text_encoder_device="cpu", unet_device="dgpu_directml", vae_device="cpu", dgpu_dml_idx=1)
+    ss.pipe = SimpleNamespace(unet=Unet(), scheduler=sched, vae=None)
+    ss._dml_dgpu, ss._te_session, ss._vae_session = torch.device("cpu"), None, None
+    ss._decode_on_cpu = lambda lat: decoded.append(lat) or ["picture"]
+    embeds = {"prompt_embeds": torch.ones(1, 77, 8), "negative_prompt_embeds": torch.zeros(1, 77, 8)}
+    with patch.object(SDP, "_build_embeds", lambda *a, **k: embeds):
+        images, timing = ss.generate("p", "n", 64, 64, 4, 7.0, 1, None)
+    assert images == ["picture"] and len(decoded) == 1, (images, decoded)                    # the CPU fp32 decode, not DirectML's
+    assert devices == ["cpu"], devices
+
+
+@test("SmartSplit's loops seed the noise a scheduler draws in step() (Euler a, DPM++ 2M SDE), as diffusers' pipelines do: without the generator the same seed gave another picture every run (Euler a: 25-28/255 through the DirectML split, 40.8/255 on native ROCm, RX 9070 XT)")
+def _():
+    import torch
+    from types import SimpleNamespace
+    from backend import sd_pipeline as SDP, smartsplit_pipeline as SSP
+    from diffusers import EulerAncestralDiscreteScheduler, PNDMScheduler
+    g = torch.Generator("cpu")
+    assert SSP._step_kwargs(EulerAncestralDiscreteScheduler(), g) == {"generator": g}
+    assert SSP._step_kwargs(PNDMScheduler(), g) == {}
+
+    class Unet(torch.nn.Module):
+        config = SimpleNamespace(in_channels=4)
+
+        def __init__(self):
+            super().__init__()
+            self.w = torch.nn.Parameter(torch.zeros(1))
+
+        def forward(self, lat, t, encoder_hidden_states=None, return_dict=False):
+            return (lat * 0.1,)
+    embeds = {"prompt_embeds": torch.ones(1, 77, 8), "negative_prompt_embeds": torch.zeros(1, 77, 8)}
+
+    def run(unet_device, seed_steps=True):
+        ss = object.__new__(SSP.SmartSplitPipeline)
+        ss.cfg = SSP.SmartSplitConfig(enabled=True, text_encoder_device="cpu", unet_device=unet_device, vae_device="cpu", dgpu_dml_idx=1)
+        ss.pipe = SimpleNamespace(unet=Unet(), scheduler=EulerAncestralDiscreteScheduler(), vae=None)
+        ss._dml_dgpu = torch.device("cpu") if unet_device == "dgpu_directml" else None
+        ss._te_session = ss._vae_session = None
+        got = []
+        ss._decode_on_cpu = lambda lat: got.append(lat.clone()) or ["picture"]
+        ss.encode_prompt = lambda *a, **k: torch.cat([embeds["negative_prompt_embeds"], embeds["prompt_embeds"]])
+        with patch.object(SDP, "_build_embeds", lambda *a, **k: embeds), \
+                patch.object(SSP, "_step_kwargs", SSP._step_kwargs if seed_steps else (lambda s, gen: {})):
+            ss.generate("p", "n", 64, 64, 4, 7.0, 1234, None)
+        return got[0]
+    for path in ("dgpu_directml", "cuda"):                                # the DirectML split and the ZLUDA / native loop
+        assert torch.equal(run(path), run(path)), path
+        torch.manual_seed(1)
+        a = run(path, seed_steps=False)
+        torch.manual_seed(2)
+        assert not torch.equal(a, run(path, seed_steps=False)), f"{path}: the unseeded run should differ (the test must see the old bug)"
+
+
 @test("download_models: a download goes to .part, resumes there, and gets its name only with the right size and SHA-256; a half file from the old script resumes, the wrong hash is removed")
 def _():
     import hashlib

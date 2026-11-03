@@ -31,7 +31,7 @@ AMD's native ROCm PyTorch instead (Python 3.12, no ZLUDA; see "Native ROCm PyTor
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 246-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 248-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -76,7 +76,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--zluda] [--gpu N] 
 ImageGenApp\install_rocm.bat                    :: native ROCm PyTorch in python-rocm\ (RX 9070 XT, 780M): launch.bat then uses it, --zluda keeps ZLUDA
 ImageGenApp\run_rocm.bat selftest_zluda.py      :: the same checks on native ROCm (run_rocm.bat smoke_gpu.py --sdxl too)
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 246 tests; NPU tests skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 248 tests; NPU tests skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -201,7 +201,7 @@ Both pipelines decode latents themselves (`output_type="latent"`), via `sd_pipel
 SD 1.5: untiled ≤1024 px (tiling visibly shifts SD 1.5 colours) unless `force_tiled_decode` (Bridge).
 SDXL: fp16 with 512 px tiles → on NaN **fp32 with 256 px tiles on the GPU** (~3 s; many checkpoints ship the
 original SDXL VAE, which overflows in fp16) → CPU (~22 s) last. `SDXLPipeline._vae_needs_fp32` remembers the fp32
-need per model (reset on unload) and is shared with img2img's `_encode_image`. DirectML still decodes on CPU (SD 1.5 only since 2026-11-03, on a CPU fp32 copy of the VAE: it used to decode on DirectML, see Fix history).
+need per model (reset on unload) and is shared with img2img's `_encode_image`. DirectML still decodes on CPU (SD 1.5 only since 2026-11-03, on a CPU fp32 copy of the VAE: it used to decode on DirectML, see Fix history), and so does SmartSplit's DirectML split since the same day.
 
 ### HuggingFace repo IDs
 `sd_pipeline._from_pretrained()` asks for `variant="fp16"` (half the download) and falls back to full weights.
@@ -1028,6 +1028,7 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
 60. **DirectML on an integrated GPU says so at load** (2026-11-03): a 780M through DirectML drew black (NaN) pictures now and then (torch-directml 0.2.5; native ROCm runs it clean) and the laptop's Vega hung its display driver under DirectML, so both pipelines add a warning line under "✅ Loaded" when the DirectML adapter is an integrated GPU (`sd_pipeline._dml_igpu_note`). torch-directml ends adapter names with a NUL character, which SmartSplit's status line carried; it is stripped now, as app.py already did.
 61. **`launch.bat --dml` ran DirectML on the 780M, and so did every plain `python-3.10` process** (2026-11-03, 8700G bench): the launchers pass HIP's automatic GPU pick (the RX 9070 XT is HIP's 0) as `IMAGEGEN_GPU`, and DirectML read it as its own number, where 0 is the 780M; with no `IMAGEGEN_GPU` at all it took 0 too, so the CPU test suite's `config.DEVICE` was the 780M. The launchers now mark their own pick `IMAGEGEN_GPU_AUTO=1` (not with `--gpu N`), and without a chosen GPU `config._dml_device_index` takes the first discrete GPU by name; a chosen number stays torch-directml's own, and Settings' choice drops the mark. Checked on the bench by device name only (no work on the 780M): no `--gpu`, the launcher's pick and a plain process now resolve to the RX 9070 XT, `--gpu 0` to the 780M as asked. On the RX 6800M laptop HIP's 0 and torch-directml's 0 are both the RX 6800M, so nothing changes there.
 62. **SmartSplit's DirectML split read an RX 7800 XT or an RX 7600 as the iGPU, and offered a Vega iGPU a stage** (2026-11-03, a review of Fix history 53): its own keyword list matched "780" / "760" anywhere in a name, so on such a card with an iGPU the card became the "iGPU" and the iGPU the UNet's "dGPU"; it uses `hardware_detector._classify_gpu` now. And under `--dml` the split marked the iGPU stages available from torch-directml's names before Fix history 53's check ran, so a Vega iGPU still got the split while its ONNX sessions ran on the CPU; `dxgi.offload_igpu()` decides there too now, and SmartSplit says "Nothing to offload to" with the reason on both backends.
+63. **SmartSplit's DirectML split hung on PNDM and decoded on DirectML in fp16 while it said CPU, and neither SmartSplit loop seeded Euler a** (2026-11-03, found by running the split on the RX 9070 XT for the first time, its text encoder and VAE on the CPU, nothing on the 780M): the split's loop put the scheduler's timesteps on DirectML, and PNDM's `alphas_cumprod[timestep]` (a CPU table indexed by a DirectML tensor) never returned, so it hung at step 1 (the normal DirectML path ran PNDM fine); the timesteps stay on the CPU now. Its VAE decoded on DirectML in fp16, 8.99/255 off the fp32 decode of the same latents, while Settings, the banner and `SmartSplitConfig.auto()` said CPU and Apply set `igpu_directml` for both stages (the split exports nothing and runs the text encoder on the CPU): a CPU fp32 copy decodes now (~2.5 s for 384×512, as in Fix history 58) and Apply sets CPU. Both SmartSplit loops also called `scheduler.step` without the seed's generator, so a sampler that draws noise in a step drew unseeded noise: Euler a gave another picture every run with the same seed (25-28/255 through the DirectML split, 40.8/255 on native ROCm); `_step_kwargs` passes it as diffusers' pipelines do, and three runs are identical now (DPM++ 2M Karras, PNDM and Euler a on the split, Euler a on native).
 
 ## Troubleshooting
 

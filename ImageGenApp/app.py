@@ -6564,12 +6564,14 @@ def _build_settings_tab():
                         get_npu_bridge().stop()
 
                     if is_dml_split:
-                        # DirectML multi-GPU mode — auto-configured, no ZLUDA needed
+                        # DirectML multi-GPU mode — auto-configured, no ZLUDA needed. The split runs the text encoder and the VAE
+                        # decode on the CPU (SmartSplitPipeline._setup exports nothing there): it said igpu_directml for both, so the
+                        # applied status and describe() named the iGPU while Settings, the banner and auto() said CPU
                         _smartsplit_cfg = SmartSplitConfig(
                             enabled=True,
-                            text_encoder_device="igpu_directml",
+                            text_encoder_device="cpu",
                             unet_device="dgpu_directml",
-                            vae_device="igpu_directml",
+                            vae_device="cpu",
                             dgpu_dml_idx=_cap_now.dgpu_dml_idx,
                             igpu_dml_idx=_cap_now.igpu_dml_idx,
                         )
