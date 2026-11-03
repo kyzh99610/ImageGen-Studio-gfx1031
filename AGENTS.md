@@ -902,8 +902,9 @@ and an explicit `--gpu 0` was overridden by auto-detection). `_gpu_detect.py` wa
 | ZLUDA v6 | github.com/vosen/ZLUDA release `v6`, `zluda-windows-3fe1206.zip` | `fda8891c…7208a` |
 | gfx1031 rocBLAS kernels | github.com/likelovewant/ROCmLibs-for-gfx1103-AMD780M-APU release `v0.6.2.4`, `rocm.gfx1031.for.hip.sdk.6.2.4.littlewu.s.logic.7z` | `a1946df3…93b73` |
 | Python 3.10.11 | python.org embeddable amd64 zip | `608619f8…7629d` |
+| pip 26.2.1 | files.pythonhosted.org wheel | `71138adf…4ed3e` |
 | HIP SDK 6.4 | amd.com (EULA; not redistributed) | — |
-`installer/setup.ps1` downloads and checks the first three; `tar.exe` (Windows 10 1803+) extracts the .7z.
+`installer/setup.ps1` downloads and checks the first four; `tar.exe` (Windows 10 1803+) extracts the .7z.
 `install.bat` installs torch cu118 then `requirements.txt` (pins = the working env; three OpenCV builds had piled up
 in the dev env — only `opencv-python-headless` 4.9 is what loads and what is pinned).
 
@@ -999,6 +1000,7 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
 37. **The NPU worker froze the app:** `NPUBridge._recv` never enforced its timeout and nothing read the worker's stderr pipe, which its 1200 lines of start-up output filled.
 38. **SmartSplit's labels and devices:** "VAE → CPU" ran on the dGPU and was labelled CPU; "Text Encoder → CPU" stayed on the CPU after SmartSplit was turned off; the worker stayed in memory; the labels now say where a stage really runs (XDNA1's float CLIP = CPU, see "SmartSplit & NPU").
 39. **Auto-Loop counted the batch a Stop interrupted** ("2 batches, 1 image"); accelerated text encoding exported 3 GB before finding out there was no iGPU; BLIP's load could take free commit to 0.5 GB beside an SDXL model (a generation model is unloaded first when under 5 GB).
+40. **`setup.ps1` failed on a new PC at its first step** (2026-11-02): it took get-pip.py unpinned, and that day's version starts its bundled pip in a way pip's own Windows check refuses ("To modify pip, please run…"). A pinned pip wheel now. `setup.bat` also clears a PowerShell 7 `PSModulePath` ("Get-FileHash is not recognized") and keeps its error code. Found only by running it on a fresh clone.
 
 ## Troubleshooting
 

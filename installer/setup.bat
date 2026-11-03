@@ -16,4 +16,5 @@ if errorlevel 1 (
     echo.
     echo  Setup encountered an error. See messages above.
     pause
+    exit /b 1
 )

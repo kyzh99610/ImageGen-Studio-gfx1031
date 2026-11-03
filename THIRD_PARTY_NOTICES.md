@@ -7,7 +7,7 @@ checks each download against a pinned SHA-256:
 | Component | Source | License |
 |---|---|---|
 | Python 3.10.11 (embeddable) | https://www.python.org/ftp/python/3.10.11/ | PSF License |
-| pip (get-pip.py) | https://bootstrap.pypa.io/ | MIT |
+| pip | https://pypi.org/project/pip/ | MIT |
 | ZLUDA v6 (`zluda-windows-3fe1206.zip`) | https://github.com/vosen/ZLUDA/releases/tag/v6 | Apache-2.0 OR MIT |
 | gfx1031 rocBLAS kernels (`rocm.gfx1031.for.hip.sdk.6.2.4.littlewu.s.logic.7z`) | https://github.com/likelovewant/ROCmLibs-for-gfx1103-AMD780M-APU/releases/tag/v0.6.2.4 | built from AMD rocBLAS / Tensile (MIT); see that repository |
 

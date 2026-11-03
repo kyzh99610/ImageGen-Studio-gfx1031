@@ -1796,6 +1796,8 @@ def _():
     raw = (Path(__file__).resolve().parent.parent / "installer" / "setup.bat").read_bytes()
     assert raw.index(b'set "PSModulePath="') < raw.index(b"powershell.exe") and b'setup.ps1" %*' in raw, raw
     assert raw.count(b"\n") == raw.count(b"\r\n"), "setup.bat must stay CRLF"
+    ps = (Path(__file__).resolve().parent.parent / "installer" / "setup.ps1").read_text(encoding="utf-8")
+    assert "get-pip" not in ps.split("# A pinned wheel")[0] and "bootstrap.pypa.io" not in ps and '$PIP_SHA256' in ps.split("$env:IMAGEGEN_PIP_WHL")[2], "pip must come from the pinned wheel"
 
 
 @test("Pause while hot: a PC with no thermal zone gets a warning, not a ✅, for a limit that can never wait")

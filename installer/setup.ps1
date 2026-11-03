@@ -43,6 +43,8 @@ $ZLUDA_SHA256 = "fda8891c6fdfaba438f2eb0f9d749ffa2c1fddbdf225be2301f0d7a25e37208
 $G1031_URL    = "https://github.com/likelovewant/ROCmLibs-for-gfx1103-AMD780M-APU/releases/download/v0.6.2.4/rocm.gfx1031.for.hip.sdk.6.2.4.littlewu.s.logic.7z"
 $G1031_SHA256 = "a1946df31e2505b745c284a5234d71efd99ac84dc4530fc20d6aa0656a593b73"
 $G1031_DIR    = Join-Path $ROOT "_gfx1031_rocm624\rocm gfx1031 for rocm 6.2.4"   # path rocm_env.py expects
+$PIP_URL      = "https://files.pythonhosted.org/packages/f3/6e/1736e5b4ae2b778ef2f81c47d797de9f891d4d8acb047a24ca37a60294dd/pip-26.2.1-py3-none-any.whl"
+$PIP_SHA256   = "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"
 
 function Write-Header($text) {
     Write-Host ""
@@ -105,10 +107,11 @@ if (Test-Path $PYEXE) {
         # The embeddable build ignores site-packages until "import site" is enabled
         $pth = Join-Path $PYTHON "python310._pth"
         Set-Content $pth "python310.zip`r`n.`r`n`r`nimport site`r`n" -Encoding ASCII
-        $getpip = Join-Path $TMPDIR "get-pip.py"
-        Get-File "https://bootstrap.pypa.io/get-pip.py" $getpip "pip installer"
-        & $PYEXE $getpip --no-warn-script-location
-        if ($LASTEXITCODE -ne 0) { throw "get-pip.py failed" }
+        # A pinned wheel, not get-pip.py: that one floats, and on 2026-11-02 it started its bundled pip in a way pip's own Windows check refuses
+        $env:IMAGEGEN_PIP_WHL = Join-Path $TMPDIR "pip-26.2.1-py3-none-any.whl"
+        Get-File $PIP_URL $env:IMAGEGEN_PIP_WHL "pip 26.2.1 (~2 MB)" $PIP_SHA256
+        & $PYEXE -c "import os, sys; whl = os.environ['IMAGEGEN_PIP_WHL']; sys.path.insert(0, whl); from pip._internal.cli.main import main; sys.exit(main(['install', '--no-warn-script-location', whl, 'setuptools', 'wheel']))"
+        if ($LASTEXITCODE -ne 0) { throw "pip could not install itself" }
     } catch { Stop-Setup "Python setup failed: $_" }
 }
 
