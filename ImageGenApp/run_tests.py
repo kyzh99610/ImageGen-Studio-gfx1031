@@ -782,11 +782,21 @@ def _():
         _app._search_all_results, _app._search_page = old
 
 
+def _split_capable(_app):
+    """build_app() as on a PC where SmartSplit has a stage (the test machine: RX 9070 XT + a 780M under DirectML). On the laptop it
+    has nothing to offload to (a Vega iGPU gets no stage), so Settings builds no Apply button and on_apply_split isn't wired."""
+    from backend.smartsplit_pipeline import SmartSplitCapability
+    cap = SmartSplitCapability(possible=True, dgpu_available=True, dgpu_dml_idx=1, igpu_dml_idx=0, igpu_vae_available=True,
+                               igpu_te_available=True, dgpu_name="AMD Radeon RX 9070 XT", igpu_name="AMD Radeon 780M Graphics")
+    with patch.object(_app, "_get_smartsplit_cap", lambda: cap):
+        return _app.build_app()
+
+
 @test("SmartSplit rejects SDXL in on_apply_split (round 26: behaviour: the handler run with an SDXL pipeline loaded, no SmartSplit pipe is built)")
 def _():
     import app as _app
     from unittest.mock import patch
-    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _split_capable(_app).fns}
     fn = getattr(by["on_apply_split"].fn, "__wrapped__", by["on_apply_split"].fn)
     old_sd, old_pipe = _app.sd, _app._smartsplit_pipe
     try:
@@ -1053,6 +1063,8 @@ print("\n[10/10] SmartSplit + NPU Integration")
 def _():
     from backend.smartsplit_pipeline import SmartSplitConfig, detect_smartsplit_capability
     cap = detect_smartsplit_capability()
+    if not cap.possible:
+        raise Skip("SmartSplit has nothing to offload to on this PC: " + cap.reason.splitlines()[0][:90])
     cfg = SmartSplitConfig.auto(cap)
     assert cfg.enabled
     if cap.dgpu_dml_idx >= 0:
@@ -2220,7 +2232,7 @@ def _():
     import app as _app
     from backend import sd_pipeline as SDP, smartsplit_pipeline as SSP
     from diffusers import PNDMScheduler
-    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _split_capable(_app).fns}
     fn = getattr(by["on_apply_split"].fn, "__wrapped__", by["on_apply_split"].fn)
     cap = SSP.SmartSplitCapability(possible=True, dgpu_available=True, dgpu_dml_idx=1, igpu_dml_idx=0,
                                    dgpu_name="AMD Radeon RX 9070 XT", igpu_name="AMD Radeon 780M Graphics")
@@ -4848,7 +4860,7 @@ def _():
 @test("GPU events share one queue slot (Generate during an X/Y grid crashed the process); Stop stays free")
 def _():
     import app as _app
-    b = _app.build_app()
+    b = _split_capable(_app)            # on_apply_split exists only where SmartSplit has a stage
     by = {}
     for f in b.fns:
         by.setdefault(getattr(f.fn, "__name__", "?"), []).append(f)
