@@ -6650,9 +6650,10 @@ def _build_settings_tab():
                 try:
                     if enabled:
                         _dml_igpu_id()
-                except RuntimeError:
+                except RuntimeError as e:      # no iGPU, or a Vega-class one (it hung under SmartSplit's VAE)
                     set_sdxl_npu_te(False)
-                    return gr.update(value=False, info="⚠ No iGPU found for DirectML, so this stays off. The text encoders run on the GPU as usual.")
+                    why = str(e)
+                    return gr.update(value=False, info=f"⚠ {why[:1].upper()}{why[1:]}. The text encoders run on the GPU as usual.")
                 set_sdxl_npu_te(enabled)
                 state = "✅ enabled — iGPU DML" if enabled else "disabled"
                 return gr.update(info=f"Accelerated text encoding {state}")

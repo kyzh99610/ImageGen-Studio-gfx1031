@@ -37,44 +37,6 @@ def _device() -> str:
     return _cfg.DEVICE
 
 
-def _find_igpu_device() -> "str | None":
-    """
-    Return a DirectML device string for the iGPU (if one exists besides the dGPU).
-    Uses hardware_detector to find an iGPU, then maps to a torch_directml device index.
-    Returns None if no usable iGPU is found.
-    """
-    try:
-        import torch_directml
-        from backend.hardware_detector import detect_hardware
-        hw = detect_hardware()
-        # Find iGPU that's NOT the currently active dGPU
-        igpu = next((g for g in hw.gpus if g.is_igpu and g.backend == "directml"), None)
-        if igpu is None:
-            return None
-        # torch_directml enumerates in the same order as WMIC/registry
-        idx = igpu.index
-        if idx < torch_directml.device_count():
-            return str(torch_directml.device(idx))
-    except Exception:
-        pass
-    return None
-
-
-# Cache iGPU device detection (expensive — calls WMI)
-_igpu_dev: str | None = ...  # sentinel: not yet probed
-
-
-def _get_igpu_device() -> str | None:
-    global _igpu_dev
-    if _igpu_dev is ...:
-        _igpu_dev = _find_igpu_device()
-        if _igpu_dev:
-            print(f"[SDXL] iGPU detected for text encoding: {_igpu_dev}")
-        else:
-            print("[SDXL] No iGPU through torch-directml")
-    return _igpu_dev
-
-
 _SDXL_EMBED_CACHE: dict[tuple, dict] = {}
 
 
@@ -202,16 +164,12 @@ ONNX_CACHE_DIR = _cfg.APP_DIR / "onnx_cache"
 ONNX_CACHE_DIR.mkdir(exist_ok=True)
 
 def _dml_igpu_id() -> int:
-    """DML device index of the iGPU. DML order is not fixed: on some laptops
-    index 0 is the discrete GPU (e.g. an RX 6800M), so a hardcoded 0 would put the text encoders on the
-    same dGPU the UNet is using."""
-    igpu = _get_igpu_device()
-    if igpu is not None:
-        return int(igpu.split(":")[1])
-    from backend.dxgi import dml_index          # no torch-directml (native ROCm): DXGI numbers the adapters the same way
-    idx = dml_index(igpu=True)
+    """ONNX Runtime's DirectML device_id of the iGPU: the DXGI number (backend/dxgi.py). It used torch-directml's number, 1 for the
+    Vega iGPU on the laptop, which ONNX Runtime reads as the RX 6800M: the text encoders ran on the GPU the UNet uses."""
+    from backend import dxgi
+    idx, why = dxgi.offload_igpu()
     if idx is None:
-        raise RuntimeError("no iGPU found for accelerated text encoding")
+        raise RuntimeError(f"accelerated text encoding stays off: {why}")
     return idx
 
 

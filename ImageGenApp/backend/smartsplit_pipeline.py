@@ -135,10 +135,14 @@ def detect_smartsplit_capability() -> SmartSplitCapability:
             return cap
 
     # ── iGPU via DirectML ─────────────────────────────────────────────────
+    igpu_why = ""
     try:
         import onnxruntime as ort
         providers = ort.get_available_providers()
         if "DmlExecutionProvider" in providers:
+            from backend import dxgi
+            _idx, igpu_why = dxgi.offload_igpu()
+        if "DmlExecutionProvider" in providers and _idx is not None:
             cap.igpu_vae_available = True
             cap.igpu_te_available  = True
             # Try to get iGPU name from hardware_detector
@@ -183,6 +187,9 @@ def detect_smartsplit_capability() -> SmartSplitCapability:
 
     # Not worthwhile if no secondary device exists
     has_secondary = cap.igpu_vae_available or cap.npu_available
+    if not has_secondary and igpu_why:
+        cap.reason = f"Nothing to offload to: {igpu_why}."
+        return cap
     if not has_secondary:
         cap.reason = (
             "No secondary compute unit detected (iGPU DirectML or XDNA NPU).\n"
@@ -405,11 +412,14 @@ def _ort_session(onnx_path: Path, ep: str):
         print(f"[SmartSplit] {provider} not available, falling back to CPU")
         provider = "CPUExecutionProvider"
     if provider == "DmlExecutionProvider":
-        # DirectML's device 0 is whichever adapter Windows lists first: the 780M on the 8700G desktop, the RX 6800M on the laptop
-        from backend.dxgi import dml_index
-        idx = dml_index(igpu=True)
+        # Without a device_id ONNX Runtime takes the high-performance GPU: on the laptop the "iGPU" stage ran on the RX 6800M next to the UNet.
+        # device_id is the DXGI number (backend/dxgi.py), not torch-directml's.
+        from backend import dxgi
+        idx, why = dxgi.offload_igpu()
         if idx is not None:
             return ort.InferenceSession(str(onnx_path), providers=[(provider, {"device_id": idx})])
+        print(f"[SmartSplit] Not on the iGPU: {why}. Falling back to CPU")
+        provider = "CPUExecutionProvider"
 
     return ort.InferenceSession(str(onnx_path), providers=[provider])
 

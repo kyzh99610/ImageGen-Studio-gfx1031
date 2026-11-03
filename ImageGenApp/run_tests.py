@@ -306,7 +306,7 @@ def _():
 print("\n[4/8] ONNX Session & VitisAI EP Fallback")
 # ══════════════════════════════════════════════════════════════════════════
 
-@test("_ort_session (round 26: behaviour): 'npu' asks for VitisAI, 'igpu_directml' for DirectML on the iGPU's adapter, 'cpu' for CPU; a provider this onnxruntime lacks falls back to CPU, an unknown device too")
+@test("_ort_session (round 26: behaviour): 'npu' asks for VitisAI, 'igpu_directml' for DirectML on the iGPU's DXGI number, 'cpu' for CPU; a provider this onnxruntime lacks falls back to CPU, an unknown device and a PC without an iGPU (or with a Vega one) too")
 def _():
     import sys
     from types import SimpleNamespace
@@ -316,14 +316,20 @@ def _():
     made = []
     fake = SimpleNamespace(get_available_providers=lambda: avail[0], InferenceSession=lambda path, providers=None: made.append((path, providers)) or "session")
     avail = [["VitisAIExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"]]
-    with patch.dict(sys.modules, {"onnxruntime": fake}), patch.object(dxgi, "dml_index", lambda igpu: 2 if igpu else 0):
-        for ep, want in (("npu", "VitisAIExecutionProvider"), ("igpu_directml", ("DmlExecutionProvider", {"device_id": 2})), ("cpu", "CPUExecutionProvider"), ("something-else", "CPUExecutionProvider")):
+    laptop = [{"index": 0, "name": "AMD Radeon(TM) Graphics", "software": False}, {"index": 1, "name": "AMD Radeon RX 6800M", "software": False}]
+    with patch.dict(sys.modules, {"onnxruntime": fake}), patch.object(dxgi, "adapters", lambda: laptop):
+        for ep, want in (("npu", "VitisAIExecutionProvider"), ("igpu_directml", ("DmlExecutionProvider", {"device_id": 0})), ("cpu", "CPUExecutionProvider"), ("something-else", "CPUExecutionProvider")):
             made.clear()
             assert _ort_session(Path("m.onnx"), ep) == "session" and made == [("m.onnx", [want])], (ep, made)
-        with patch.object(dxgi, "dml_index", lambda igpu: None):              # DXGI lists no iGPU: DirectML's own default
+        with patch.object(dxgi, "adapters", lambda: laptop[1:]):            # no iGPU: the CPU, not ONNX Runtime's own pick (the dGPU the UNet is on)
             made.clear()
             _ort_session(Path("m.onnx"), "igpu_directml")
-            assert made == [("m.onnx", ["DmlExecutionProvider"])], made
+            assert made == [("m.onnx", ["CPUExecutionProvider"])], made
+        vega = [dict(laptop[0], vendor=0x1002, device=0x1638)] + laptop[1:]  # the laptop's own iGPU (Cezanne Vega 8): it hung under this load, the CPU
+        with patch.object(dxgi, "adapters", lambda: vega):
+            made.clear()
+            _ort_session(Path("m.onnx"), "igpu_directml")
+            assert made == [("m.onnx", ["CPUExecutionProvider"])], made
         avail[0] = ["CPUExecutionProvider"]                                   # no VitisAI / DML in this onnxruntime: CPU, with the model path unchanged
         for ep in ("npu", "igpu_directml"):
             made.clear()
@@ -1839,34 +1845,53 @@ def _():
     assert "get-pip" not in ps.split("# A pinned wheel")[0] and "bootstrap.pypa.io" not in ps and '$PIP_SHA256' in ps.split("$env:IMAGEGEN_PIP_WHL")[2], "pip must come from the pinned wheel"
 
 
-@test("DirectML device numbers without torch-directml: DXGI's adapter order (the upscaler's card, accelerated TE's and SmartSplit's iGPU)")
+@test("DirectML numbers: ONNX Runtime's device_id is the DXGI number, not torch-directml's (laptop: DXGI 0 = the Vega iGPU, torch-directml 0 = the RX 6800M); the upscaler and accelerated text encoding ask DXGI; no iGPU or a Vega one (it hung) = refused before 3 GB are exported, SmartSplit says why")
 def _():
+    import sys
+    from types import SimpleNamespace
     from unittest.mock import patch
-    import onnxruntime as ort
-    from backend import dxgi, smartsplit_pipeline as SP, sdxl_pipeline as XL, upscaler as UP
-    listed = [("AMD Radeon 780M Graphics", False), ("AMD Radeon RX 9070 XT", False), ("Microsoft Basic Render Driver", True)]
-    with patch.object(dxgi, "adapters", lambda: listed):
-        assert (dxgi.dml_index(True), dxgi.dml_index(False)) == (0, 1), (dxgi.dml_index(True), dxgi.dml_index(False))
-    with patch.object(dxgi, "adapters", lambda: [("AMD Radeon RX 6800M", False), ("AMD Radeon(TM) Graphics", False)]):    # the laptop's order
-        assert (dxgi.dml_index(True), dxgi.dml_index(False)) == (1, 0), (dxgi.dml_index(True), dxgi.dml_index(False))
-        with patch.dict("sys.modules", {"torch_directml": None}):
-            assert UP._dml_dgpu_id() == 0, UP._dml_dgpu_id()
-            with patch.object(XL, "_igpu_dev", None):
-                assert XL._dml_igpu_id() == 1, XL._dml_igpu_id()
-        seen = []
-        with patch.object(ort, "get_available_providers", lambda: ["DmlExecutionProvider", "CPUExecutionProvider"]), \
-                patch.object(ort, "InferenceSession", lambda path, providers: seen.append(providers) or "s"):
-            SP._ort_session(Path("x.onnx"), "igpu_directml")
-            SP._ort_session(Path("x.onnx"), "cpu")
-        assert seen == [[("DmlExecutionProvider", {"device_id": 1})], ["CPUExecutionProvider"]], seen
-    with patch.object(dxgi, "adapters", lambda: []), patch.dict("sys.modules", {"torch_directml": None}), patch.object(XL, "_igpu_dev", None):
-        try:
-            XL._dml_igpu_id()
-            raise AssertionError("no error")
-        except RuntimeError:
-            pass
-    got = dxgi.adapters()
-    assert isinstance(got, list) and all(isinstance(n, str) and isinstance(s, bool) for n, s in got), got
+    from backend import dxgi, upscaler as UP, sdxl_pipeline as XL
+    laptop = [{"index": 0, "name": "AMD Radeon(TM) Graphics", "software": False}, {"index": 1, "name": "AMD Radeon RX 6800M", "software": False},
+              {"index": 2, "name": "Microsoft Basic Render Driver", "software": True}]
+    only_dgpu = [{"index": 0, "name": "AMD Radeon RX 6800M", "software": False}, {"index": 1, "name": "Microsoft Basic Render Driver", "software": True}]
+    tdml = SimpleNamespace(device_count=lambda: 2, device_name=lambda i: ["AMD Radeon RX 6800M", "AMD Radeon(TM) Graphics"][i])
+    ort = SimpleNamespace(get_available_providers=lambda: ["DmlExecutionProvider", "CPUExecutionProvider"])
+    with patch.dict(sys.modules, {"torch_directml": tdml, "onnxruntime": ort}):        # torch-directml's own order must not leak into ONNX Runtime's numbers
+        with patch.object(dxgi, "adapters", lambda: laptop):
+            assert (dxgi.dml_index(True), dxgi.dml_index(False)) == (0, 1)
+            assert XL._dml_igpu_id() == 0 and UP._dml_dgpu_id() == 1
+            assert UP._ort_providers() == [("DmlExecutionProvider", {"device_id": 1}), "CPUExecutionProvider"]
+        with patch.object(dxgi, "adapters", lambda: only_dgpu):
+            assert dxgi.dml_index(True) is None and dxgi.dml_index(False) == 0          # the software renderer is never picked
+        with patch.object(dxgi, "adapters", lambda: []):                                # DXGI unreachable: ONNX Runtime's own pick
+            assert UP._ort_providers()[0] == ("DmlExecutionProvider", {})
+        exported = []
+        vega = [dict(laptop[0], vendor=0x1002, device=0x1638)] + laptop[1:]
+        for adapters, why in ((only_dgpu, "no iGPU"), (vega, "Vega-class")):
+            with patch.object(dxgi, "adapters", lambda a=adapters: a), patch.object(XL, "_export_sdxl_te1_to_onnx", lambda *a: exported.append(1)), \
+                    patch.object(XL, "_cached_model_stem", None):
+                try:
+                    XL._get_ort_sessions(object(), "stem")
+                    raise AssertionError("no error without a usable iGPU")
+                except RuntimeError as e:
+                    assert why in str(e), e
+        assert not exported
+        # a Vega iGPU (named only "AMD Radeon(TM) Graphics" on the laptop: the DXGI DeviceId tells) gets no stage; a 780M does
+        with patch.object(dxgi, "adapters", lambda: vega):
+            assert dxgi.offload_igpu()[0] is None and "Vega-class" in dxgi.offload_igpu()[1] and dxgi.dml_index(True) == 0
+        with patch.object(dxgi, "adapters", lambda: [{"index": 0, "name": "AMD Radeon 780M Graphics", "software": False, "vendor": 0x1002, "device": 0x15BF}]):
+            assert dxgi.offload_igpu() == (0, "")
+        # SmartSplit under ZLUDA on the laptop: nothing to offload to, and it says why
+        import torch
+        from backend import smartsplit_pipeline as SP
+        with patch.object(dxgi, "adapters", lambda: vega), patch.object(torch.cuda, "is_available", lambda: True), \
+                patch.object(torch.cuda, "get_device_name", lambda i=0: "AMD Radeon RX 6800M [ZLUDA]"):
+            cap = SP.detect_smartsplit_capability()
+        assert not cap.possible and not cap.igpu_vae_available and "Vega-class" in cap.reason, cap
+    # the real DXGI list of this PC (Windows): hardware adapters have a name and a LUID, the numbers count from 0
+    real = dxgi.adapters()
+    if sys.platform == "win32":
+        assert real and [a["index"] for a in real] == list(range(len(real))) and all(a["name"] and a["luid"].startswith("luid_0x") for a in real), real
 
 
 @test("download_models: a download goes to .part, resumes there, and gets its name only with the right size and SHA-256; a half file from the old script resumes, the wrong hash is removed")
@@ -1933,6 +1958,13 @@ def _():
     with patch.object(_app._sdxl, "device", "privateuseone:1"), patch.object(SX, "_accel_te_enabled", False), patch.object(SX, "_dml_igpu_id", lambda: 0):
         out = fn(True)
         assert out.get("value") is not False and "enabled" in out.get("info", "") and SX._accel_te_enabled is True, out
+    from backend import dxgi
+    vega = [{"index": 0, "name": "AMD Radeon(TM) Graphics", "software": False, "vendor": 0x1002, "device": 0x1638},
+            {"index": 1, "name": "AMD Radeon RX 6800M", "software": False}]
+    with patch.object(_app._sdxl, "device", "privateuseone:1"), patch.object(SX, "_accel_te_enabled", False), patch.object(dxgi, "adapters", lambda: vega):
+        out = fn(True)
+        info = out.get("info", "")
+        assert out.get("value") is False and info.startswith("⚠ Accelerated text encoding stays off") and "Vega-class" in info and SX._accel_te_enabled is False, out
 
 
 @test("LoRA trainer on native ROCm + GPU: the base model comes in over the read-only mapping and the preflight counts it so; on the CPU, under ZLUDA or for a non-native PC the old load and factors stay")

@@ -195,20 +195,14 @@ class Upscaler:
 
 
 # ── Utility ────────────────────────────────────────────────────────────────────
-def _dml_dgpu_id() -> int:
-    """DML index of the discrete GPU. DML order differs per machine: 0 is the
-    780M iGPU on the 8700G workstation but the RX 6800M on the laptop."""
+def _dml_dgpu_id() -> int | None:
+    """ONNX Runtime's DirectML device_id of the discrete GPU (the DXGI number, backend/dxgi.py), None when DXGI lists none.
+    It used torch-directml's number: 0 = the RX 6800M there, but device_id 0 = the Vega iGPU on the laptop."""
     try:
-        import torch_directml
-        from backend.hardware_detector import _classify_gpu
-        for i in range(torch_directml.device_count()):
-            if not _classify_gpu(torch_directml.device_name(i))[1]:
-                return i
+        from backend import dxgi
+        return dxgi.dml_index(igpu=False)
     except Exception:
-        pass
-    from backend.dxgi import dml_index          # no torch-directml (native ROCm): DXGI numbers the adapters the same way
-    idx = dml_index(igpu=False)
-    return 0 if idx is None else idx
+        return None
 
 
 def _ort_providers() -> list:
@@ -216,7 +210,8 @@ def _ort_providers() -> list:
     import onnxruntime as ort
     available = ort.get_available_providers()
     if "DmlExecutionProvider" in available:
-        return [("DmlExecutionProvider", {"device_id": _dml_dgpu_id()}), "CPUExecutionProvider"]
+        dgpu = _dml_dgpu_id()       # None: ONNX Runtime's own pick, the high-performance GPU
+        return [("DmlExecutionProvider", {} if dgpu is None else {"device_id": dgpu}), "CPUExecutionProvider"]
     if "CUDAExecutionProvider" in available:
         return ["CUDAExecutionProvider", "CPUExecutionProvider"]
     return ["CPUExecutionProvider"]

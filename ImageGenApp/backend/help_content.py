@@ -1202,10 +1202,12 @@ def hardware_html() -> str:
 <li>Click <b>Apply SmartSplit Config</b>.</li>
 <li>Load any <b>SD 1.5</b> model — the SmartSplit pipe auto-builds.</li>
 <li>⚠️ SmartSplit is <b>not used for SDXL</b> — SDXL uses the accelerated text encoding above instead.</li>
+<li>⚠️ Nothing is offloaded to a <b>Vega-class iGPU</b> (Ryzen 2000–5000 APUs, e.g. an RX 6800M laptop's): its SD 1.5 VAE decode took 8 s against the RX 6800M's 0.5 s and then hung it (a driver reset of the GPU that drives the screen). SmartSplit and the accelerated text encoding say so and stay off there.</li>
 </ol>
 <div class="hg-note">""" + _cn(
         "SmartSplit仅适用于SD 1.5模型，将文本编码器和VAE分流到CPU/集显，释放独显显存。"
         "SDXL模型使用上面的加速文本编码方案。"
+        "Vega 级集显（锐龙 2000–5000 APU，例如 RX 6800M 笔记本的集显）不会分到任何阶段：它的 SD 1.5 VAE 解码要 8 秒（RX 6800M 0.5 秒），随后卡死并触发驱动重置。"
     ) + "</div>"
 
     h += '<div class="hg-h3">VRAM Requirements &nbsp;<span class="cn">显存需求参考</span></div>'
