@@ -61,6 +61,7 @@ _ocr_langs: list[str] | None = None
 def _get_ocr_reader(langs: list[str]):
     global _ocr_reader, _ocr_langs
     if _ocr_reader is None or _ocr_langs != langs:
+        _memory.make_room(OCR_COMMIT_GB)
         import easyocr
         try:
             import torch
@@ -93,6 +94,26 @@ def _get_lama_session():
             providers=["CPUExecutionProvider"],   # DML crashes on this model
         )
     return _lama_session
+
+
+def _release_ocr() -> bool:
+    global _ocr_reader, _ocr_langs
+    was = _ocr_reader is not None
+    _ocr_reader, _ocr_langs = None, None
+    return was
+
+
+def _release_lama() -> bool:
+    global _lama_session
+    was = _lama_session is not None
+    _lama_session = None
+    return was
+
+
+from backend import memory_guard as _memory      # noqa: E402
+_memory.register("EasyOCR", _release_ocr)
+_memory.register("LaMa", _release_lama)
+OCR_COMMIT_GB = 4.5     # EasyOCR on the GPU took ~3 GB of free commit (ZLUDA, RX 9070 XT)
 
 
 # ── Detection ──────────────────────────────────────────────────────────────────
@@ -578,7 +599,7 @@ def inpaint_lama(
 
 
 SD_INPAINT_PROMPT = "seamless background, clean"       # never name text here: "no text, no watermark" in the prompt drew new letters where the mark was
-SD_INPAINT_STRENGTH = 0.6       # over an OpenCV fill: at 1.0 the model redrew the band from noise and invented clothes, a face or letters
+SD_INPAINT_STRENGTH = 0.6       # over a fill: at 1.0 the model redrew the band from noise and invented clothes, a face or letters
 
 
 def inpaint_sd(
@@ -632,7 +653,13 @@ def inpaint_sd(
         cy = (y1 + y2) // 2
         y1 = max(0, min(H - min_side, cy - min_side // 2)); y2 = y1 + min_side
     box = (int(x1), int(y1), int(x2), int(y2))
-    crop, crop_mask = inpaint_opencv(image, mask).crop(box), mask.convert("L").crop(box)
+    # the fill it refines: LaMa's (mean difference to the clean picture in a mark's band 18-21, over TELEA 26, LaMa alone 17 but smudged)
+    try:
+        filled = inpaint_lama(image, mask)
+    except Exception as e:
+        print(f"[Watermark] LaMa fill failed ({e}); refining an OpenCV fill instead")
+        filled = inpaint_opencv(image, mask)
+    crop, crop_mask = filled.crop(box), mask.convert("L").crop(box)
 
     # Scale the crop so its long side is the model's native size (multiple of 8)
     cw, ch = crop.size

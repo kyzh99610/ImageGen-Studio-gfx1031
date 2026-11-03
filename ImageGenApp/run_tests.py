@@ -306,19 +306,24 @@ def _():
 print("\n[4/8] ONNX Session & VitisAI EP Fallback")
 # ══════════════════════════════════════════════════════════════════════════
 
-@test("_ort_session (round 26: behaviour): 'npu' asks for VitisAI, 'igpu_directml' for DirectML, 'cpu' for CPU; a provider this onnxruntime lacks falls back to CPU, an unknown device too")
+@test("_ort_session (round 26: behaviour): 'npu' asks for VitisAI, 'igpu_directml' for DirectML on the iGPU's adapter, 'cpu' for CPU; a provider this onnxruntime lacks falls back to CPU, an unknown device too")
 def _():
     import sys
     from types import SimpleNamespace
     from unittest.mock import patch
+    from backend import dxgi       # imported before patch.dict(sys.modules), which drops whatever was first imported inside it
     from backend.smartsplit_pipeline import _ort_session
     made = []
     fake = SimpleNamespace(get_available_providers=lambda: avail[0], InferenceSession=lambda path, providers=None: made.append((path, providers)) or "session")
     avail = [["VitisAIExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"]]
-    with patch.dict(sys.modules, {"onnxruntime": fake}):
-        for ep, want in (("npu", "VitisAIExecutionProvider"), ("igpu_directml", "DmlExecutionProvider"), ("cpu", "CPUExecutionProvider"), ("something-else", "CPUExecutionProvider")):
+    with patch.dict(sys.modules, {"onnxruntime": fake}), patch.object(dxgi, "dml_index", lambda igpu: 2 if igpu else 0):
+        for ep, want in (("npu", "VitisAIExecutionProvider"), ("igpu_directml", ("DmlExecutionProvider", {"device_id": 2})), ("cpu", "CPUExecutionProvider"), ("something-else", "CPUExecutionProvider")):
             made.clear()
             assert _ort_session(Path("m.onnx"), ep) == "session" and made == [("m.onnx", [want])], (ep, made)
+        with patch.object(dxgi, "dml_index", lambda igpu: None):              # DXGI lists no iGPU: DirectML's own default
+            made.clear()
+            _ort_session(Path("m.onnx"), "igpu_directml")
+            assert made == [("m.onnx", ["DmlExecutionProvider"])], made
         avail[0] = ["CPUExecutionProvider"]                                   # no VitisAI / DML in this onnxruntime: CPU, with the model path unchanged
         for ep in ("npu", "igpu_directml"):
             made.clear()
@@ -493,6 +498,25 @@ def _():
     src = Path(APP_DIR / "app.py").read_text(encoding="utf-8")
     assert '_smartsplit_pipe = None' in src
     assert 'SmartSplit disabled (SDXL not supported' in src
+
+@test("Civitai ▶ Next stops at the last page: an API call or a quick double click went to 'Page 2 / 1' with empty cards")
+def _():
+    import app as _app
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    nxt = getattr(by["do_next_page"].fn, "__wrapped__", by["do_next_page"].fn)
+    old = (_app._search_all_results, _app._search_page)
+    try:
+        for n, last in ((0, 0), (20, 0), (21, 1), (45, 2)):
+            _app._search_all_results, _app._search_page = [None] * n, 0
+            for _ in range(5):
+                try:
+                    nxt()
+                except Exception:
+                    pass                                                 # rendering placeholder results may fail; the page number is what counts
+            assert _app._search_page == last, (n, _app._search_page, last)
+    finally:
+        _app._search_all_results, _app._search_page = old
+
 
 @test("SmartSplit rejects SDXL in on_apply_split (round 26: behaviour: the handler run with an SDXL pipeline loaded, no SmartSplit pipe is built)")
 def _():
@@ -1699,6 +1723,21 @@ def _():
                 assert part.moves[0] == "cpu" and part.moves[-1] == "cuda:7", (fn.__name__, part.moves)
 
 
+@test("SmartSplit names the process's own GPU: 'iGPU' when the app runs on the 780M (launch.bat --gpu 1), where it said dGPU")
+def _():
+    from unittest.mock import patch
+    import config
+    from backend import smartsplit_pipeline as SP
+    for kind in ("iGPU", "dGPU"):
+        with patch.object(SP, "_main_gpu", lambda k=kind: k):
+            assert f"CUDA ({kind})" in SP.SmartSplitConfig(enabled=True, unet_device="cuda").describe()
+            assert SP._session_device(None, "igpu_directml") == kind
+    for name, kind in (("Radeon 7", "iGPU"), ("AMD Radeon 780M Graphics", "iGPU"), ("AMD Radeon RX 9070 XT", "dGPU"), ("AMD Radeon RX 6800M [ZLUDA]", "dGPU")):
+        with patch.object(config, "DEVICE", "cuda:0"), patch("torch.cuda.get_device_name", lambda i=0, n=name: n):
+            assert SP._main_gpu() == kind, name
+    with patch.object(config, "DEVICE", "cpu"):
+        assert SP._main_gpu() == "dGPU"
+
 @test("SmartSplit says where a stage really runs; VAE → CPU decodes on the CPU in fp32 and leaves the shared VAE alone")
 def _():
     from unittest.mock import MagicMock, patch
@@ -1800,6 +1839,199 @@ def _():
     assert "get-pip" not in ps.split("# A pinned wheel")[0] and "bootstrap.pypa.io" not in ps and '$PIP_SHA256' in ps.split("$env:IMAGEGEN_PIP_WHL")[2], "pip must come from the pinned wheel"
 
 
+@test("DirectML device numbers without torch-directml: DXGI's adapter order (the upscaler's card, accelerated TE's and SmartSplit's iGPU)")
+def _():
+    from unittest.mock import patch
+    import onnxruntime as ort
+    from backend import dxgi, smartsplit_pipeline as SP, sdxl_pipeline as XL, upscaler as UP
+    listed = [("AMD Radeon 780M Graphics", False), ("AMD Radeon RX 9070 XT", False), ("Microsoft Basic Render Driver", True)]
+    with patch.object(dxgi, "adapters", lambda: listed):
+        assert (dxgi.dml_index(True), dxgi.dml_index(False)) == (0, 1), (dxgi.dml_index(True), dxgi.dml_index(False))
+    with patch.object(dxgi, "adapters", lambda: [("AMD Radeon RX 6800M", False), ("AMD Radeon(TM) Graphics", False)]):    # the laptop's order
+        assert (dxgi.dml_index(True), dxgi.dml_index(False)) == (1, 0), (dxgi.dml_index(True), dxgi.dml_index(False))
+        with patch.dict("sys.modules", {"torch_directml": None}):
+            assert UP._dml_dgpu_id() == 0, UP._dml_dgpu_id()
+            with patch.object(XL, "_igpu_dev", None):
+                assert XL._dml_igpu_id() == 1, XL._dml_igpu_id()
+        seen = []
+        with patch.object(ort, "get_available_providers", lambda: ["DmlExecutionProvider", "CPUExecutionProvider"]), \
+                patch.object(ort, "InferenceSession", lambda path, providers: seen.append(providers) or "s"):
+            SP._ort_session(Path("x.onnx"), "igpu_directml")
+            SP._ort_session(Path("x.onnx"), "cpu")
+        assert seen == [[("DmlExecutionProvider", {"device_id": 1})], ["CPUExecutionProvider"]], seen
+    with patch.object(dxgi, "adapters", lambda: []), patch.dict("sys.modules", {"torch_directml": None}), patch.object(XL, "_igpu_dev", None):
+        try:
+            XL._dml_igpu_id()
+            raise AssertionError("no error")
+        except RuntimeError:
+            pass
+    got = dxgi.adapters()
+    assert isinstance(got, list) and all(isinstance(n, str) and isinstance(s, bool) for n, s in got), got
+
+
+@test("download_models: a download goes to .part, resumes there, and gets its name only with the right size and SHA-256; a half file from the old script resumes, the wrong hash is removed")
+def _():
+    import hashlib
+    import importlib.util
+    import tempfile
+    from unittest.mock import patch
+    import requests
+    spec = importlib.util.spec_from_file_location("download_models_t", str(Path(__file__).parent / "download_models.py"))
+    DM = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(DM)
+    blob = bytes(range(256)) * 40
+    good = hashlib.sha256(blob).hexdigest()
+    asked = []
+
+    class R:
+        def __init__(self, start):
+            self.status_code, self._data = (206, blob[start:]) if start else (200, blob)
+
+        def iter_content(self, chunk_size):
+            yield self._data[:1000]
+            yield self._data[1000:]
+
+    def get(url, headers=None, **kw):
+        start = int((headers or {}).get("Range", "bytes=0-")[6:-1])
+        asked.append(start)
+        return R(start)
+    d = Path(tempfile.mkdtemp())
+    dest = d / "m.safetensors"
+    with patch.object(requests, "get", get):
+        (d / "m.safetensors.part").write_bytes(blob[:3000])                # an interrupted run
+        assert DM.download("u", dest, len(blob), good) and dest.read_bytes() == blob and not (d / "m.safetensors.part").exists()
+        assert asked == [3000], asked
+        dest.unlink()
+        assert not DM.download("u", dest, len(blob), "0" * 64) and not dest.exists() and not (d / "m.safetensors.part").exists()
+        with patch.object(DM, "MODELS", [{"name": "m", "url": "u", "dest": dest, "bytes": len(blob), "sha256": good}]), \
+                patch.object(DM, "CKPT_DIR", d), patch.object(DM, "VAE_DIR", d):
+            dest.write_bytes(blob[:5000])                                    # the old script wrote straight to the name
+            asked.clear()
+            assert DM.main() == 0 and dest.read_bytes() == blob and asked == [5000], asked
+            asked.clear()
+            assert DM.main() == 0 and asked == []                           # complete: nothing fetched
+            dest.write_bytes(blob + b"x")                                    # someone else's file of that name: never touched
+            assert DM.main() == 1 and dest.read_bytes() == blob + b"x"
+    src = (Path(__file__).parent / "download_models.py").read_text(encoding="utf-8")
+    assert "/resolve/main/" not in src and src.count('"sha256":') == len(DM.MODELS) == 4
+    bat = (Path(__file__).parent / "download_models.bat").read_text(encoding="cp1252")
+    assert "python-rocm\\Scripts\\python.exe" in bat
+
+
+@test("Accelerated SDXL text encoding stays off on a GPU backend and says why (the text encoders run on the card; the iGPU's export and sessions cost ~6 GB of commit); DirectML and the CPU may use it")
+def _():
+    from unittest.mock import patch
+    import app as _app
+    from backend import sdxl_pipeline as SX
+    assert SX.accel_te_problem("cuda:0") and "DirectML" in SX.accel_te_problem("cuda")
+    assert SX.accel_te_problem("privateuseone:1") is None and SX.accel_te_problem("cpu") is None
+    fn = next(f.fn for f in _app.build_app().fns if getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "") == "on_accel_te_toggle")
+    with patch.object(_app._sdxl, "device", "cuda:0"), patch.object(SX, "_accel_te_enabled", False):
+        out = fn(True)
+        assert out.get("value") is False and "already run on your GPU" in out.get("info", "") and SX._accel_te_enabled is False, out
+        assert "disabled" in fn(False).get("info", "")
+    with patch.object(_app._sdxl, "device", "privateuseone:1"), patch.object(SX, "_accel_te_enabled", False), patch.object(SX, "_dml_igpu_id", lambda: 0):
+        out = fn(True)
+        assert out.get("value") is not False and "enabled" in out.get("info", "") and SX._accel_te_enabled is True, out
+
+
+@test("LoRA trainer on native ROCm + GPU: the base model comes in over the read-only mapping and the preflight counts it so; on the CPU, under ZLUDA or for a non-native PC the old load and factors stay")
+def _():
+    import contextlib
+    import tempfile
+    from unittest.mock import patch
+    import torch
+    import config as C
+    from backend import lora_trainer as LT, model_manager as MM
+    d = Path(tempfile.mkdtemp())
+    ck = d / "base_xl.safetensors"
+    ck.write_bytes(b"\0" * 1024)
+    seen = {}
+
+    @contextlib.contextmanager
+    def ro(dev):
+        seen["ro"] = dev
+        yield
+
+    def problem(path, scale=1.0, mapped=True):
+        seen["mapped"] = mapped
+        return "stop here"
+    for native, device, cuda, want in ((True, "auto", True, ("cuda", True)), (True, "cpu", True, None), (False, "auto", True, None), (True, "auto", False, None)):
+        seen.clear()
+        cfg = LT.TrainingConfig(base_model=str(ck), device=device, dataset_dir=str(d))
+        tr = LT.LoRATrainer(cfg)
+        with patch.object(C, "NATIVE_ROCM", native), patch.object(torch.cuda, "is_available", lambda: cuda), patch.object(MM, "commit_problem", problem), \
+                patch.object(MM, "read_only_checkpoints", ro), patch.object(LT, "use_fp16_base", lambda c: True):
+            try:
+                tr._load_base_model(None)
+                raise AssertionError("the refusal did not stop the load")
+            except RuntimeError as e:
+                assert "stop here" in str(e)
+        assert seen["mapped"] is (want is not None), (native, device, cuda, seen)
+    src = (Path(__file__).parent / "backend" / "lora_trainer.py").read_text(encoding="utf-8")
+    assert "with read_only_checkpoints(on_gpu):" in src
+
+
+@test("commit_problem(check_only=True), the Bridge's question, releases nothing and leaves the first load to come; a real preflight releases cached models and then fits")
+def _():
+    import tempfile
+    from unittest.mock import patch
+    from backend import memory_guard as MG, model_manager as MM
+    f = Path(tempfile.mkdtemp()) / "x.safetensors"
+    f.write_bytes(b"\0" * 2**20)                       # 1 MB: the need is ~2 MB at most
+    free, calls = [0.0005], []
+
+    def rel():
+        calls.append("x")
+        free[0] = 1.0
+        return True
+    with patch.dict(MG._RELEASE, {"cache": (0, rel)}, clear=True), patch.object(MM, "avail_commit_gb", lambda: free[0]), patch.object(MM, "_first_load", [True]):
+        assert "Not enough free memory" in MM.commit_problem(str(f), check_only=True) and calls == [] and MM._first_load == [True]
+        free[0] = 1.0
+        assert MM.commit_problem(str(f), check_only=True) is None and MM._first_load == [True]
+        free[0] = 0.0005
+        assert MM.commit_problem(str(f)) is None and calls == ["x"] and MM._first_load == [False]
+    assert "check_only=True" in (Path(__file__).parent / "app.py").read_text(encoding="utf-8")
+
+
+@test("LoRA trainer: no whole-model .cpu() after training on a GPU (native ROCm or ZLUDA: its second copy ran the commit out); the CPU / DirectML paths keep it")
+def _():
+    src = (Path(__file__).parent / "backend" / "lora_trainer.py").read_text(encoding="utf-8")
+    block = src.split("# ── Cleanup ──")[1].split("elapsed = time.time() - t_start")[0]
+    assert 'if device.type != "cuda":' in block and "self.unet.cpu()" in block and "NATIVE_ROCM" not in block, block
+
+
+@test("memory_guard: short of free commit it lets cached helper models go, cheapest first and the Generate tab's model last, and stops once there is room")
+def _():
+    from unittest.mock import patch
+    from backend import memory_guard as MG, model_manager as MM
+    free = [2.0]
+    calls = []
+
+    def rel(name, gain, loaded=True):
+        def f():
+            calls.append(name)
+            free[0] += gain
+            return loaded
+        return f
+    with patch.dict(MG._RELEASE, {}, clear=True), patch.object(MM, "avail_commit_gb", lambda: free[0]):
+        MG.register("gen", rel("gen", 8), last=True)
+        MG.register("ocr", rel("ocr", 1))
+        MG.register("blip", rel("blip", 0, loaded=False))
+        MG.register("esrgan", rel("esrgan", 3))
+        assert MG.make_room(5.0) == ["ocr", "esrgan"] and calls == ["ocr", "blip", "esrgan"], calls          # enough after ESRGAN: the model stays
+        free[0], calls[:] = 2.0, []
+        assert MG.make_room(9.0, keep=("gen",)) == ["ocr", "esrgan"] and "gen" not in calls
+        free[0], calls[:] = 2.0, []
+        assert MG.make_room(20.0) == ["ocr", "esrgan", "gen"] and calls[-1] == "gen"
+        free[0], calls[:] = 30.0, []
+        assert MG.make_room(5.0) == [] and calls == []
+    import app as _app  # noqa: F401  (registers the app's own)
+    import backend.watermark_remover, backend.auto_tagger, backend.sdxl_pipeline  # noqa: F401,E401
+    assert {"Real-ESRGAN", "EasyOCR", "LaMa", "BLIP", "accelerated text encoders", "the Generate tab's model"} <= set(MG._RELEASE)
+    assert max(MG._RELEASE.items(), key=lambda kv: kv[1][0])[0] == "the Generate tab's model"
+
+
 @test("Pause while hot: a PC with no thermal zone gets a warning, not a ✅, for a limit that can never wait")
 def _():
     from unittest.mock import patch
@@ -1873,7 +2105,7 @@ def _():
                 assert "Not enough free memory" in MM.commit_problem(p)  # 1.9 x 0.00098 does not
 
 
-@test("Read-only checkpoint loads: same tensors as safetensors, every dtype and an empty tensor; only native ROCm on a GPU uses them, and the loader is put back")
+@test("Read-only checkpoint loads: same tensors as safetensors, every dtype and an empty tensor; only a GPU device (native ROCm or ZLUDA) uses them, and the loader is put back")
 def _():
     import tempfile
     from unittest import mock
@@ -1899,8 +2131,9 @@ def _():
             for device in ("cpu", "privateuseone:0"):                  # these paths fuse LoRAs in place on the CPU
                 with MM.read_only_checkpoints(device):
                     assert SFU.load_state_dict is original
-        with mock.patch("config.NATIVE_ROCM", False), MM.read_only_checkpoints("cuda:0"):
-            assert SFU.load_state_dict is original
+        with mock.patch("config.NATIVE_ROCM", False), MM.read_only_checkpoints("cuda:0"):      # ZLUDA's GPU path too
+            assert SFU.load_state_dict is not original
+        assert SFU.load_state_dict is original
         del got
 
 
@@ -7576,6 +7809,24 @@ def _():
     assert _app._hand_note([{"stars": 5, "flags": []}]) == ""
 
 
+@test("⭐ rating: the hand count goes over the second look's confirmed boxes — a turret / leaf box costs no star, a confirmed third hand does")
+def _():
+    from PIL import Image
+    from backend import detail_tools as D
+    from backend import image_score as S
+    im = Image.new("RGB", (400, 600), "white")
+    boxes = [(10, 10, 60, 60), (100, 100, 150, 150), (200, 200, 250, 250)]
+    old = (S.available, D.detect_hands, D.confirmed_hands)
+    try:
+        S.available = lambda: {"look": False, "faces": False, "hands": True, "identity": False}
+        D.detect_hands = lambda image, *a, **k: list(boxes)
+        for confirmed, flagged in ((boxes[:2], False), (boxes, True)):
+            D.confirmed_hands = lambda image, bx, c=confirmed: [b for b in bx if b in c]
+            r = S.score_images([im], "", speck_fn=None, judge_fn=lambda i: (0, 0))[0]
+            assert ("3 hands" in r["flags"]) == flagged and r["stars"] == (4 if flagged else 5), (confirmed, r)
+    finally:
+        S.available, D.detect_hands, D.confirmed_hands = old
+
 @test("✨ Polish remembered + Auto per picture (round 50): the dropdown is the extra key `polish` (saved settings, last session, restore), Auto picks the recipe of EACH picture's own resolved prompt inside do_generate (a pose adds '— hands'), the record / A1111 text / PNG Info name it")
 def _():
     import json as _j
@@ -7701,7 +7952,9 @@ def _():
                        "stop_at": "07:00", "max_hours": -5, "gate": {"block_tags": ["Explicit"], "faces": 1, "park_after": 2}, "junk": 1})
     assert [q["settings"] for q in p["presets"]] == ["a", "b"] and p["presets"][0]["count"] == 3 and p["presets"][1]["count"] == 8
     assert p["presets"][1]["prompt_suffix"] == "night" and p["max_hours"] == 0.05 and "junk" not in p and p["gate"]["block_tags"] == ["explicit"]
-    for bad in ({}, {"presets": []}, {"presets": ["a"], "stop_at": "7pm"}, []):
+    for ok in ("", "(off)", "Auto", "Full body — max detail"):
+        assert LP.clean_plan({"presets": ["a"], "polish": ok})["polish"] == ok
+    for bad in ({}, {"presets": []}, {"presets": ["a"], "stop_at": "7pm"}, [], {"presets": ["a"], "polish": "Full Body"}, {"presets": ["a"], "polish": "off"}):
         try:
             LP.clean_plan(bad)
             raise AssertionError(bad)
@@ -7712,6 +7965,13 @@ def _():
     assert LP.verdict({"stars": 5, "flags": []}, {"explicit": 0.8}, 1, g)[0] == "reject"
     assert LP.verdict({"stars": 5, "flags": []}, {"smile": 0.9, "explicit": 0.2}, 1, g)[0] == "best"     # under the threshold
     assert LP.verdict({"stars": 5, "flags": []}, {"text": 0.7}, 1, g) == ("reject", ["artifact: text"])
+    # something in her hands the prompt never asked for keeps a picture out of 'best' (a reason, never a reject)
+    assert LP.verdict({"stars": 5, "flags": []}, {"holding": 0.71, "holding_pen": 0.5}, 1, g, prompt="1girl, office") == \
+        ("ok", ["holds something the prompt does not ask for (holding pen 0.50)"])
+    assert LP.verdict({"stars": 5, "flags": []}, {"holding": 0.71}, 1, g, prompt="1girl, holding umbrella")[0] == "best"
+    assert LP.verdict({"stars": 5, "flags": []}, {"holding": 0.71}, 1, g)[0] == "best"                 # no prompt: not judged
+    assert LP.verdict({"stars": 5, "flags": []}, {"holding": 0.3}, 1, g, prompt="1girl")[0] == "best"
+    assert LP.verdict({"stars": 3, "flags": ["2 faces"]}, {"holding": 0.9}, 1, g, prompt="1girl")[0] == "review"
     assert LP.verdict({"stars": 5, "flags": []}, {}, 2, g) == ("reject", ["2 faces"])
     assert LP.verdict({"stars": 5, "flags": []}, {}, 1, g) == ("best", [])
     assert LP.verdict({"stars": 4, "flags": ["no butterfly 0.3"]}, {}, 1, g)[0] == "ok"
@@ -7894,9 +8154,16 @@ def _():
     for n in ("a_seed1_0.png", "a_seed2_0.png"):
         _os.utime(raw / n, (old, old))
     assert [f.name for f in LP.own_files(raw, ("",), t0, attach=False)] == ["by_hand_0.png"]
-    # the run folder: under the attached app's outputs folder (--raw), else the app's own
+    # the run folder: under the attached app's outputs folder (--raw), else where the app it starts saves (outputs_root: IMAGEGEN_OUTPUTS_DIR or outputs/)
     src = Path(SL.__file__).read_text(encoding="utf-8")
-    assert "loop_root = (Path(a.raw) if (a.attach and a.raw) else APP / \"outputs\") / \"loop\"" in src
+    assert "loop_root = (Path(a.raw) if (a.attach and a.raw) else outputs_root()) / \"loop\"" in src
+    # on its own the loop looks where the app it starts saves: IMAGEGEN_OUTPUTS_DIR when set (2026-11-02: it looked in outputs/ and made its run folder there)
+    from unittest.mock import patch as _patch
+    with _patch.dict(os.environ, {"IMAGEGEN_OUTPUTS_DIR": r"X:\elsewhere"}):
+        assert SL.outputs_root() == Path(r"X:\elsewhere")
+    with _patch.dict(os.environ, {"IMAGEGEN_OUTPUTS_DIR": ""}):
+        assert SL.outputs_root() == SL.APP / "outputs"
+    assert 'APP / "outputs"' not in Path(SL.__file__).read_text(encoding="utf-8").split("def outputs_root")[1].split("\n", 4)[-1]
     # the Settings checkbox: a callable value (read again at each page load) and the pref written by the user's click, not by a page load
     import app as _app
     from backend import neg_hygiene as NH
@@ -8206,6 +8473,9 @@ def _():
     from types import SimpleNamespace
     assert LP.clean_plan({"presets": ["a"]})["explore"] == 0.0 and LP.clean_plan({"presets": ["a"], "explore": 7})["explore"] == 1.0
     assert LP.explore_split(4, 0.25) == (3, 1) and LP.explore_split(4, 0) == (4, 0) and LP.explore_split(2, 1) == (0, 2) and LP.explore_split(1, 0.25) == (1, 0)
+    assert [LP.explore_split(1, 0.5, r)[1] for r in range(2, 8)] == [0, 1, 0, 1, 0, 1]
+    assert [LP.explore_split(1, 0.25, r)[1] for r in range(2, 10)] == [0, 0, 0, 1, 0, 0, 0, 1]
+    assert sum(LP.explore_split(3, 0.4, r)[1] for r in range(2, 12)) == 12 and all(LP.explore_split(3, 0.4, r)[1] <= 3 for r in range(2, 12))
     recs = [dict(settings="s", verdict="ok", stars=4, why=["x"], seed=10), dict(settings="s", verdict="best", stars=5, why=[], seed=20),
             dict(settings="s", verdict="reject", stars=5, why=[], seed=30), dict(settings="t", verdict="best", stars=5, why=[], seed=40)]
     assert LP.best_seed(recs, "s") == 20 and LP.best_seed(recs, "u") is None and LP.best_seed(recs[2:3], "s") is None

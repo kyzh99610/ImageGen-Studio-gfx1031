@@ -71,7 +71,7 @@ def _get_igpu_device() -> str | None:
         if _igpu_dev:
             print(f"[SDXL] iGPU detected for text encoding: {_igpu_dev}")
         else:
-            print("[SDXL] No iGPU found — text encoding will use CPU (float32)")
+            print("[SDXL] No iGPU through torch-directml")
     return _igpu_dev
 
 
@@ -206,9 +206,24 @@ def _dml_igpu_id() -> int:
     index 0 is the discrete GPU (e.g. an RX 6800M), so a hardcoded 0 would put the text encoders on the
     same dGPU the UNet is using."""
     igpu = _get_igpu_device()
-    if igpu is None:
+    if igpu is not None:
+        return int(igpu.split(":")[1])
+    from backend.dxgi import dml_index          # no torch-directml (native ROCm): DXGI numbers the adapters the same way
+    idx = dml_index(igpu=True)
+    if idx is None:
         raise RuntimeError("no iGPU found for accelerated text encoding")
-    return int(igpu.split(":")[1])
+    return idx
+
+
+def accel_te_problem(device) -> str | None:
+    """Why accelerated text encoding stays off for a pipeline on this device, or None. On a GPU backend the text encoders already run on the card.
+    Measured on native ROCm (RX 9070 XT + 780M, SDXL loaded): the OpenCLIP-G export took free commit from 11.3 to 5.9 GB and kept 2.3 GB, the two
+    DirectML sessions on the iGPU held 3.7 GB more (released, 0.6 GB came back), and after one picture the export ran the commit out; a new prompt
+    took 250-330 ms on the iGPU against ~0.5 s on the card, and a repeated one is cached there (4 ms)."""
+    if str(device).startswith("cuda"):
+        return ("Off on this backend: the text encoders already run on your GPU (about 0.5 s for a new prompt, a repeated one is cached). The iGPU would "
+                "save under 0.3 s per prompt and hold ~6 GB of memory. It is for the DirectML backend, where they run on the CPU.")
+    return None
 
 
 def set_sdxl_npu_te(enabled: bool):
@@ -379,6 +394,17 @@ def _tokenize_chunked(tokenizer, text: str, max_len: int = 77):
         chunks.append(padded.reshape(1, max_len))
 
     return chunks
+
+
+def _release_accel_te() -> bool:
+    global _te1_session, _te2_session, _cached_model_stem
+    was = _te1_session is not None or _te2_session is not None
+    _te1_session = _te2_session = _cached_model_stem = None
+    return was
+
+
+from backend import memory_guard as _memory      # noqa: E402
+_memory.register("accelerated text encoders", _release_accel_te)
 
 
 def _get_ort_sessions(pipe, model_stem: str):
@@ -1206,7 +1232,7 @@ class SDXLPipeline:
             _stem = Path(self.current_model).stem if self.current_model else "sdxl"
             embeds = _build_sdxl_accel_embeds(self.pipe, prompt, negative_prompt, _stem)
             if embeds is None:
-                print(f"[SDXL] Accelerated encoding failed, falling back to CPU...")
+                print(f"[SDXL] Accelerated encoding failed, using the normal text encoders...")
 
         if embeds is None:
             _te_dev = next(self.pipe.text_encoder.parameters()).device

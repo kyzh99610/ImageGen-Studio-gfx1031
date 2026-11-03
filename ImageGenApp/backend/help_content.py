@@ -457,7 +457,7 @@ def parameters_html() -> str:
              "for example overnight — exactly as 💾 Load + ✨ Generate would, so Polish, the detail passes, colour strength and pose control all apply. "
              "Every picture is scored on the CPU (one face, hands that look off, the card's hair / eye colours and identity when the plan names a card, "
              "WD14 tags) and filed under outputs\\loop\\<run>\\ in best / ok / review / reject; a picture with an exposure tag or an artifact "
-             "(text, watermark, border, several views, a second girl) is rejected. Between rounds a setting that kept nothing for two rounds is parked "
+             "(text, watermark, border, several views, a second girl) is rejected; something in her hands that the prompt never asks for (WD14 sees pens and cards, not glowing orbs) keeps a picture out of best. Between rounds a setting that kept nothing for two rounds is parked "
              "(the report lists it under “needs a prompt fix”) and one whose pictures you ⭐ in the History tab gets more pictures. "
              "A plan is a JSON file in settings\\loop\\ (copy loop_example.json next to the app): the saved settings, pictures per round, a stop "
              "time (HH:MM) or an hour budget, an optional character card, and the tags that reject a picture. The loop starts its own app (close "
@@ -467,7 +467,7 @@ def parameters_html() -> str:
              _cn("在 🔁 Studio Loop 标签页里可以新建/选择计划，▶ 开始在当前程序上运行（你自己的生成会在它的两张图之间排队），⏹ 在当前设置完成后停止，🔄 状态显示日志、报告和最佳图片。"
                  "该标签页（或 studio_loop.bat <计划>）会在无人值守时（例如整夜）一轮又一轮地渲染你的已保存设置（💾 已保存设置列表），效果与 💾 加载 + ✨ 生成完全相同，"
                  "Polish、细节重绘、颜色强度、姿势控制都会生效。每张图都在 CPU 上评分（单张脸、看起来不对的手、计划指定角色卡时的发色/瞳色与身份、WD14 标签），"
-                 "并按 best / ok / review / reject 存入 outputs\\loop\\<运行>\\；带有暴露标签或瑕疵（文字、水印、边框、多视图、第二个女孩）的图会被拒绝。"
+                 "并按 best / ok / review / reject 存入 outputs\\loop\\<运行>\\；带有暴露标签或瑕疵（文字、水印、边框、多视图、第二个女孩）的图会被拒绝；手里拿着提示词没要求的东西（WD14 认得出笔和牌，认不出发光的球）的图不会进 best。"
                  "每轮之间，连续两轮没有留下好图的设置会被暂停（报告里列在“需要修改提示词”下），你在历史标签页加 ⭐ 的设置会多出图。"
                  "计划是 settings\\loop\\ 里的 JSON 文件（复制程序旁的 loop_example.json）：已保存设置、每轮张数、停止时间（HH:MM）或小时数、可选的角色卡、"
                  "以及会拒绝图片的标签。循环会自己启动程序（请先关掉你的：同一张显卡上开两个程序会爆显存），或用 --attach URL 连接已运行的程序；"
@@ -536,7 +536,7 @@ def parameters_html() -> str:
              "Character cards → “🎴▶ Generate every outfit”: each outfit × N seeds (the same seeds for every outfit) "
              "with the current settings, then a labelled contact sheet. Pairs already made with the same settings "
              "are skipped, so a stopped run resumes. Every picture gets a ⭐ rating (n/5) on the sheet from CPU checks "
-             "whose models are already cached: one face / at most two hands, the card's hair and eye colours and its "
+             "whose models are already cached: one face / at most two hands (a box the hand detector's second look doesn't confirm, such as a turret or a leaf, doesn't count), the card's hair and eye colours and its "
              "hair pin on the head crop — with the reasons for anything below 5. After “🧬 Learn her look” (3 or more "
              "pictures of her with a face ≥ 100 px — pose and lighting don't matter, but hair and headwear do: include the hats, ponytails and buns of the "
              "outfits you will judge; the first use downloads the 150 MB CCIP anime-character model) it also flags a face that is further from her than her own pictures are. Measured on 247 existing "
@@ -547,7 +547,7 @@ def parameters_html() -> str:
              "fell under the old margin, 13 % under the new one; another girl is still flagged every time). The colour-specks check is only a note since round 14 (📝 \"colour specks — lace, fur or noise? look\", no star taken): white lace and fur set it off "
              "on good pictures (20 of 21 such flags in a 130-picture check) and it sees only 4 of 10 truly garbled pictures, so look at the picture. A second note, 📝 \"a hand may be broken\" (round 48, no star), comes from the hand detector's score on each hand's crop: below 0.7 it is right about 9 times in 10 on SDXL pictures (false alarms 3-10 %) but sees only about half of the broken hands.",
              _cn("角色卡 →“生成所有服装”：每套服装 × N 个种子（种子相同便于对比），最后生成对比图；已生成的会跳过，可断点续跑。"
-                 "对比图上每张图有 ⭐ 评分（n/5）：一张脸/至多两只手、角色卡的发色瞳色与发饰（仅用已缓存的模型在 CPU 上检查；彩色斑点只作备注，不扣星）。"
+                 "对比图上每张图有 ⭐ 评分（n/5）：一张脸/至多两只手（只数经二次确认的手，炮塔、落叶之类不算）、角色卡的发色瞳色与发饰（仅用已缓存的模型在 CPU 上检查；彩色斑点只作备注，不扣星）。"
                  "用“🧬 Learn her look”（3 张以上她的图，脸宽 ≥ 100 像素，姿势/光线不限，但发型和头饰有影响：请包含要检查的服装里的帽子、马尾、丸子头；首次使用会下载 150 MB 的 CCIP 动漫角色识别模型）学习后还会标出比她本人图更不像她的脸（247 张现有图实测：她自己的图误报约 3%，同标签无 LoRA 的相似脸最多约 1/5，同标签的其他角色最多约 1/3（参考图越相近检出越多），其他女孩 100%；小于 100 像素的脸不判断）。仅作提示，不是定论。参考图只有普通日光照时，v3 角色卡 33 套服装里有 15 套被标记（其实每张都是她）：帽子、马尾、丸子头会改变 CCIP 指纹；参考图包含这类服装后误报降到 11%，提示会写“请肉眼检查”。带帽子或特殊发型的服装现在只有在脸明显不像时才会标记（偏离参考图 5 个标准差，而不是 2 个：这类服装里她自己的图有 46% 低于旧阈值，13% 低于新阈值；其他女孩仍然每次都会标出）。彩色斑点检查现在只是备注，不再扣星（📝“colour specks”）：白色蕾丝和毛皮会让好图误报（130 张图的检查里 20/21 个标记是误报），而且 10 张真正花掉的图只能发现 4 张，请亲眼确认。另有一条备注 📝“a hand may be broken”（不扣星）：用手部检测器对每只手截图的打分判断，低于 0.7 时在 SDXL 图上约 9/10 正确（误报 3-10 %），但只能发现约一半的坏手。")],
             ["🗂 History",
              "Search everything in outputs/ by prompt words, model, LoRA or seed; ⭐ favourites; open an image in PNG "
@@ -1171,11 +1171,11 @@ def hardware_html() -> str:
     On a 780M: ~115ms total vs ~6.4s CPU = <b>56× speedup</b>.</li>
 <li>Quality is identical: cosine similarity >0.9998 vs CPU baseline.</li>
 <li>Supports long prompts (>77 tokens): 75-token chunks cut at tag boundaries; BREAK starts a new one.</li>
-<li>Under ZLUDA this is rarely needed — the text encoders already run on the dGPU.</li>
+<li>On a GPU backend (ZLUDA or native ROCm) it stays off and says why: the text encoders already run on the card (~0.5 s for a new prompt, a repeated one is cached), and the iGPU would save under 0.3 s while its export and sessions hold ~6 GB of memory. It is for the DirectML backend.</li>
 </ol>
 <div class="hg-note">""" + _cn(
         "启用步骤：进入设置标签页 → 勾选⚡加速SDXL文本编码 → 首次使用时自动导出ONNX（每模型一次）→ "
-        "后续运行使用集显（780M上比CPU快56倍）。输出质量不变。ZLUDA下文本编码已在独显运行，通常无需开启。"
+        "后续运行使用集显（780M上比CPU快56倍）。输出质量不变。ZLUDA / 原生 ROCm 下文本编码本来就在独显上运行，此项会保持关闭并说明原因（集显只能每个提示词省不到 0.3 秒，却要占约 6 GB 内存）；它是给 DirectML 后端用的。"
     ) + "</div>"
 
     h += '<div class="hg-h3">GPU Self-Test &nbsp;<span class="cn">GPU自检</span></div>'

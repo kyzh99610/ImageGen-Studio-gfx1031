@@ -2,6 +2,7 @@
 setlocal
 
 set "PYTHON=%~dp0..\python-3.10\python.exe"
+if not exist "%PYTHON%" set "PYTHON=%~dp0..\python-rocm\Scripts\python.exe"
 if not exist "%PYTHON%" set "PYTHON=python"
 
 echo ============================================================

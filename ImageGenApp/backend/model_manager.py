@@ -74,6 +74,8 @@ LOAD_COMMIT_IGPU_EXTRA = 0.5        # with the read-only load: load + picture to
 # With read_only_checkpoints() the file itself takes no commit: only the GPU's copy does. Measured on 6.46 GB SDXL files after an SD 1.5 cycle: 0.82x against 1.83x, the same picture (0/255).
 # First loads, on all 18 checkpoints here, a fresh process each: SDXL 1.19-1.48x against 2.17x, SD 1.5 1.58-1.66x of a 2 GB file (mostly the GPU runtime starting).
 # The load alone is not the whole need: the first picture after it takes ~2.5 GB more (load + picture 1.22x; in the app, with its LoRAs, ~1.3x). 1.1 would let a load through into a crash at that picture.
+# Under ZLUDA (2026-11-02, RX 9070 XT, fresh processes) the read-only load took 1.16x against 2.15x, the same picture (two LoRAs fused, max difference 0), but its first picture
+# took ~5.5 GB more (load + picture ~2.0x in both modes): ZLUDA keeps the copy-on-write factors below, the mapping only lowers its worst point (~0.9 GB) and the trainer's.
 LOAD_COMMIT_FACTOR_MAPPED = 1.4
 LOAD_COMMIT_FACTOR_MAPPED_FIRST = 1.8
 _first_load = [True]
@@ -132,10 +134,10 @@ def _read_only_state_dict(path):
 
 @contextlib.contextmanager
 def read_only_checkpoints(device):
-    """While a pipeline loads with from_single_file: on native ROCm with a GPU, .safetensors files come in over a read-only mapping. The caller must move the model to the GPU before
-    anything writes to its weights (a write to this mapping is an access violation), so the CPU and DirectML paths, which fuse LoRAs in place on the CPU, and the trainer don't use it."""
-    import config
-    if not (getattr(config, "NATIVE_ROCM", False) and str(device).startswith("cuda")):
+    """While a pipeline loads with from_single_file on a GPU (native ROCm or ZLUDA), .safetensors files come in over a read-only mapping. Nothing may write to the weights
+    while they are still on the CPU (a write to this mapping is an access violation): the pipelines move the model to the GPU first, the trainer only reads them there and
+    puts new tensors in place. The CPU and DirectML paths fuse LoRAs in place on the CPU, so they keep safetensors' own load."""
+    if not str(device).startswith("cuda"):
         yield
         return
     from diffusers.loaders import single_file_utils as SFU
@@ -150,10 +152,11 @@ def read_only_checkpoints(device):
         SFU.load_state_dict = original
 
 
-def commit_problem(model_path, scale: float = 1.0, mapped: bool = True) -> str | None:
+def commit_problem(model_path, scale: float = 1.0, mapped: bool = True, check_only: bool = False) -> str | None:
     """A plain-English refusal when the free commit is clearly too small to load this checkpoint (call it after the
     previous model has been unloaded); None when it should fit or can't be judged (not a local file, not Windows).
-    `scale` multiplies the need (the LoRA trainer loads its base model in fp32: x1.5, round 21). `mapped`: the load goes through read_only_checkpoints()."""
+    `scale` multiplies the need (the LoRA trainer loads its base model in fp32: x1.5, round 21). `mapped`: the load goes through read_only_checkpoints().
+    `check_only`: only the question (the Bridge's "would it fit beside SD 1.5?"): nothing is released and the first load stays to come."""
     p = Path(str(model_path))
     if not p.is_file():
         return None
@@ -170,13 +173,18 @@ def commit_problem(model_path, scale: float = 1.0, mapped: bool = True) -> str |
     need = (first if _first_load[0] else later) * size * scale
     if native and _on_integrated_gpu():
         need += LOAD_COMMIT_IGPU_EXTRA * size * scale
+    if free < need and not check_only:     # cached helper models first (Real-ESRGAN, EasyOCR, BLIP …), then look again
+        from backend.memory_guard import make_room
+        if make_room(need):
+            free = avail_commit_gb() or free
     if free >= need:
-        _first_load[0] = False
+        if not check_only:
+            _first_load[0] = False
         return None
-    return (f"Not enough free memory to load {p.name}: while a {size:.1f} GB checkpoint loads, Windows needs about {need:.0f} GB "
+    return (f"Not enough free memory to load {p.name}: while a {size:.1f} GB checkpoint loads, Windows needs about {need:.1f} GB "
             f"of free commit (RAM + page file) and only {free:.1f} GB are free. Loading anyway would crash the app. "
-            f"Close other programs (browsers use a lot) or enlarge the page file (System → Advanced → Performance → "
-            f"Virtual memory), then load it again.")
+            f"Close other programs (browsers use a lot), restart ImageGen Studio (earlier pictures leave ~5 GB in use until then) "
+            f"or enlarge the page file (System → Advanced → Performance → Virtual memory), then load it again.")
 
 
 def lycoris_kind(path: str) -> str | None:

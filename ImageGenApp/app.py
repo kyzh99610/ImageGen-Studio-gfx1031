@@ -183,6 +183,18 @@ sd       = SDPipeline()       # active pipeline — swapped to SDXLPipeline when
 _sd15    = sd                 # keep reference for quick switch-back
 _sdxl    = SDXLPipeline()     # dedicated SDXL / Pony / Illustrious pipeline
 upscaler = Upscaler()
+
+
+def _release_generation_models() -> bool:
+    was = _sd15.pipe is not None or _sdxl.pipe is not None
+    _sd15._unload()
+    _sdxl._unload()
+    return was
+
+
+from backend import memory_guard as _memory      # noqa: E402
+_memory.register("Real-ESRGAN", upscaler.release)
+_memory.register("the Generate tab's model", _release_generation_models, last=True)
 civitai  = CivitaiClient()
 
 # ── Bridge: SD 1.5 LoRAs to restore after the model was freed for the SDXL stage ──
@@ -4643,7 +4655,7 @@ def _build_bridge_tab():
                 model_path = model_path[1] if len(model_path) > 1 else model_path[0]
             xl_must_load = _sdxl.pipe is None or (model_path and _sdxl.current_model != model_path)
             from backend.model_manager import commit_problem
-            commit_short = _commit_short(BRIDGE_COMMIT_SDXL_GB) or bool(xl_must_load and model_path and commit_problem(model_path))
+            commit_short = _commit_short(BRIDGE_COMMIT_SDXL_GB) or bool(xl_must_load and model_path and commit_problem(model_path, check_only=True))
 
             # SD 1.5 + SDXL + SDXL's working memory don't fit in 12 GB: Windows would
             # spill to system RAM (stage 2 went from ~6 s to ~60 s). Free SD 1.5 on
@@ -5688,7 +5700,8 @@ def _build_civitai_tab(model_dd, lora_dd, vae_dd, more_lora_dds=()):
 
     def do_next_page():
         global _search_page
-        _search_page += 1
+        # the button is disabled on the last page, but an API call or a quick double click came through: "Page 2 / 1" with empty cards
+        _search_page = min(_search_page + 1, max(0, (len(_search_all_results) - 1) // _RESULTS_PER_PAGE))
         return _render_page()
 
     def do_prev_page():
@@ -6629,10 +6642,17 @@ def _build_settings_tab():
 
             # ── Accelerated TE toggle handler ─────────────────────────────
             def on_accel_te_toggle(enabled):
-                from backend.sdxl_pipeline import set_sdxl_npu_te, _get_igpu_device
-                if enabled and _get_igpu_device() is None:      # finding the iGPU's DirectML number takes torch-directml, which native ROCm's environment doesn't have
+                from backend.sdxl_pipeline import set_sdxl_npu_te, _dml_igpu_id, accel_te_problem
+                why = accel_te_problem(_sdxl.device) if enabled else None
+                if why:
                     set_sdxl_npu_te(False)
-                    return gr.update(value=False, info="⚠ No iGPU reachable through torch-directml here, so this stays off. The text encoders run on the GPU as usual.")
+                    return gr.update(value=False, info="⚠ " + why)
+                try:
+                    if enabled:
+                        _dml_igpu_id()
+                except RuntimeError:
+                    set_sdxl_npu_te(False)
+                    return gr.update(value=False, info="⚠ No iGPU found for DirectML, so this stays off. The text encoders run on the GPU as usual.")
                 set_sdxl_npu_te(enabled)
                 state = "✅ enabled — iGPU DML" if enabled else "disabled"
                 return gr.update(info=f"Accelerated text encoding {state}")

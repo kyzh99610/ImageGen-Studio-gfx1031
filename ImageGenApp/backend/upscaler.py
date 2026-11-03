@@ -38,14 +38,16 @@ class Upscaler:
     def __init__(self):
         self._onnx_session = None
 
-    def release(self) -> None:
+    def release(self) -> bool:
         """Drop the ONNX session: on DirectML it keeps its memory arena on the dGPU, next to the SD
-        pipeline (the hires pass that follows peaks at ~10 of 12 GB; audit F-28)."""
+        pipeline (the hires pass that follows peaks at ~10 of 12 GB; audit F-28). True when something was loaded."""
+        was = self._onnx_session is not None or getattr(self, "_torch_upsampler", None) is not None
         if self._onnx_session is not None:
             self._onnx_session = None
             import gc
             gc.collect()
         self._torch_upsampler = None
+        return was
 
     # ── Public API ─────────────────────────────────────────────────────────────
     def upscale(
@@ -204,7 +206,9 @@ def _dml_dgpu_id() -> int:
                 return i
     except Exception:
         pass
-    return 0
+    from backend.dxgi import dml_index          # no torch-directml (native ROCm): DXGI numbers the adapters the same way
+    idx = dml_index(igpu=False)
+    return 0 if idx is None else idx
 
 
 def _ort_providers() -> list:

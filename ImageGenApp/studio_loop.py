@@ -41,6 +41,12 @@ from backend import loop_plan as LP  # noqa: E402  (pure, no torch)
 MAX_FAILS = 3   # generate calls in a row that raise (the app closed or crashed): the loop stops instead of spinning until morning
 
 
+def outputs_root() -> Path:
+    """The app's config.OUTPUTS_DIR without importing config (that loads torch): IMAGEGEN_OUTPUTS_DIR moves new pictures elsewhere and keeps outputs/ as it is."""
+    raw = os.environ.get("IMAGEGEN_OUTPUTS_DIR", "").strip()
+    return Path(raw) if raw else APP / "outputs"
+
+
 def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
 
@@ -217,7 +223,7 @@ def main(argv=None):
 
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
     # attached to an app (the 🔁 tab does it, with --raw = that app's outputs folder): the run folder sits in that folder, where the tab looks for it
-    loop_root = (Path(a.raw) if (a.attach and a.raw) else APP / "outputs") / "loop"
+    loop_root = (Path(a.raw) if (a.attach and a.raw) else outputs_root()) / "loop"
     run = loop_root / f"{pp.stem}_{stamp}"
     for v in LP.VERDICTS:
         (run / v).mkdir(parents=True, exist_ok=True)
@@ -231,7 +237,7 @@ def main(argv=None):
 
     proc = None
     if a.attach:
-        url, raw = a.attach.rstrip("/"), (Path(a.raw) if a.raw else APP / "outputs")
+        url, raw = a.attach.rstrip("/"), (Path(a.raw) if a.raw else outputs_root())
     else:
         other = running_app()
         if other:
@@ -239,7 +245,7 @@ def main(argv=None):
                              f"or pass --attach {other}")
         port = a.port or free_port()
         sub = f"loop/{run.name}/raw"
-        raw = APP / "outputs" / sub
+        raw = outputs_root() / sub          # where the app it starts saves (it gets the same IMAGEGEN_OUTPUTS_DIR)
         log(f"starting the app on port {port} …")
         proc, url = start_app(sub, port, run / "app.log")
     records, started, stopped = [], dt.datetime.now(), ""
@@ -276,7 +282,7 @@ def main(argv=None):
                     ov["✨ Polish*"] = plan["polish"]
                 # explore around the keepers (plan "explore"): from round 2 a share of the pictures are close relatives of this setting's best
                 # picture so far — its seed (so the same wildcard picks) + a random variation seed at EXPLORE_STRENGTH, one call each
-                n_new, n_exp = LP.explore_split(n, plan["explore"]) if rnd > 1 else (n, 0)
+                n_new, n_exp = LP.explore_split(n, plan["explore"], rnd) if rnd > 1 else (n, 0)
                 seed_b = LP.best_seed(records, p["settings"]) if n_exp else None
                 if seed_b is None:
                     n_new, n_exp = n, 0
@@ -310,7 +316,7 @@ def main(argv=None):
                         rec = json.loads(info.get("imagegen") or "{}")
                         try:
                             s = scorer.score(im.convert("RGB"), rec.get("prompt", ""))
-                            v, why = LP.verdict(s, s["tags"], s["faces"], plan["gate"], s["hands_off"])
+                            v, why = LP.verdict(s, s["tags"], s["faces"], plan["gate"], s["hands_off"], prompt=rec.get("prompt", ""))
                         except Exception as e:
                             s, v, why = {}, "review", [f"scoring failed: {e}"]
                         dest = run / v / f.name

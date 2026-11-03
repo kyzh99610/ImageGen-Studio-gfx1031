@@ -88,11 +88,8 @@ def build_handlers(ns, n_lora_dds):
             progress(cur / max(tot, 1), desc=msg)
 
         # BLIP's load took 3.4 GB of free commit, down to 0.5 GB beside an SDXL model; a generation model reloads by itself on the next Generate
-        from backend.model_manager import avail_commit_gb
-        free = avail_commit_gb()
-        if free is not None and free < BLIP_COMMIT_GB:
-            ns._sd15._unload()
-            ns._sdxl._unload()
+        from backend.memory_guard import make_room
+        make_room(BLIP_COMMIT_GB)
         results = caption_batch(
             [i["path"] for i in imgs],
             trigger_word=trigger, prefix=prefix, callback=cb)
@@ -245,7 +242,7 @@ def build_handlers(ns, n_lora_dds):
         msg = ns._trainer.prepare(callback=cb)
         log = (f'<p style="font-size:13px;color:#a6adc8">'
                f'Model: {Path(model_path).stem} ({cfg.model_type.upper()})<br>'
-               f'Dataset: {ds_dir} ({len(ns._trainer.items)} images)<br>'
+               f'Dataset: {ds_dir} ({f"{len(ns._trainer.items)} images" if ns._trainer.items or "✅" in msg else "not read: Prepare stopped before it"})<br>'
                f'LoRA rank={rank} alpha={alpha} | LR={lr} | TE={train_te}<br>'
                f'Epochs: {epochs} | Device: {device_choice}'
                + (f'<br>Unloaded the Generate tab model(s) to free VRAM: '

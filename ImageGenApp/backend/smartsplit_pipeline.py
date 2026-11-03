@@ -249,7 +249,7 @@ class SmartSplitConfig:
         return (
             f"SmartSplit enabled:\n"
             f"  Text Encoder → {self.text_encoder_device.upper()}\n"
-            f"  UNet         → {self.unet_device.upper()} (dGPU)\n"
+            f"  UNet         → {self.unet_device.upper()} ({_main_gpu()})\n"
             f"  VAE Decode   → {self.vae_device.upper()}\n"
         )
 
@@ -360,10 +360,29 @@ def _export_vae_decoder_to_onnx(pipe, model_stem: str) -> Path:
     return onnx_path
 
 
+def _native_rocm() -> bool:
+    import config
+    return bool(getattr(config, "NATIVE_ROCM", False))
+
+
+def _main_gpu() -> str:
+    """'iGPU' when this process's torch GPU is an integrated one (launch.bat --gpu 1 on a 780M), else 'dGPU'."""
+    try:
+        import torch
+        import config
+        from backend.hardware_detector import _classify_gpu
+        dev = torch.device(config.DEVICE)
+        if dev.type == "cuda" and _classify_gpu(torch.cuda.get_device_name(dev.index or 0))[1]:
+            return "iGPU"
+    except Exception:
+        pass
+    return "dGPU"
+
+
 def _session_device(session, asked: str) -> str:
-    """Where an offloaded stage really runs: no session = the dGPU (its export failed), a session that fell back to the CPU provider = the CPU."""
+    """Where an offloaded stage really runs: no session = the process's own GPU (its export failed), a session that fell back to the CPU provider = the CPU."""
     if session is None:
-        return "dGPU"
+        return _main_gpu()
     providers = getattr(session, "get_providers", None)
     if providers and providers()[0] == "CPUExecutionProvider":
         return "CPU"
@@ -385,6 +404,12 @@ def _ort_session(onnx_path: Path, ep: str):
     if provider not in available:
         print(f"[SmartSplit] {provider} not available, falling back to CPU")
         provider = "CPUExecutionProvider"
+    if provider == "DmlExecutionProvider":
+        # DirectML's device 0 is whichever adapter Windows lists first: the 780M on the 8700G desktop, the RX 6800M on the laptop
+        from backend.dxgi import dml_index
+        idx = dml_index(igpu=True)
+        if idx is not None:
+            return ort.InferenceSession(str(onnx_path), providers=[(provider, {"device_id": idx})])
 
     return ort.InferenceSession(str(onnx_path), providers=[provider])
 
@@ -474,11 +499,12 @@ class SmartSplitPipeline:
                 print(f"[SmartSplit] Text encoder offload failed ({e}), using dGPU")
                 self._te_session = None
 
-        if self.cfg.vae_device == "igpu_directml":
+        # VAE -> CPU on native ROCm goes through ONNX Runtime too: that torch has no MKL, and its own CPU decode took 44 s for 512x768
+        if self.cfg.vae_device == "igpu_directml" or (self.cfg.vae_device == "cpu" and _native_rocm()):
             try:
                 onnx_path = _export_vae_decoder_to_onnx(self.pipe, self.stem)
-                self._vae_session = _ort_session(onnx_path, "igpu_directml")
-                print(f"[SmartSplit] VAE decoder  → igpu_directml")
+                self._vae_session = _ort_session(onnx_path, self.cfg.vae_device)
+                print(f"[SmartSplit] VAE decoder  → {self.cfg.vae_device}")
             except Exception as e:
                 print(f"[SmartSplit] VAE offload failed ({e}), using dGPU")
                 self._vae_session = None
@@ -625,7 +651,7 @@ class SmartSplitPipeline:
                     print(f"[SmartSplit] CPU VAE fallback also failed: {e2}")
                     raise
 
-        if self.cfg.vae_device == "cpu":
+        if self.cfg.vae_device == "cpu" and self._vae_session is None:
             return self._decode_on_cpu(latents)
 
         if self._vae_session is not None:
@@ -827,6 +853,9 @@ class SmartSplitPipeline:
             noise_pred = noise_uncond + cfg_scale * (noise_cond - noise_uncond)
             latents = pipe_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
+        if latents.device.type == "cuda":
+            # The steps only queue GPU work: without this the UNet's time ran on into the VAE stage (780M: UNet 3.4 s, VAE 30 s)
+            torch.cuda.synchronize(latents.device)
         timing["unet_s"] = time.time() - t0
 
         # ── Stage 3: VAE decode ───────────────────────────────────────────

@@ -92,9 +92,10 @@ def caption_batch(
     return results
 
 
-def unload_blip():
-    """Free BLIP from RAM."""
+def unload_blip() -> bool:
+    """Free BLIP from RAM (and the GPU). True when it was loaded."""
     global _blip_model, _blip_processor
+    was = _blip_model is not None
     _blip_model = None
     _blip_processor = None
     gc.collect()
@@ -104,3 +105,8 @@ def unload_blip():
             torch.cuda.empty_cache()
     except Exception:
         pass
+    return was
+
+
+from backend import memory_guard as _memory      # noqa: E402
+_memory.register("BLIP", unload_blip)

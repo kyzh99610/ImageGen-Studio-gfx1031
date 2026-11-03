@@ -2,7 +2,7 @@
 image_score.py — ⭐ for generated pictures: the cheap CPU checks that separated good from broken ones in the audits.
 Nothing is downloaded here: a check only runs when its model is already in the Hugging Face cache.
 
-  * anatomy   — the anime face / hand detectors (backend/detail_tools): exactly one face, at most two hands
+  * anatomy   — the anime face / hand detectors (backend/detail_tools): exactly one face, at most two hands (the boxes a second look confirms)
   * look      — WD14 on the *head crop* (in the whole 832×1216 picture a hair pin or the eyes are a few pixels): the hair /
                 eye colours the character card names (backend/identity_check) and its hair accessory ("butterfly hair
                 ornament": WD14 on the head crop separated pictures with and without the pin at AUC 0.99)
@@ -108,8 +108,11 @@ def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=No
         from backend.detail_tools import detect_faces
         faces_fn = lambda im: detect_faces(im, "anime")
     if hands_fn is None and can["hands"]:
-        from backend.detail_tools import detect_hands, hands_look_off
-        hands_fn = detect_hands
+        from backend.detail_tools import confirmed_hands, detect_hands, hands_look_off
+        # The count is over the boxes the second look confirms (detail_tools.confirmed_hands). On the RX 9070 XT bench's test pictures
+        # (2026-11-02, 469 with one face) 3+ raw boxes came from 7 distinct pictures, a real third hand in 2 of them; the other
+        # third boxes were a ship turret, a leaf, a bench edge and a picture corner. The confirmed count flagged exactly the 2.
+        hands_fn = lambda im: confirmed_hands(im, detect_hands(im))
         if judge_fn is None:
             judge_fn = hands_look_off
     traits, acc = ic.traits(tags), accessories(tags)
