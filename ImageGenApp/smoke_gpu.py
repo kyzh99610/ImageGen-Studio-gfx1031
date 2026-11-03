@@ -46,10 +46,14 @@ def arg(flag, default=None):
 
 
 def pick(items, arch_fn, arch, wanted=None):
+    """The checkpoint named by --ckpt / --xl-ckpt (a file name, its stem or a path), else the first of that family. A name that
+    matches nothing stops the run: a path used to match nothing and the test went on with another model without a word."""
     if wanted:
-        hit = [p for n, p in items if n.lower() == wanted.lower() or os.path.splitext(n)[0].lower() == wanted.lower()]
-        if hit:
-            return hit[0]
+        want = os.path.basename(str(wanted)).lower()
+        hit = [p for n, p in items if n.lower() == want or os.path.splitext(n)[0].lower() == os.path.splitext(want)[0]]
+        if not hit:
+            raise SystemExit(f"{wanted!r}: no such checkpoint in models/checkpoints")
+        return hit[0]
     return next((p for n, p in items if arch_fn(p) == arch), None)
 
 

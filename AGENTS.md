@@ -31,7 +31,7 @@ AMD's native ROCm PyTorch instead (Python 3.12, no ZLUDA; see "Native ROCm PyTor
 │   ├── selftest_zluda.py          ← GPU-vs-CPU correctness check (GEMM/conv/attention/GroupNorm)
 │   ├── smoke_gpu.py               ← end-to-end GPU smoke test (run_zluda.bat smoke_gpu.py [--sdxl]; app closed)
 │   ├── wildcards/                 ← starter wildcard files (__outfit__, __pose__…)
-│   ├── run_tests.py               ← 241-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
+│   ├── run_tests.py               ← 243-test CPU suite (NPU/SmartSplit/accel-TE, UI build, LyCORIS, rocm_env, PNG Info,
 │   │                                 prompt syntax, damaged files, edge cases in user input, launcher flags)
 │   └── backend/
 │       ├── sd_pipeline.py         ← SD 1.x: load, txt2img/img2img, LoRA, GPU VAE decode + VRAM spill check
@@ -76,7 +76,7 @@ ImageGenApp\launch.bat [--port N] [--share] [--cpu] [--dml] [--zluda] [--gpu N] 
 ImageGenApp\install_rocm.bat                    :: native ROCm PyTorch in python-rocm\ (RX 9070 XT, 780M): launch.bat then uses it, --zluda keeps ZLUDA
 ImageGenApp\run_rocm.bat selftest_zluda.py      :: the same checks on native ROCm (run_rocm.bat smoke_gpu.py --sdxl too)
 ImageGenApp\run_zluda.bat selftest_zluda.py     :: GPU correctness (exit 0 = OK); add --cudnn to test MIOpen
-python-3.10\python.exe ImageGenApp\run_tests.py :: 241 tests; NPU tests skip on machines without a Ryzen AI NPU
+python-3.10\python.exe ImageGenApp\run_tests.py :: 243 tests; NPU tests skip on machines without a Ryzen AI NPU
 ImageGenApp\run_zluda.bat smoke_gpu.py --sdxl   :: GPU smoke test with the app closed (11 checks)
 installer\setup.bat                              :: fresh PC: Python, packages, ZLUDA v6, gfx1031 kernels (SHA-256 pinned)
 ```
@@ -201,7 +201,7 @@ Both pipelines decode latents themselves (`output_type="latent"`), via `sd_pipel
 SD 1.5: untiled ≤1024 px (tiling visibly shifts SD 1.5 colours) unless `force_tiled_decode` (Bridge).
 SDXL: fp16 with 512 px tiles → on NaN **fp32 with 256 px tiles on the GPU** (~3 s; many checkpoints ship the
 original SDXL VAE, which overflows in fp16) → CPU (~22 s) last. `SDXLPipeline._vae_needs_fp32` remembers the fp32
-need per model (reset on unload) and is shared with img2img's `_encode_image`. DirectML still decodes on CPU.
+need per model (reset on unload) and is shared with img2img's `_encode_image`. DirectML still decodes on CPU (SD 1.5 only since 2026-11-03, on a CPU fp32 copy of the VAE: it used to decode on DirectML, see Fix history).
 
 ### HuggingFace repo IDs
 `sd_pipeline._from_pretrained()` asks for `variant="fp16"` (half the download) and falls back to full weights.
@@ -354,7 +354,7 @@ regeneration measured 0.63/255.
   `prediction_type=v_prediction`, `rescale_betas_zero_snr`, `timestep_spacing=trailing`. Pass them to `from_config`
   as **keyword arguments**: overrides inside the dict are reset by the config's hidden `_use_default_values`. With
   zero-terminal SNR, Karras / AYS are skipped (sigma_max is infinite). CFG rescale 0 = auto → 0.7 for v-pred. No
-  v-pred checkpoint is installed here, so this path is unit-tested only.
+  v-pred checkpoint is installed here, so this path had unit tests only until 2026-11-03, when it ran end to end on the GPU through a hard link named `*_vpred.safetensors` to an ordinary SDXL checkpoint: detection, `v_prediction` / zero-terminal SNR / `trailing`, CFG rescale auto 0.7, Karras and AYS dropped, five samplers finish. A model that isn't v-pred draws meaningless pictures that way, so picture quality is still unchecked.
 - UI: "🎚 Quality boosters" accordion; X/Y axes "PAG scale", "CFG rescale"; A1111 text "PAG scale: …",
   "FreeU: on", "CFG rescale: …"; restore sets them (off when the record has none). The grid title leaves out the
   base seed / checkpoint when that is an axis.
@@ -792,7 +792,7 @@ DirectML still round-trips to CPU. Same-seed output differs run-to-run by ~0.4�
 bit-deterministic), so compare LoRA restore results against that noise floor.
 
 ### DirectML — fallback & iGPU
-`torch_directml.device(i)` → `"privateuseone:i"`; match on `"privateuseone"`, never `"directml"`.
+`torch_directml.device(i)` → `"privateuseone:i"`; match on `"privateuseone"`, never `"directml"`. Always pass the adapter (`torch_directml.device(_dml_index(device))`): without one it is DirectML's default adapter, not the chosen GPU. Pipeline calls go through `sampling.grad_off` (no `inference_mode` on DirectML). An integrated GPU through DirectML (the 780M) drew NaN pictures now and then (torch-directml 0.2.5); native ROCm runs it clean.
 SDXL on DML: UNet on GPU with device-guard hooks, scheduler math on CPU, TEs + VAE on CPU.
 
 ### Accelerated SDXL text encoding (iGPU, optional)
@@ -1023,6 +1023,8 @@ in the dev env — only `opencv-python-headless` 4.9 is what loads and what is p
 55. **Native ROCm's detail passes reset every cuDNN flag** (2026-11-03): `torch.backends.cudnn.flags(enabled=False)` also set `deterministic`, the TF32 / precision switches and a benchmark limit (MIOpen warned about it in every process) for the length of each crop pass; only `enabled` is switched now, and put back after an error too.
 56. **A fresh install warned at every start, and two docstrings were invalid on Python 3.12** (2026-11-03): with no checkpoint yet the Train tab's base model held `""` outside an empty choice list (Gradio 4.19's "value … not in the list of choices"); one explanatory entry with the value `""` now, and 🔄 Refresh keeps it. `\p` / `\|` in docstrings printed a SyntaxWarning at every start in the native environment and will be errors in a later Python; a test compiles every file with warnings as errors. Found by reading every log of the last three days for errors and warnings (the rest were library notices or errors the tests inject); ruff's bug rules (undefined names, redefinitions, loop closures, repeated keys, mutable defaults) found nothing else. The History tab's gallery clicks (select, ⭐, the ⭐-only search, a file gone since the search) have a test now: no bug there.
 57. **On native ROCm the watermark detector's OCR ran on the CPU, 11× slower, and could not run on the GPU as it was** (2026-11-03): `_get_ocr_reader` sent EasyOCR to the CPU whenever MIOpen was on (a ZLUDA rule), and that torch has no MKL: 1.3-1.7 s a picture. On the GPU with MIOpen on it fails: its VGG's batch norm needs a MIOpen kernel built at run time, which the ROCm 10.1 wheel can't build (`'type_traits' file not found` → `miopenStatusUnknownError`). It runs on the GPU now with MIOpen off for the call only (`_readtext`): 0.12-0.15 s a picture, the same text and boxes as on the CPU (4 pictures, within 3 px). No other model the app runs on the GPU has batch norm (the depth and pose estimators are ONNX on the CPU).
+58. **The DirectML backend was broken in three ways** (2026-11-03, its first `smoke_gpu.py` run): every inpaint / face / hand / eye pass and the SD watermark fill raised "Cannot set version_counter for inference tensor" (they ran the pipeline under `torch.inference_mode()`, which torch-directml can't take in CLIP's embeddings; the pipeline encodes the prompt itself there): `sampling.grad_off` uses `no_grad` on DirectML. Models went to DirectML's default adapter (`torch_directml.device()`), not the chosen one, so `--dml --gpu 1` ran on the other GPU: `sd_pipeline._dml_index`. SD 1.5 decoded on DirectML in fp16, 13/255 off the fp32 decode, and a decode there corrupted the generations after it (latents off by up to 26, once NaN; the same seed gave another picture): it decodes on a CPU fp32 copy of the VAE now (2.2-3.2 s for 384×512). The RX 9070 XT through DirectML passes the smoke test 8/8 with it. The 780M through DirectML still draws NaN pictures now and then with no DirectML decode at all (one clean run of three): torch-directml 0.2.5 and that driver; it runs clean on native ROCm (11/11).
+59. **`smoke_gpu.py --ckpt` / `--xl-ckpt` ignored a path** and ran the first checkpoint of that family without a word; a path works now and a name that matches nothing stops the run.
 
 ## Troubleshooting
 

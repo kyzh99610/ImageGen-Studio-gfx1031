@@ -676,6 +676,54 @@ def _():
         _app._checkpoint_choices = old
 
 
+@test("DirectML backend (found by its first smoke run, 2026-11-03): the detail passes / SD watermark fill use no_grad there (inference_mode made CLIP raise 'Cannot set version_counter for inference tensor'), loads use the chosen adapter (torch_directml.device() alone is the default one), and pictures decode on a CPU fp32 copy of the VAE (its own decode was 13/255 off and corrupted later runs)")
+def _():
+    import torch
+    from pathlib import Path as _P
+    from backend.sampling import grad_off
+    from backend import sd_pipeline as SP
+    with grad_off("privateuseone:1"):
+        assert torch.is_grad_enabled() is False and torch.is_inference_mode_enabled() is False
+    with grad_off("cuda:0"):
+        assert torch.is_inference_mode_enabled() is True
+    assert [SP._dml_index(d) for d in ("privateuseone:1", "privateuseone:0", "privateuseone", "", None)] == [1, 0, 0, 0, 0]
+    for f in ("sd_pipeline.py", "sdxl_pipeline.py", "lora_trainer.py"):
+        src = (APP_DIR / "backend" / f).read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines() if not l.strip().startswith(("#", '"', "'")) and "torch_directml.device() on its own" not in l)
+        assert "torch_directml.device()" not in code, f
+    from diffusers import AutoencoderKL
+    vae = AutoencoderKL(block_out_channels=(8,), down_block_types=("DownEncoderBlock2D",), up_block_types=("UpDecoderBlock2D",),
+                        layers_per_block=1, latent_channels=4, norm_num_groups=4, sample_size=16).half()
+    sdp = SP.SDPipeline.__new__(SP.SDPipeline)
+    sdp.device, sdp.force_tiled_decode = "privateuseone:0", False
+    lat = torch.randn(1, 4, 8, 8, generator=torch.Generator().manual_seed(0)).half()
+    a = sdp._decode_latents(vae, lat)
+    copy1 = sdp._dml_cpu_vae[1]
+    b = sdp._decode_latents(vae, lat)
+    assert sdp._dml_cpu_vae[1] is copy1 and len(a) == 1 and a[0].size == (8, 8) and list(a[0].getdata()) == list(b[0].getdata())
+    assert next(vae.parameters()).dtype == torch.float16 and next(copy1.parameters()).dtype == torch.float32   # the original stays as it was
+    sdp._dml_cpu_vae = None                                                  # what _unload leaves
+    assert len(sdp._decode_latents(vae, lat)) == 1
+
+
+@test("smoke_gpu.py --ckpt / --xl-ckpt take a file name, a stem or a path, and stop on a name that matches nothing: a path matched nothing and the test silently ran another model")
+def _():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("smoke_gpu_test", APP_DIR / "smoke_gpu.py")
+    S = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(S)
+    items = [("a_real.safetensors", "C:/m/a_real.safetensors"), ("b_anime.safetensors", "C:/m/b_anime.safetensors")]
+    arch = lambda p: "sd1"
+    assert S.pick(items, arch, "sd1") == "C:/m/a_real.safetensors"                          # no choice: the first of the family
+    for want in ("b_anime.safetensors", "b_anime", "models/checkpoints/b_anime.safetensors", r"models\checkpoints\B_ANIME.safetensors"):
+        assert S.pick(items, arch, "sd1", want) == "C:/m/b_anime.safetensors", want
+    try:
+        S.pick(items, arch, "sd1", "models/checkpoints/missing.safetensors")
+        raise AssertionError("an unknown checkpoint must stop the run")
+    except SystemExit as e:
+        assert "missing.safetensors" in str(e)
+
+
 @test("Every .py file in the repo compiles without an invalid escape sequence: Python 3.12 (python-rocm) prints a SyntaxWarning at every start, a later Python refuses the file; run_tests.py's, lora_trainer.py's and check_nodes.py's docstrings had one")
 def _():
     import warnings

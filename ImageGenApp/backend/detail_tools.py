@@ -157,7 +157,7 @@ def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, nega
                 step_callback(min(i + 1, eff), eff)
                 return kw
             cb = {"callback_on_step_end": _cb}
-        from backend.sampling import run_pipe      # FreeU / CFG rescale as in the main pass
+        from backend.sampling import grad_off, run_pipe      # FreeU / CFG rescale as in the main pass
         # The SDXL inpaint pipeline encodes the crop itself and, because the SDXL VAE config says
         # force_upcast, casts the whole VAE to fp32 first: with native (non-cuDNN) convs a 512 px fp32
         # tile needs a 1.12 GiB scratch buffer, which failed on every face-detail pass with 3 GB free.
@@ -173,7 +173,7 @@ def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, nega
                 if need32 and saved_vae[1]:
                     vae.tile_sample_min_size, vae.tile_latent_min_size = 256, 32
             try:
-                with torch.inference_mode():
+                with grad_off(sdp.device):
                     lat = run_pipe(sdp, pipe, "inpaint", **embeds, image=crop.resize((rw, rh), Image.LANCZOS),
                                    mask_image=crop_mask.resize((rw, rh), Image.NEAREST), width=rw, height=rh,
                                    strength=float(denoise), num_inference_steps=int(steps), guidance_scale=float(cfg),

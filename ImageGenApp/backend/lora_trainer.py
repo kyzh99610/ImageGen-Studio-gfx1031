@@ -159,7 +159,8 @@ def _get_device(cfg: TrainingConfig) -> torch.device:
     if cfg.device == "directml":
         if _check_dml_backward():
             import torch_directml
-            dev = torch_directml.device()
+            from backend.sd_pipeline import _dml_index
+            dev = torch_directml.device(_dml_index(_cfg.DEVICE))
             print(f"[Train] Using DirectML device: {dev}")
             print("[Train] ⚠ DirectML training is experimental — may crash on full UNet backward")
             return dev
@@ -212,7 +213,8 @@ def _check_dml_backward() -> bool:
     Note: This may pass but full UNet backward can still fail on DML."""
     try:
         import torch_directml
-        dev = torch_directml.device()
+        from backend.sd_pipeline import _dml_index
+        dev = torch_directml.device(_dml_index(_cfg.DEVICE))           # the adapter the training will use
         model = torch.nn.Sequential(
             torch.nn.Conv2d(4, 32, 3, padding=1),
             torch.nn.GroupNorm(8, 32),

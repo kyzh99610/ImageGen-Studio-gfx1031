@@ -614,7 +614,7 @@ class SDPipeline:
             # Device placement
             if "privateuseone" in self.device:
                 import torch_directml
-                dml_dev = torch_directml.device()
+                dml_dev = torch_directml.device(_dml_index(self.device))
                 if self.unet_only_dml:
                     # SmartSplit DML mode: only UNet+VAE go to DirectML.
                     self.pipe.unet = self.pipe.unet.to(dml_dev)
@@ -665,6 +665,7 @@ class SDPipeline:
         # the cached inpaint pipe (face detail / inpaint) holds the old UNet, TEs and VAE:
         # left in place it kept ~2.5 GB of VRAM after switching SD 1.5 → SDXL
         self._inpaint_pipe = None
+        self._dml_cpu_vae = None
         self._pag_pipes = None
         self._cn_cache = None            # the pose-control ControlNet pipeline (backend/sampling.py)
         self.control = None
@@ -928,7 +929,7 @@ class SDPipeline:
         embeds = _build_embeds(self.pipe, prompt, negative_prompt, self.device, clip_skip)
 
         # ZLUDA: decode latents ourselves (GPU first, CPU fallback) — see _decode_latents
-        use_cpu_vae = "cuda" in self.device
+        use_cpu_vae = "cuda" in self.device or "privateuseone" in self.device     # DirectML: a CPU copy decodes (_decode_latents)
         if use_cpu_vae:
             embeds["output_type"] = "latent"
 
@@ -981,7 +982,14 @@ class SDPipeline:
         return images, info
 
     def _decode_latents(self, vae, latents) -> list[Image.Image]:
-        """GPU decode (untiled up to 1024px — tiling visibly shifts SD 1.5 colours), CPU fallback."""
+        """GPU decode (untiled up to 1024px — tiling visibly shifts SD 1.5 colours), CPU fallback. DirectML decodes on a CPU fp32
+        copy of the VAE: its own fp16 decode came out 13/255 off the fp32 one, and a decode on DirectML left the next generations
+        corrupted (latents off by up to 26, once NaN; torch-directml 0.2.5 on a 780M and an RX 9070 XT)."""
+        if "privateuseone" in str(self.device):
+            if (getattr(self, "_dml_cpu_vae", None) or (None, None))[0] is not vae:
+                import copy
+                self._dml_cpu_vae = (vae, copy.deepcopy(vae).float().cpu())
+            return _cpu_vae_decode_sd(self._dml_cpu_vae[1], latents)
         _, _, h, w = latents.shape
         if h <= 128 and w <= 128 and not self.force_tiled_decode:
             vae.disable_tiling()
@@ -1026,7 +1034,7 @@ class SDPipeline:
                     # correct devices. Do NOT call .to(dml_dev).
                     pass
                 else:
-                    self.img2img_pipe = self.img2img_pipe.to(torch_directml.device())
+                    self.img2img_pipe = self.img2img_pipe.to(torch_directml.device(_dml_index(self.device)))
             else:
                 self.img2img_pipe = self.img2img_pipe.to(self.device)
             if not _cfg.NATIVE_ROCM:
@@ -1056,7 +1064,7 @@ class SDPipeline:
         embeds = _build_embeds(self.img2img_pipe, prompt, negative_prompt, self.device, clip_skip)
 
         # ZLUDA: decode latents ourselves (GPU first, CPU fallback) — see _decode_latents
-        use_cpu_vae = "cuda" in self.device
+        use_cpu_vae = "cuda" in self.device or "privateuseone" in self.device     # DirectML: a CPU copy decodes (_decode_latents)
         if use_cpu_vae:
             embeds["output_type"] = "latent"
 
@@ -1094,6 +1102,16 @@ class SDPipeline:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+def _dml_index(device) -> int:
+    """The adapter number in a DirectML device string ('privateuseone:N'; 0 without one). torch_directml.device() on its own is
+    DirectML's default adapter, which need not be the GPU the app chose: with --dml --gpu 1 the model ran on the other GPU (on the
+    laptop the default adapter is the RX 6800M, so a chosen Vega 8 ran on the card)."""
+    try:
+        return int(str(device).rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        return 0
+
+
 def _make_generators(seed: int, device: str, n: int) -> tuple:
     """One generator per image, seeded seed, seed+1, … so every image in a batch
     can be reproduced on its own (batch 1 with that seed). n=1 matches _make_generator."""

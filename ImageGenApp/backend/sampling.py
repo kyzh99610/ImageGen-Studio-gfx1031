@@ -488,6 +488,14 @@ def release_control(sdp) -> None:
         pass
 
 
+def grad_off(device):
+    """The no-gradient context for a pipeline call: torch.inference_mode(), but torch.no_grad() on DirectML, where torch-directml
+    raised "Cannot set version_counter for inference tensor" in CLIP's embeddings under inference mode: every inpaint / face / hand /
+    eye pass and the SD watermark fill failed on the DirectML backend (the pipeline encodes the prompt itself there)."""
+    import torch
+    return torch.no_grad() if "privateuseone" in str(device) else torch.inference_mode()
+
+
 def run_pipe(sdp, pipe, kind: str, **call):
     """Call a diffusers pipeline with PAG / FreeU / CFG rescale applied as set on `sdp`.
     kind: txt2img / img2img / inpaint (PAG isn't used for inpaint)."""

@@ -815,7 +815,8 @@ class SDXLPipeline:
             # ── Device placement ──
             if "privateuseone" in self.device:
                 import torch_directml
-                dml_dev = torch_directml.device()
+                from backend.sd_pipeline import _dml_index
+                dml_dev = torch_directml.device(_dml_index(self.device))
                 # UNet-only on GPU; text encoders + VAE stay on CPU in float16.
                 # TEs are temporarily cast to float32 during Compel encoding
                 # (CPU has no float16 HW) and restored to float16 before pipeline call.

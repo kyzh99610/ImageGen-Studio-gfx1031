@@ -717,7 +717,8 @@ def inpaint_sd(
 
     if progress_callback:
         progress_callback(0.1, f"Inpainting a {cw}×{ch} region at {rw}×{rh}…")
-    with torch.inference_mode():
+    from backend.sampling import grad_off
+    with grad_off(getattr(sd_pipeline, "device", "")):
         out = inp_pipe(
             prompt=prompt or SD_INPAINT_PROMPT,
             negative_prompt="text, watermark, logo, letters, signature",
