@@ -224,7 +224,7 @@ def plan_extra_updates(plan: dict, clean_extra, keep) -> list:
                               (str((pc or cc).get("model") or "") or keep) if (pc or cc) else keep,
                               (pc.get("legs") == "hidden") if pc else keep,
                               _pose.TYPE_COMP if cc else (_pose.TYPE_POSE if pc else keep)])(plan.get("pose_control") or {}, plan.get("composition_control") or {}),
-            "Auto" if (plan.get("polish") or {}).get("auto") else "(off)"]            # round 50: a picture made with Auto restores Auto, any other one (off): its own controls must run, not an Auto pick
+            (_polish.AUTO_BEST if (plan.get("polish") or {}).get("best") else "Auto") if (plan.get("polish") or {}).get("auto") else "(off)"]            # round 50: a picture made with Auto restores Auto, any other one (off): its own controls must run, not an Auto pick
 
 
 def gen_record(pipe, **settings) -> dict:

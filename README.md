@@ -151,7 +151,9 @@ window, shows a loading screen while it starts, and frees the GPU when you close
   keyword chips work on your own LoRAs)
 - **VRAM estimate** before you generate, and a warning when Windows spills VRAM into system RAM (it doesn't raise
   out-of-memory, it just gets ~20× slower)
-- Bilingual in-app help (English / 中文)
+- **🪄 Quick picture** (the first tab): a few plain choices and one button; a saved setting, a character card or a prompt, framing and
+  detail mapped onto the measured recipes, every picture checked and the next steps suggested
+- **中文 / English**: one button switches the whole UI; hints, messages and the in-app help are written plainly in both languages
 
 Full feature documentation: [`ImageGenApp/README.md`](ImageGenApp/README.md).
 

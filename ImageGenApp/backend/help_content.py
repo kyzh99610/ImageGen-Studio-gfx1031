@@ -27,14 +27,67 @@ _CSS = """
 </style>
 """
 
+# ── one language at a time (the 中文 / English switch, backend/i18n.py) ──────────────────────────────────────
+# The sections were written side by side: English text with its Chinese in <span class="cn">. They are split here, so the page shows the
+# chosen language only: a heading / paragraph / note / table cell becomes L(English part, Chinese part); a table's all-Chinese column is
+# hidden in English, and the English explanation column right before it is hidden in Chinese.
+import re as _re
+
+_CN_SPAN = _re.compile(r'<span class="cn">(.*?)</span>', _re.S)
+_HAS_CJK = _re.compile(r"[一-鿿]")
+
+
+def _split_cn(s: str) -> str:
+    """'English <span class="cn">中文</span>' -> L('English', '中文'); text without a Chinese span is returned as it is."""
+    from backend.i18n import L
+    parts = _CN_SPAN.findall(s)
+    if not parts:
+        return s
+    en = _CN_SPAN.sub("", s)
+    en = _re.sub(r"(\s|&nbsp;|/|<br>)+$", "", en.strip())
+    en = _re.sub(r"^(\s|&nbsp;|/|<br>)+", "", en)
+    zh = " ".join(p.strip() for p in parts)
+    if not _re.search(r"[A-Za-z]{2}", _re.sub(r"<[^>]+>", "", en)):
+        return s                                        # nothing English to swap
+    return L(en, zh)
+
+
+def _split_slash(h: str) -> str:
+    """A header 'Step / 步骤' -> L('Step', '步骤')."""
+    from backend.i18n import L
+    if _CN_SPAN.search(h):
+        return _split_cn(h)
+    if " / " in h:
+        en, zh = h.rsplit(" / ", 1)
+        if _HAS_CJK.search(zh) and not _HAS_CJK.search(en):
+            return L(en, zh)
+    return h
+
+
 def _wrap(html: str) -> str:
+    # headings, paragraphs and list items written side by side: one language at a time
+    html = _re.sub(r'(<div class="hg-h[23]">)(.*?)(</div>)', lambda m: m.group(1) + _split_cn(m.group(2)) + m.group(3), html, flags=_re.S)
+    html = _re.sub(r'(<(p|li)(?:\s[^>]*)?>)(.*?)(</\2>)', lambda m: m.group(1) + _split_cn(m.group(3)) + m.group(4), html, flags=_re.S)
     return _CSS + f'<div class="hg-wrap">{html}</div>'
 
+
+def _is_cn_cell(c: str) -> bool:
+    c = str(c).strip()
+    return not c or (c.startswith('<span class="cn">') and c.endswith("</span>") and c.count('<span class="cn">') == 1)
+
+
 def _table(headers: list[str], rows: list[list[str]]) -> str:
-    ths = "".join(f"<th>{h}</th>" for h in headers)
+    n = len(headers)
+    zh_cols = {i for i in range(n) if all(_is_cn_cell(r[i]) for r in rows if i < len(r)) and (_CN_SPAN.search(headers[i]) or "中文" in headers[i])}
+    plain_en = lambda j: j < n and j not in zh_cols and not any(_HAS_CJK.search(str(r[j])) for r in rows if j < len(r))
+    # the English explanation paired with a Chinese column: the column before it (never the first, the row's name), else the one after it
+    en_cols = {(i - 1) if i - 1 > 0 and i - 1 not in zh_cols else (i + 1) for i in zh_cols
+               if (i - 1 > 0 and i - 1 not in zh_cols) or plain_en(i + 1)}
+    cls = lambda i: ' class="ig-zh"' if i in zh_cols else (' class="ig-en"' if i in en_cols else "")
+    ths = "".join(f"<th{cls(i)}>{_split_slash(h)}</th>" for i, h in enumerate(headers))
     trs = ""
     for row in rows:
-        tds = "".join(f"<td>{c}</td>" for c in row)
+        tds = "".join(f"<td{cls(i)}>{c if i in zh_cols or i in en_cols else _split_cn(c)}</td>" for i, c in enumerate(row))
         trs += f"<tr>{tds}</tr>"
     return f'<table class="hg-table"><thead><tr>{ths}</tr></thead><tbody>{trs}</tbody></table>'
 
@@ -45,10 +98,68 @@ def _cn(s: str) -> str:
     return f'<span class="cn">{s}</span>'
 
 def _note(s: str) -> str:
-    return f'<div class="hg-note">{s}</div>'
+    return f'<div class="hg-note">{_split_cn(s)}</div>'
 
 def _tip(s: str) -> str:
-    return f'<div class="hg-tip">💡 {s}</div>'
+    return f'<div class="hg-tip">💡 {_split_cn(s)}</div>'
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 0 — Start here (plain words, one language at a time)
+# ═════════════════════════════════════════════════════════════════════════════
+def start_here_html() -> str:
+    from backend.i18n import L
+    rows = [
+        ("<b>1. Start from</b>", "<b>1. 从哪开始</b>",
+         "A <b>saved setting</b> runs exactly as you saved it (every folder is listed, adult ones too). A <b>character card</b> brings its model, LoRAs and look. "
+         "<b>Just a prompt</b> uses the model you pick with its measured recipe.",
+         "<b>已保存的设置</b>：完全按你保存的样子出图（每个文件夹都列出来，包括成人设置）。<b>角色卡</b>：带上它的模型、LoRA 和长相。"
+         "<b>只写一句话</b>：用你选的模型和它实测过的配方。"),
+        ("<b>2. What to draw</b>", "<b>2. 想画什么</b>",
+         "Optional. A few words or tags, added to the setting's or card's prompt. Everyday Chinese words (海边, 微笑, 红色连衣裙 …) are turned into tags; "
+         "words the models don't know are listed, never guessed. <b>Add variety</b> picks a different line of one of your wildcard files for every picture.",
+         "可以不填。写几个词或标签，会加在设置或角色卡的提示词后面。常用中文词（海边、微笑、红色连衣裙……）会自动换成标签；模型不认识的词会列出来，不会乱猜。"
+         "<b>加点变化</b>：每张图从你的一个通配符文件里随机取一行。"),
+        ("<b>3. Framing</b>", "<b>3. 取景</b>",
+         "Auto lets each picture's own prompt decide. Portrait / cowboy shot / full body / wide shot put that framing into the prompt and run its recipe "
+         "(the detail passes measured for that face size).",
+         "自动：按每张图自己的提示词决定。头像 / 半身 / 全身 / 远景：把这种取景写进提示词，并用它的配方（按脸的大小实测过的细化步骤）。"),
+        ("<b>4. Detail</b>", "<b>4. 精细程度</b>",
+         "<b>As saved</b>: a saved setting's own passes. <b>Fast</b>: the picture plus the eye pass. <b>Standard</b>: the measured recipe for the framing "
+         "(a cowboy shot gets hires, a wide shot hires + face). <b>Best</b>: also the 2× detail stage where it measured better; 3–4× slower.",
+         "<b>按设置</b>：用设置里自己的步骤。<b>快</b>：出图 + 修眼睛。<b>标准</b>：这种取景实测过的配方（半身加高清修复，远景加高清修复和修脸）。"
+         "<b>精细</b>：在实测更好的地方再加 2 倍细节；慢 3–4 倍。"),
+        ("<b>5. Shape, colour, how many</b>", "<b>5. 形状、色彩、张数</b>",
+         "Tall / square / wide use the model family's own sizes. Soft colour = paler pictures, same drawing. Seed -1 = new pictures every time.",
+         "竖图 / 方图 / 横图用这类模型自己的尺寸。柔和 = 颜色淡一些，画的内容不变。种子 -1 = 每次都是新图。"),
+        ("<b>6. Press ✨ Make the pictures</b>", "<b>6. 按 ✨ 生成</b>",
+         "The box above the pictures says what will happen before you press it, and how long it took here last time. Afterwards every picture is checked "
+         "(stars, faces, hands) and the next steps are suggested.",
+         "按之前，图片上方的框会写出将要做什么、上次在这台电脑上用了多久。出图后会检查每张图（打星、数脸、看手），并建议下一步。"),
+    ]
+    h = '<div class="hg-h2">🪄 Start here &nbsp;<span class="cn">新手指南</span></div>'
+    h += _tip("The app has two ways to work. <b>🪄 Quick picture</b> (the first tab): a few plain choices and one button; the app fills in everything else with "
+              "measured settings. <b>🎨 Generate</b>: every control, for when you want to change one. Quick picture's 🔧 <b>Open in Generate</b> copies a run there."
+              + _cn("app 有两种用法。<b>🪄 一键出图</b>（第一个标签页）：几个简单选项加一个按钮，其余参数 app 用实测过的设置填好。"
+                    "<b>🎨 生成</b>：所有参数都在，想改哪个就改哪个。一键出图里的 🔧 <b>在高级页打开</b> 会把这次的参数复制过去。"))
+    h += _table(["Step / 步骤", "What it does", _cn("说明")], [[L(a, b), c, _cn(d)] for a, b, c, d in rows])
+    h += '<div class="hg-h3">After the pictures &nbsp;<span class="cn">出图之后</span></div>'
+    h += _table(["Button / 按钮", "What it does", _cn("说明")], [
+        [L("🔀 More like the picked one", "🔀 再来几张类似的"), "Same seed, small variations (pose and details shift, the character stays).", _cn("同一个种子，做小变化（姿势和细节会变，角色不变）。")],
+        [L("⬆ Redo the picked one in more detail", "⬆ 更精细地重画这张"), "The same picture again with Best detail.", _cn("用“精细”再画一遍同一张。")],
+        [L("🎲 New pictures", "🎲 换一批"), "The same choices with new seeds.", _cn("同样的选项，换新种子。")],
+        [L("⭐ Favourite the picked one", "⭐ 收藏这张"), "Stars it in 🗂 History (and the Studio Loop gives its setting more pictures).", _cn("在 🗂 历史记录里加星（工作室循环也会给它的设置多画几张）。")],
+        [L("🔧 Open in Generate", "🔧 在高级页打开"), "Fills the 🎨 Generate tab with this run (the picked picture's seed), to change any control.", _cn("把这次的参数（用选中那张的种子）填进 🎨 生成页，想改哪个参数都可以。")],
+    ])
+    h += '<div class="hg-h3">Good to know &nbsp;<span class="cn">小贴士</span></div>'
+    h += _table(["If… / 如果…", "Then", _cn("那么")], [
+        [L("you want the other language", "想换语言"), "Press the button at the top right (中文 / English). Your choice is remembered.", _cn("按右上角的按钮（中文 / English）。会记住你的选择。")],
+        [L("the first picture is slow", "第一张图很慢"), "The model loads and the graphics card prepares its kernels once; the next pictures take seconds.", _cn("要先加载模型，显卡也要准备一次内核；之后每张只要几秒。")],
+        [L("a hand or face looks broken", "手或脸画坏了"), "Click the picture, then ⬆ Redo it in more detail; for a hand: 🔧 Open in Generate → 🖌 Inpaint → 🖐 Re-draw hand.", _cn("点那张图，再按 ⬆ 更精细地重画这张；手的话：🔧 在高级页打开 → 🖌 局部重绘 → 🖐 重画手。")],
+        [L("you wonder what is filtered", "想知道哪些内容被过滤"), "Nothing in the app refuses a prompt. What a picture shows is decided by the prompt, the negative prompt and your saved settings.", _cn("app 不拒绝任何提示词。画面里有什么，由提示词、反向提示词和你保存的设置决定。")],
+        [L("you want to keep a recipe", "想保存一套配方"), "🔧 Open in Generate, then ⚙️ Save / Load Settings. It appears in Quick picture's list.", _cn("🔧 在高级页打开，再用 ⚙️ 保存 / 读取设置保存。它会出现在一键出图的列表里。")],
+    ])
+    return _wrap(h)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1268,42 +1379,54 @@ def build_help_tab():
     """Build the full ❓ Help 帮助 tab. Call inside a gr.Blocks context."""
     import gradio as gr
 
-    with gr.Tab("❓ Help 帮助"):
+    from backend.i18n import L, T
+    titles = [("🪄 Start here", "🪄 新手指南"), ("🚀 Quick Start", "🚀 快速上手"), ("📝 Prompt Syntax", "📝 提示词语法"),
+              ("⚙️ Generation Parameters", "⚙️ 生成参数"), ("🧩 Model Architecture", "🧩 模型架构"), ("🔗 LoRA & VAE", "🔗 LoRA 与 VAE"),
+              ("🎓 LoRA Training Guide", "🎓 LoRA 训练指南"), ("✨ Quality Tag Cheatsheet", "✨ 质量标签速查表"),
+              ("🎨 Style & Camera Tags", "🎨 风格与镜头标签"), ("🔀 SmartSplit & Hardware", "🔀 多设备分流与硬件"), ("📖 Glossary", "📖 术语表"),
+              ("❓ Help", "❓ 帮助")]
+    for en, zh in titles:
+        T(en, zh)
+
+    with gr.Tab("❓ Help"):
         gr.HTML(
             '<div style="background:#313244;padding:10px 16px;border-radius:8px;margin-bottom:8px;">'
-            '<span style="color:#cba6f7;font-size:15px;font-weight:700;">📚 ImageGen Studio — '
-            'Full Reference Guide &nbsp; <span style="color:#89dceb;">完整使用指南</span></span><br>'
+            '<span style="color:#cba6f7;font-size:15px;font-weight:700;">'
+            + L("📚 ImageGen Studio — how it works", "📚 ImageGen Studio 使用说明") + '</span><br>'
             '<span style="color:#a6adc8;font-size:13px;">'
-            'All syntax, parameters, and concepts explained in English and Chinese. '
-            '<span style="color:#89dceb;">所有语法、参数和概念的中英双语说明。</span></span></div>'
+            + L("New here? Open 🪄 Start here. The other sections explain every control in detail. The button at the top right switches the language.",
+                "第一次用？先看 🪄 新手指南。后面各部分详细解释每个控件。右上角的按钮可以切换语言。") + '</span></div>'
         )
 
-        with gr.Accordion("🚀 Quick Start / 快速上手", open=True):
+        with gr.Accordion("🪄 Start here", open=True):
+            gr.HTML(start_here_html())
+
+        with gr.Accordion("🚀 Quick Start", open=False):
             gr.HTML(quickstart_html())
 
-        with gr.Accordion("📝 Prompt Syntax / 提示词语法", open=False):
+        with gr.Accordion("📝 Prompt Syntax", open=False):
             gr.HTML(prompt_syntax_html())
 
-        with gr.Accordion("⚙️ Generation Parameters / 生成参数", open=False):
+        with gr.Accordion("⚙️ Generation Parameters", open=False):
             gr.HTML(parameters_html())
 
-        with gr.Accordion("🧩 Model Architecture / 模型架构", open=False):
+        with gr.Accordion("🧩 Model Architecture", open=False):
             gr.HTML(models_html())
 
         with gr.Accordion("🔗 LoRA & VAE", open=False):
             gr.HTML(lora_vae_html())
 
-        with gr.Accordion("🎓 LoRA Training Guide / LoRA训练指南", open=False):
+        with gr.Accordion("🎓 LoRA Training Guide", open=False):
             gr.HTML(lora_training_html())
 
-        with gr.Accordion("✨ Quality Tag Cheatsheet / 质量标签速查表", open=False):
+        with gr.Accordion("✨ Quality Tag Cheatsheet", open=False):
             gr.HTML(quality_tags_html())
 
-        with gr.Accordion("🎨 Style & Camera Tags / 风格与镜头标签", open=False):
+        with gr.Accordion("🎨 Style & Camera Tags", open=False):
             gr.HTML(style_tags_html())
 
-        with gr.Accordion("🔀 SmartSplit & Hardware / 多设备分流与硬件", open=False):
+        with gr.Accordion("🔀 SmartSplit & Hardware", open=False):
             gr.HTML(hardware_html())
 
-        with gr.Accordion("📖 Glossary / 术语表", open=False):
+        with gr.Accordion("📖 Glossary", open=False):
             gr.HTML(glossary_html())

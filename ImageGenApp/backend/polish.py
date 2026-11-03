@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import re
 
-SHOTS = ("Portrait", "Cowboy shot", "Cowboy shot — hires", "Full body", "Wide shot", "Full body — max detail", "Wide shot — max detail", "Cowboy shot — hands", "Full body — hands")
+SHOTS = ("Portrait", "Portrait — hires", "Cowboy shot", "Cowboy shot — hires", "Full body", "Wide shot", "Full body — max detail", "Wide shot — max detail", "Cowboy shot — hands", "Full body — hands")
 # the values of the Generate tab's ✨ Polish dropdown (the extra key `polish`: saved settings, the last session, every batch loop)
-CHOICES = ("(off)", "Auto") + SHOTS
+# "Auto — best" (一键出图's 精细): like Auto, the recipe of each picture's own framing, but the slower one that was measured better for it (BEST below)
+AUTO_BEST = "Auto — best"
+AUTOS = ("Auto", AUTO_BEST)
+CHOICES = ("(off)",) + AUTOS + SHOTS
 
 
 def clean_choice(v) -> str:
@@ -37,6 +40,9 @@ RECIPES: dict[str, dict] = {
     # round 52 (an SDXL Illustrious checkpoint with a character LoRA, 16 scenes, rated blind pairwise against the plain recipe above): hires 1.5x with Real-ESRGAN at denoise 0.42,
     # 12 steps, then the eyes: preferred in 15 of 16 scenes (fitted to screen and at 100 % on the face); the face 215 -> 322 px wide (the picture 1248x1824);
     # CCIP 0.957 -> 0.953; ~139 s against ~35 s net per picture (home Manual 30 W). What made the fork's pictures look 'more hi-res' was this pass.
+    # the same hires + eyes chain for a portrait framing (the round-52 faces were 26 % of the picture's width, the edge of Portrait's 25 %): Auto — best's pick for portraits
+    "Portrait — hires": dict(hires_on=True, hires_scale=1.5, hires_denoise=0.42, hires_steps=12, hires_upscaler="Real-ESRGAN (ONNX)",
+                             fd_on=False, hd_on=False, ed_on=True, ed_denoise=0.4),
     "Cowboy shot — hires": dict(hires_on=True, hires_scale=1.5, hires_denoise=0.42, hires_steps=12, hires_upscaler="Real-ESRGAN (ONNX)",
                                 fd_on=False, hd_on=False, ed_on=True, ed_denoise=0.4),
     # face ~11-14 %: hires 1.5x alone rescues it (+1.2 identity, stacking the face pass adds nothing); more pixels for the eyes. 8 hires steps, not 14 (round 8, 4 pictures: CCIP -0.001, pin +-0.00,
@@ -70,7 +76,7 @@ RECIPES: dict[str, dict] = {
 # hires 1.5x ~80 s at 14 steps (round 8: 8 steps give the same picture, ~46 s), face pass ~20 s, eye pass ~13 s at 10 steps (8 steps ~10 s) (laptop heat-soaked: a cool one is faster).
 # Round 8, stage seconds under cool 1.5 (Turbo, 1 plain base = 60 s): the Full body chain 222 s with 14 + 10 steps, 168 s with hires 8 (0.76x), 165 s with hires 10 + eyes 8.
 # Round 9 (Manual / AC, cool 1.5), whole chain / the plain base of the same seed: Full body 8 + 8 steps 2.7x (hassakuXL's round-8 chain 2.8x), 14 + 10 steps 3.8x; Wide shot 8 + 8 3.25-3.57x, 14 hires + 8 eye steps 4.1-4.6x (mean 4.35).
-TIME_FACTOR = {"Portrait": 1.3, "Cowboy shot": 1.3, "Cowboy shot — hires": 4.3, "Full body": 3.0, "Wide shot": 4.5, "Full body — max detail": 4.5, "Wide shot — max detail": 5.8, "Cowboy shot — hands": 2.0, "Full body — hands": 3.7}
+TIME_FACTOR = {"Portrait": 1.3, "Portrait — hires": 4.3, "Cowboy shot": 1.3, "Cowboy shot — hires": 4.3, "Full body": 3.0, "Wide shot": 4.5, "Full body — max detail": 4.5, "Wide shot — max detail": 5.8, "Cowboy shot — hands": 2.0, "Full body — hands": 3.7}
 
 # framing tags, widest first (a prompt with several takes the widest); no tag at all → the middle recipe
 _FRAMES = (
@@ -98,6 +104,27 @@ def shot_type(prompt: str, pose: bool = False) -> str:
         return hands
     # round 52: a cowboy shot (and a prompt with no framing tag) gets the hires recipe under Auto; plain "Cowboy shot" stays a choice for speed
     return "Cowboy shot — hires" if name == "Cowboy shot" else name
+
+
+# Auto — best: per framing, the slower recipe that was measured better (round 52: hires on a cowboy shot, preferred in 15 of 16 scenes; round 14: max detail on a
+# full body, eye detail x7; round 15: max detail on a wide shot, eye detail x8.5). The '— hands' picks of a gesture pose stay as they are.
+BEST = {"Portrait": "Portrait — hires", "Cowboy shot": "Cowboy shot — hires", "Cowboy shot — hires": "Cowboy shot — hires",
+        "Full body": "Full body — max detail", "Wide shot": "Wide shot — max detail"}
+
+
+def is_auto(choice) -> bool:
+    """Auto or Auto — best: the recipe is chosen for each picture from its own prompt."""
+    return choice in AUTOS
+
+
+def best_of(name: str) -> str:
+    return BEST.get(name, name)
+
+
+def auto_pick(choice: str, prompt: str, pose: bool = False) -> str:
+    """The recipe Auto (or Auto — best) takes for one picture's prompt."""
+    name = shot_type(prompt, pose=pose)
+    return best_of(name) if choice == AUTO_BEST else name
 
 
 def recipe(name: str) -> dict:

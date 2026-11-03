@@ -39,6 +39,30 @@ On an RX 9070 XT: SDXL 1024×1024 at 20 steps 3.7 s against ZLUDA's 6.9 s, SD 1.
 
 ## Tabs
 
+### 🪄 Quick picture (一键出图)
+
+The first tab: a few plain choices and one button, for good pictures without knowing the controls behind them.
+
+- **Start from** a saved setting (it runs exactly as saved; every folder is listed), a character card (its model, LoRAs and its
+  settings for the chosen model) or just a prompt (the model's measured recipe: AYS 12 steps, CFG 6, PAG 2 on Illustrious / NoobAI).
+- **What to draw**: a few words added to the setting's or card's prompt. Everyday Chinese words (海边, 微笑, 红色连衣裙 …) are turned into
+  tags; words the models don't know are listed, never guessed. **Add variety** takes a different line of one of your wildcard files per picture.
+- **Framing** (Auto / portrait / cowboy shot / full body / wide shot) and **Detail** (As saved / Fast / Standard / Best) map onto ✨ Polish's
+  measured recipes; Best is the new Polish entry **Auto — best** (the slower recipe measured better for each framing: hires on a cowboy shot,
+  the 2× detail stage on a full body or wide shot).
+- **Shape**, **colour** (vivid / natural / soft = colour strength 1 / 0.85 / 0.75), **how many** and the **seed**.
+- A box says what will happen before you press the button (model, recipe, size, the time it took here last time). Afterwards every picture
+  is checked with the models already on the PC (stars, faces, hands) and the next steps are suggested: 🔀 More like the picked one,
+  ⬆ Redo it in more detail, 🎲 New pictures, ⭐ Favourite, 🔧 Open in Generate (the Generate tab takes the run, with the picked seed).
+- It runs the Generate tab's own pipeline, so records, restore, History and ⭐ work as for any picture. HTTP API: `/do_simple_generate`
+  (source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, count, seed, check, lang).
+
+### 中文 / English
+
+The button at the top right switches the whole page between 中文 and English (remembered in the browser; 中文 by default). Labels stay
+English on the server, because they are the names the HTTP API and the Studio Loop use; the page swaps the text it shows. Hints,
+messages and the Help tab come in both languages (`backend/i18n.py`, `backend/ui_zh.py`, `backend/ui_messages.py`).
+
 ### 🎨 Generate
 
 Generate images from text prompts using Stable Diffusion checkpoints. The output gallery sits right next to the prompt, so you never scroll to see results.

@@ -2387,7 +2387,7 @@ def _():
     with patch.object(_app._sdxl, "device", "privateuseone:1"), patch.object(SX, "_accel_te_enabled", False), patch.object(dxgi, "adapters", lambda: vega):
         out = fn(True)
         info = out.get("info", "")
-        assert out.get("value") is False and info.startswith("⚠ Accelerated text encoding stays off") and "Vega-class" in info and SX._accel_te_enabled is False, out
+        assert out.get("value") is False and "⚠ Accelerated text encoding stays off" in info and "Vega-class" in info and SX._accel_te_enabled is False, out
 
 
 @test("LoRA trainer on native ROCm + GPU: the base model comes in over the read-only mapping and the preflight counts it so; on the CPU, under ZLUDA or for a non-native PC the old load and factors stay")
@@ -8956,6 +8956,184 @@ def _():
     d = _j.loads((tmp / "loop" / "p.json").read_text(encoding="utf-8"))
     assert d == {"presets": ["a"], "gate": {"faces": 0}, "explore": 0.5}
     assert "50 % of each setting" in UL.check_plan(ns, UL.read_plan(ns, "p")) and "Explore: off" in UL.check_plan(ns, LP.clean_plan({"presets": ["a"]}))
+
+
+@test("中文 / English switch: every label, hint, placeholder, button, tab and accordion title on the page has its Chinese (the page swaps them; the server keeps the English labels, which are the API's names); messages translate as whole fragments or templates; tag chips keep their tag; the Help shows one language at a time")
+def _():
+    import re as _re
+    import app as _app
+    from backend import i18n as I, ui_messages as M, help_content as H
+    demo = _app.build_app()
+    assert I.missing(demo) == [], I.missing(demo)[:20]                       # a new control needs ZH (backend/ui_zh) or a T(en, zh) where it is written
+    cfg = demo.get_config_file()
+    comps = cfg["components"]
+    labels = {c["props"].get("label") for c in comps}
+    for lab in ("Prompt", "Negative Prompt", "Batch Size", "Steps", "CFG Scale", "Hires denoise", "Colour strength",
+                "✨ Polish — fill hires fix / face / hand / eye detail for this kind of picture"):
+        assert lab in labels, lab                                               # the API names are unchanged
+    texts = [c["props"].get("value") for c in comps if c["type"] == "button"]
+    gen = [t for t in texts if isinstance(t, str) and t.startswith("✨ Generate")]
+    assert gen and not any(I.has_zh(t) for t in gen)                           # no Chinese baked into the server's text any more
+    chips = [c for c in comps if c["type"] == "button" and c["props"].get("value") in ("1girl", "bokeh")]
+    assert chips and all("ig-notr" in (c["props"].get("elem_classes") or []) for c in chips)    # tag chips show the tag they insert
+    tab = I.table()
+    assert tab["Batch Size"] == "批量数" and tab["🎨 Generate"] == "🎨 生成" and tab["Next Page ▶"] == "下一页 ▶"     # the emoji / arrow stay
+    assert tab["Each picture gets its own seed."] == "每张图有自己的种子。"                                          # a hint, registered where it is written
+    assert '"Batch Size": "批量数"' in cfg["js"] and "IG_PAT" in cfg["js"] and "ig-lang-btn" in cfg["js"]
+    assert any('id="ig-lang-btn"' in str(c["props"].get("value")) for c in comps if c["type"] == "html")
+    assert ".ig-en" in cfg["css"] and ".ig-zh" in cfg["css"]
+    assert I.L("a", "乙") == '<span class="ig-en">a</span><span class="ig-zh">乙</span>' and I.both("a", "乙") == "乙 / a"
+    # messages: a fixed fragment, a template with values (the order of the values kept), the pipelines' result line
+    assert M.translate("⏹ Generation stopped.") == "⏹ 已停止生成。"
+    assert M.translate("❌ Could not load 'x' (file not found) — nothing was changed") == "❌ 读不出 'x'（file not found）— 什么都没改"
+    assert M.translate("Seed: 7 | Steps: 12 | CFG: 6.0 | Scheduler: DPM++ 2M AYS | Size: 832×1216 | Time: 3.1s | Device: cuda:0").startswith("种子：7 | 步数：12")
+    assert M.translate("🔍 Hires fix: 832×1216 → 1248×1824 · denoise 0.42 · 12 steps · Lanczos · 3.1s").endswith("3.1 秒")
+    assert M.translate("an untranslated line") is None
+    for en, zh in M.TEMPLATES:
+        slots = _re.findall(r"\{(\d*)\}", zh)
+        assert len(slots) == en.count("{}") or all(s.isdigit() for s in slots), (en, zh)      # every value lands somewhere
+        assert I.has_zh(zh), en
+    for rx, _rep in M.patterns():
+        _re.compile(rx.replace("\\/", "/"))
+    for en, zh in M.EXACT.items():                                              # Chinese, or only the entry's own technical words ("CFG（Pony / IL）")
+        assert I.has_zh(zh) or set(_re.findall(r"[A-Za-z]+", zh)) <= set(_re.findall(r"[A-Za-z]+", en)), en
+    # the Help: a table's Chinese column is hidden in English, the English explanation column in Chinese; headings and notes split
+    h = H.parameters_html()
+    assert '<th class="ig-zh">' in h and '<th class="ig-en">' in h and '<span class="ig-zh">生成参数</span>' in h
+    s = H.start_here_html()
+    assert "新手指南" in s and "Start here" in s and "🪄 Quick picture" in s
+    acc = [c["props"].get("label") for c in comps if c["type"] == "accordion"]
+    assert "🪄 Start here" in acc and tab["🪄 Start here"] == "🪄 新手指南"
+
+
+@test("🪄 Quick picture plan: a saved setting runs as saved (adult ones too), a chosen framing replaces the prompt's framing tags and runs that recipe, Fast / Standard / Best map onto the measured Polish recipes (Auto — best per picture), a card picks its profile and a random outfit per picture, a plain prompt gets its family's measured recipe, Chinese words become tags")
+def _():
+    from types import SimpleNamespace
+    from backend import simple_mode as SM, polish as PO, recipes as RC, zh_tags as ZT, character_cards as CC
+    settings = {
+        "everyday/walk": {"model": "wai.safetensors", "lora_slots": [["her.safetensors", 0.6], ["gone.safetensors", 0.5]],
+                          "prompt": "1girl, cowboy shot, autumn", "negative_prompt": "bad", "scheduler": "DPM++ 2M AYS", "steps": 12,
+                          "cfg_scale": 6.0, "width": 832, "height": 1216,
+                          "extra": {"hires_on": True, "hires_scale": 1.5, "ed_on": True, "polish": "(off)", "cs": 0.75, "pag_scale": 2.0}},
+        "explicit/one": {"model": "wai.safetensors", "prompt": "1girl, nsfw", "negative_prompt": "", "extra": {"polish": "Auto"}},
+    }
+    card = {"name": "Her", "checkpoint": "wai.safetensors", "loras": [{"file": "her.safetensors", "weight": 0.8}], "tags": "her, red eyes",
+            "outfits": {"coat": "black coat", "dress": "white dress"}, "negative": "n",
+            "profiles": {"hassaku.safetensors": {"loras": [{"file": "her.safetensors", "weight": 0.7}], "cfg": 5.0}}}
+    env = SimpleNamespace(read_setting=settings.get, load_card=lambda n: dict(card) if n == "Her" else None,
+                          card_for_checkpoint=CC.card_for_checkpoint, card_prompt=CC.card_prompt,
+                          checkpoints=[("wai.safetensors", "/m/wai.safetensors"), ("hassaku.safetensors", "/m/hassaku.safetensors"), ("sd15.safetensors", "/m/sd15.safetensors")],
+                          loras=[("her.safetensors", "/l/her.safetensors")], vaes=[], family=lambda p: "sd15" if "sd15" in str(p) else "illustrious",
+                          recipe_for=RC.recipe_for, default_model="/m/wai.safetensors", defaults=dict(scheduler="DPM++ 2M Karras", steps=20, cfg=7.5),
+                          to_tags=ZT.to_tags)
+    plan = lambda **c: SM.plan(c, env)
+    # a saved setting, as saved: its model, LoRAs (a missing one noted), recipe and passes untouched; what to draw appended
+    p = plan(source="setting", setting="everyday/walk", what="海边，微笑", count=3, seed=42)
+    a = p["args"]
+    assert not p["errors"] and a["model_path"] == "/m/wai.safetensors" and (a["lora1"], a["w1"]) == ("/l/her.safetensors", 0.6) and a["lora2"] == "none"
+    assert any("gone" in en for en, _ in p["notes"]) and a["prompt"] == "1girl, cowboy shot, autumn, beach, smile"
+    assert a["hires_on"] is True and a["polish"] == "(off)" and a["cs"] == 0.75 and (a["batch"], a["seed"], a["width"]) == (3, 42, 832)
+    # a chosen framing: its tag replaces the prompt's, and its recipe runs
+    a = plan(source="setting", setting="everyday/walk", framing="full", detail="standard")["args"]
+    assert "full body" in a["prompt"] and "cowboy shot" not in a["prompt"] and a["polish"] == "Full body"
+    assert a["hires_on"] and a["hires_steps"] == 8 and a["hires_upscaler"] == "Lanczos" and a["ed_on"]
+    a = plan(source="setting", setting="everyday/walk", framing="wide", detail="best")["args"]
+    assert a["polish"] == "Wide shot — max detail" and a["md_on"] and a["fd_on"]
+    assert plan(source="setting", setting="everyday/walk", detail="best")["args"]["polish"] == PO.AUTO_BEST
+    p = plan(source="setting", setting="everyday/walk", detail="fast")
+    assert p["args"]["hires_on"] is False and p["args"]["ed_on"] and p["args"]["polish"] == "(off)" and p["info"]["picks"] == {"fast": 1.0}
+    # shape / colour
+    a = plan(source="setting", setting="everyday/walk", shape="square", colour="soft")["args"]
+    assert (a["width"], a["height"], a["cs"]) == (1024, 1024, 0.75)
+    a = plan(source="setting", setting="everyday/walk", model="sd15.safetensors", shape="square", colour="vivid")["args"]
+    assert (a["model_path"], a["width"], a["cs"]) == ("/m/sd15.safetensors", 512, 1.0)
+    # an adult saved setting is planned like any other (the app filters nothing)
+    p = plan(source="setting", setting="explicit/one")
+    assert not p["errors"] and p["args"]["prompt"] == "1girl, nsfw" and p["args"]["polish"] == "Auto"
+    # a card: a random outfit per picture (a wildcard group), its profile for the chosen model
+    a = plan(source="card", card="Her", outfit=SM.RANDOM_OUTFIT, what="classroom")["args"]
+    assert "{black coat|white dress}" in a["prompt"] and a["prompt"].startswith("her, red eyes") and a["polish"] == "Auto"
+    assert a["model_path"] == "/m/wai.safetensors" and a["w1"] == 0.8 and (a["scheduler"], a["steps"], a["pag_scale"]) == ("DPM++ 2M AYS", 12, 2.0)
+    p = plan(source="card", card="Her", outfit="coat", model="hassaku.safetensors")
+    assert p["args"]["cfg"] == 5.0 and p["args"]["w1"] == 0.7 and "black coat" in p["args"]["prompt"] and any("hassaku" in en for en, _ in p["notes"])
+    # just a prompt: the family's measured recipe; Chinese words become tags, unknown ones are listed
+    p = plan(source="prompt", what="海边，微笑, 魔法")
+    assert p["args"]["prompt"] == "1girl, solo, beach, smile" and any("魔法" in zh for _, zh in p["notes"])
+    assert (p["args"]["scheduler"], p["args"]["steps"], p["args"]["cfg"], p["args"]["pag_scale"]) == ("DPM++ 2M AYS", 12, 6.0, 2.0)
+    # refusals
+    assert plan(source="setting", setting="nope/none")["errors"] and plan(source="prompt", what="")["errors"]
+    assert plan(source="setting", setting="everyday/walk", model="missing.safetensors")["errors"]
+    c = SM.clean_choices({"source": "x", "count": 99, "seed": "junk", "framing": "?", "detail": None})
+    assert (c["source"], c["count"], c["seed"], c["framing"], c["detail"]) == ("setting", 8, -1, "auto", "follow")
+    # the words table, Auto — best, and its record / restore
+    assert ZT.to_tags("红色连衣裙 坐在窗边看书") == ("red dress, sitting, by window, reading, book", [])
+    assert PO.AUTO_BEST in PO.CHOICES and PO.auto_pick(PO.AUTO_BEST, "1girl, full body") == "Full body — max detail"
+    assert PO.auto_pick("Auto", "1girl, full body") == "Full body" and PO.auto_pick(PO.AUTO_BEST, "1girl, upper body") == "Portrait — hires"
+    import app as _app
+    plan0 = _app._restore_plan({"prompt": "x"})
+    assert _app._plan_extra_updates(dict(plan0, polish={"recipe": "Full body — max detail", "auto": True, "best": True}))[-1] == PO.AUTO_BEST
+    assert _app._plan_extra_updates(dict(plan0, polish={"recipe": "Full body", "auto": True}))[-1] == "Auto"
+    ex, name = _app._apply_polish_auto(_app._clean_extra({"polish": PO.AUTO_BEST}), "1girl, wide shot")
+    assert name == "Wide shot — max detail" and ex["md_on"] and ex["polish"] == PO.AUTO_BEST
+
+
+@test("🪄 Quick picture tab: one new GPU endpoint (/do_simple_generate, 15 inputs, the language last) that runs Generate's own function; More like it / Redo in more detail / Open in Generate reuse the last run's choices and the picked seed; the choices and the measured time are remembered")
+def _():
+    import functools, inspect, json as _j, tempfile as _tf
+    from pathlib import Path as _P
+    from PIL import Image as _Im
+    import app as _app
+    from backend import ui_simple as US, simple_mode as SM
+    demo = _app.build_app()
+    cfg = demo.get_config_file()
+    deps = [d for d in cfg["dependencies"] if d.get("api_name") == "do_simple_generate"]
+    assert len(deps) == 1 and len(deps[0]["inputs"]) == 15
+    by = {inspect.unwrap(f.fn).__name__: f for f in demo.fns if f.fn is not None}
+    for n in ("do_simple_generate", "do_simple_more", "do_simple_finer"):
+        assert by[n].concurrency_id == "gpu", n                                 # GPU jobs: one at a time with every other Generate
+    tmp = _P(_tf.mkdtemp())
+    (tmp / "t").mkdir()
+    (tmp / "t" / "one.json").write_text(_j.dumps({"model": "wai.safetensors", "prompt": "1girl, autumn", "negative_prompt": "",
+                                                  "extra": {"polish": "Auto"}}), encoding="utf-8")
+    calls = []
+    real = _app._GEN_HELPERS["generate_ui"]
+
+    @functools.wraps(real)
+    def fake(**kw):
+        calls.append(kw)
+        n = int(kw.get("batch", 1))
+        _app._SAVE_LOG.extend(_P(_app.OUTPUTS_DIR) / f"x{len(calls)}_{k}.png" for k in range(n))
+        ims = [_Im.new("RGB", (64, 96)) for _ in range(n)]
+        return ims, "<p>Seed: 1 | Steps: 12</p>", ims, "", [1234 + k for k in range(n)], ""
+    keep = (_app.SETTINGS_DIR, dict(_app._GEN_HELPERS))
+    try:
+        _app.SETTINGS_DIR = tmp
+        _app._GEN_HELPERS["generate_ui"] = fake
+        with patch("backend.model_manager.list_checkpoints", lambda: [("wai.safetensors", "/m/wai.safetensors")]), \
+             patch("backend.model_manager.list_loras", lambda: []), patch("backend.model_manager.list_vaes", lambda: []), \
+             patch("backend.sd_pipeline._model_family", lambda p: "illustrious"):
+            fn = by["do_simple_generate"].fn
+            imgs, res, state, box = fn("setting", "t/one", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "海边", SM.NO_WILDCARD, "auto", "fast",
+                                       "follow", "follow", 2, -1, False, "zh")
+            assert len(imgs) == 2 and len(calls) == 1 and calls[0]["batch"] == 2 and calls[0]["prompt"] == "1girl, autumn, beach"
+            assert calls[0]["model_path"] == "/m/wai.safetensors" and calls[0]["ed_on"] and not calls[0]["hires_on"]
+            assert "完成" in res and "Done" in res and state["seeds"] == [1234, 1235] and len(state["files"]) == 2
+            assert _j.loads((tmp / US.LAST_FILE_NAME).read_text(encoding="utf-8"))["setting"] == "t/one"
+            assert list(SM.read_times(tmp / SM.TIMES_FILE_NAME).values())                    # the measured time per picture is kept
+            calls.clear()
+            by["do_simple_more"].fn(state, 1, False)                                     # More like the picked one: its seed, small variations, one call per picture
+            assert len(calls) == 2 and {c["seed"] for c in calls} == {1235} and all(c["var_strength"] == 0.1 and c["batch"] == 1 for c in calls)
+            calls.clear()
+            by["do_simple_finer"].fn(state, 0, False)                                    # Redo in more detail: one picture, Best
+            assert len(calls) == 1 and calls[0]["seed"] == 1234 and calls[0]["batch"] == 1 and calls[0]["polish"] == "Auto — best"
+            refused = fn("setting", "", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "", SM.NO_WILDCARD, "auto", "fast", "follow", "follow", 1, -1, False, "zh")
+            assert "请先选一个已保存的设置" in refused[1]                                  # nothing runs without a setting
+            adv = by["on_to_advanced"].fn(state, 1)
+            assert len(adv) == len(_app._GEN_HELPERS["gen_inputs"]) + 1 and adv[0] == "/m/wai.safetensors" and 1235 in adv
+    finally:
+        _app.SETTINGS_DIR = keep[0]
+        _app._GEN_HELPERS.clear()
+        _app._GEN_HELPERS.update(keep[1])
 
 
 print("\n" + "=" * 70)
