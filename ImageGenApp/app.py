@@ -4608,7 +4608,7 @@ def _build_bridge_tab():
             try:
                 import torch as _t
                 small_card = (_t.cuda.is_available() and
-                              _t.cuda.get_device_properties(0).total_memory < 14 * 2**30)
+                              _t.cuda.get_device_properties(_t.cuda.current_device()).total_memory < 14 * 2**30)
             except Exception:
                 small_card = False
             # With the SDXL model resident, SD 1.5's untiled VAE decode peaks at ~11.9 of
@@ -6023,7 +6023,7 @@ def _build_train_tab(gen_lora_dds=()):
                 '</div>'
             )
             with gr.Row():
-                _tr_ckpts = _checkpoint_choices()
+                _tr_ckpts = _train_model_choices()
                 _tr_last = _tr_last_model
                 train_model_dd = gr.Dropdown(
                     label="🧠 Base model (checkpoint)",
@@ -7211,6 +7211,12 @@ def _tagged(items: list, arch_fn) -> list:
 def _checkpoint_choices() -> list:
     from backend.model_manager import checkpoint_arch
     return _tagged(list_checkpoints(), checkpoint_arch)
+
+
+def _train_model_choices() -> list:
+    """The Train tab's base models. With none installed, one entry whose value is "" (Prepare then asks for a model): the empty
+    list left the dropdown's "" outside its choices, which Gradio 4.19 warned about at every start of a fresh install."""
+    return _checkpoint_choices() or [("(no checkpoint in models/checkpoints yet: add one, then 🔄 Refresh)", "")]
 
 
 def _lora_choices(model_path=None) -> list:

@@ -86,7 +86,7 @@ def detect_smartsplit_capability() -> SmartSplitCapability:
         import torch
         if torch.cuda.is_available():
             cap.dgpu_available = True
-            cap.dgpu_name = torch.cuda.get_device_name(0)
+            cap.dgpu_name = torch.cuda.get_device_name(torch.cuda.current_device())
     except Exception:
         pass
 

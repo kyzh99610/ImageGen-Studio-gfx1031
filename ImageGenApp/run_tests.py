@@ -1,4 +1,4 @@
-"""
+r"""
 ImageGen Studio test suite (CPU only — no GPU or models needed; ~1 min).
 
     python-3.10\python.exe ImageGenApp\run_tests.py
@@ -504,6 +504,176 @@ def _():
     src = Path(APP_DIR / "app.py").read_text(encoding="utf-8")
     assert '_smartsplit_pipe = None' in src
     assert 'SmartSplit disabled (SDXL not supported' in src
+
+@test("🗂 History's gallery clicks (never driven before): search lists newest first, a file gone since the index keeps its tile (a placeholder), so a click after it still picks the right picture; ⭐ toggles and the ⭐-only search finds it")
+def _():
+    import inspect, os, tempfile, time
+    import gradio as gr
+    from PIL import Image as _Im
+    import app as _app
+    from backend import history as H
+    tmp = Path(tempfile.mkdtemp(prefix="hist_test_"))
+    saved = (_app.OUTPUTS_DIR, H.OUTPUTS_DIR, H.THUMBS, H.INDEX_FILE, H.FAV_FILE)
+    try:
+        _app.OUTPUTS_DIR = H.OUTPUTS_DIR = tmp
+        H.THUMBS, H.INDEX_FILE, H.FAV_FILE = tmp / ".thumbs", tmp / "_index.json", tmp / "_favs.json"
+        t0 = time.time() - 100
+        for k, n in enumerate(("a.png", "b.png", "c.png")):                  # c newest
+            _Im.new("RGB", (64, 64), (40 * k, 80, 120)).save(tmp / n)
+            os.utime(tmp / n, (t0 + 10 * k, t0 + 10 * k))
+        by = {inspect.unwrap(f.fn).__name__: f.fn for f in _app.build_app().fns if f.fn is not None}
+        out = by["do_hist_search"]("", "All", "All", False)
+        items, names = out[0], out[2]
+        assert names == ["c.png", "b.png", "a.png"] and len(items) == 3, (names, len(items))
+        (tmp / "b.png").unlink()                                             # gone after the search
+        sel = gr.SelectData(None, {"index": 2, "value": None, "selected": True})
+        name, info = by["do_hist_select"](names, 0, sel)
+        assert name == "a.png" and "a.png" in info, (name, info[:80])
+        name_b, info_b = by["do_hist_select"](names, 0, gr.SelectData(None, {"index": 1, "value": None}))
+        assert name_b == "b.png" and "gone" in info_b, info_b[:80]
+        items, info, _ = by["do_hist_star"]("a.png", names, 0)
+        assert H.favourites() == {"a.png"} and info.startswith('<p') and "favourite" in info
+        assert len(items) == 3 and items[1][0].endswith("_unreadable.jpg") and items[2][1].startswith("⭐"), items   # re-rendered with b gone
+        assert by["do_hist_search"]("", "All", "All", True)[2] == ["a.png"]
+        by["do_hist_star"]("a.png", names, 0)
+        assert H.favourites() == set()
+    finally:
+        _app.OUTPUTS_DIR, H.OUTPUTS_DIR, H.THUMBS, H.INDEX_FILE, H.FAV_FILE = saved
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@test("Native ROCm's detail passes switch only MIOpen off, and back on afterwards (also after an error): torch.backends.cudnn.flags() also reset every other cuDNN flag for the pass and set a benchmark limit MIOpen warned about in every process")
+def _():
+    import torch, warnings
+    from backend import detail_tools as DT
+    import config
+    seen = []
+    @DT._no_shape_search
+    def probe(fail=False):
+        seen.append((torch.backends.cudnn.enabled, torch.backends.cudnn.deterministic))
+        if fail:
+            raise RuntimeError("boom")
+    saved = (config.NATIVE_ROCM, torch.backends.cudnn.enabled, torch.backends.cudnn.deterministic)
+    try:
+        config.NATIVE_ROCM = True
+        torch.backends.cudnn.enabled, torch.backends.cudnn.deterministic = True, True
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            probe()
+            try:
+                probe(fail=True)
+            except RuntimeError:
+                pass
+        assert seen == [(False, True), (False, True)], seen                 # off inside, the other flags as they were
+        assert torch.backends.cudnn.enabled is True and torch.backends.cudnn.deterministic is True
+        assert not [w for w in caught if "Benchmark limit" in str(w.message)], [str(w.message) for w in caught]
+        config.NATIVE_ROCM = False
+        probe()
+        assert seen[-1] == (True, True)                                      # ZLUDA / CPU: untouched
+    finally:
+        config.NATIVE_ROCM, torch.backends.cudnn.enabled, torch.backends.cudnn.deterministic = saved
+
+
+@test("The chosen GPU becomes torch's current device: under ZLUDA HIP shows every GPU, and plain 'cuda', device-0 reads and the memory statistics (EasyOCR, SmartSplit's UNet, the trainer, the Bridge's card size, the iGPU commit margin, the VRAM-spill note) used GPU 0 whichever was chosen")
+def _():
+    import torch, config
+    from backend import model_manager as MM
+    names = {0: "AMD Radeon RX 9070 XT [ZLUDA]", 1: "AMD Radeon 780M Graphics [ZLUDA]"}
+    picked = []
+    saved = (torch.cuda.is_available, torch.cuda.device_count, torch.cuda.get_device_name, torch.cuda.set_device,
+             torch.cuda.current_device, torch.backends.cudnn.enabled, torch.backends.cuda.flash_sdp_enabled(),
+             torch.backends.cuda.mem_efficient_sdp_enabled(), config.NATIVE_ROCM)
+    try:
+        torch.cuda.is_available, torch.cuda.device_count = (lambda: True), (lambda: 2)
+        torch.cuda.get_device_name = lambda i=None: names[i if i is not None else 0]
+        torch.cuda.set_device = picked.append
+        torch.cuda.current_device = lambda: picked[-1] if picked else 0
+        config.NATIVE_ROCM = False
+        assert config.get_device(1, backend="cuda") == "cuda:1" and picked[-1] == 1, picked
+        assert MM._on_integrated_gpu() is True                                  # reads GPU 1, the 780M
+        assert config.get_device(0, backend="cuda") == "cuda:0" and picked[-1] == 0
+        assert MM._on_integrated_gpu() is False
+        assert config.get_device(5, backend="cuda") == "cuda:0" and picked[-1] == 0     # out of range: GPU 0, as before
+    finally:
+        (torch.cuda.is_available, torch.cuda.device_count, torch.cuda.get_device_name, torch.cuda.set_device,
+         torch.cuda.current_device, torch.backends.cudnn.enabled, flash, mem_eff, config.NATIVE_ROCM) = saved
+        torch.backends.cuda.enable_flash_sdp(flash)
+        torch.backends.cuda.enable_mem_efficient_sdp(mem_eff)
+
+
+@test("EasyOCR follows the app's GPU: under ZLUDA it asked for plain 'cuda' (GPU 0) and wrapped its models in DataParallel over every visible GPU, which wants them on cuda:0; now it gets config.DEVICE and plain modules (MIOpen on: CPU, as before)")
+def _():
+    import sys as _sys, types, torch, config
+    from backend import watermark_remover as W
+    seen = {}
+    det, rec = torch.nn.DataParallel(torch.nn.Linear(2, 2)), torch.nn.DataParallel(torch.nn.Linear(2, 2))   # built before CUDA is faked
+    class FakeReader:
+        def __init__(self, langs, gpu=True):
+            seen["gpu"] = gpu
+            self.detector, self.recognizer = det, rec
+    saved = (_sys.modules.get("easyocr"), W._ocr_reader, W._ocr_langs, W._memory.make_room, config.DEVICE,
+             torch.cuda.is_available, torch.cuda.get_device_name, torch.backends.cudnn.enabled)
+    try:
+        _sys.modules["easyocr"] = types.SimpleNamespace(Reader=FakeReader)
+        W._ocr_reader, W._memory.make_room, config.DEVICE = None, (lambda *a, **k: None), "cuda:1"
+        torch.cuda.is_available = lambda: True
+        torch.cuda.get_device_name = lambda *a: "AMD Radeon RX 9070 XT [ZLUDA]"
+        torch.backends.cudnn.enabled = False
+        r = W._get_ocr_reader(["en"])
+        assert seen["gpu"] == "cuda:1", seen
+        assert r.detector is det.module and r.recognizer is rec.module
+        W._ocr_reader, torch.backends.cudnn.enabled = None, True
+        W._get_ocr_reader(["en"])
+        assert seen["gpu"] is False, seen
+    finally:
+        (mod, W._ocr_reader, W._ocr_langs, W._memory.make_room, config.DEVICE,
+         torch.cuda.is_available, torch.cuda.get_device_name, torch.backends.cudnn.enabled) = saved
+        if mod is None:
+            _sys.modules.pop("easyocr", None)
+        else:
+            _sys.modules["easyocr"] = mod
+
+
+@test("A fresh install with no checkpoint builds every Dropdown inside its choices: the Train tab's base model left \"\" outside an empty list, which Gradio 4.19 warned about at every start; its Refresh keeps the placeholder")
+def _():
+    import inspect, warnings
+    import gradio as gr
+    import app as _app
+    old = _app._checkpoint_choices
+    _app._checkpoint_choices = lambda: []
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            demo = _app.build_app()
+        bad = [str(x.message)[:120] for x in caught if "not in the list of choices" in str(x.message)]
+        assert not bad, bad
+        dd = [b for b in demo.blocks.values() if isinstance(b, gr.Dropdown) and b.label == "🧠 Base model (checkpoint)"]
+        assert len(dd) == 1 and dd[0].value == "" and [v for _, v in dd[0].choices] == [""], (dd[0].value, dd[0].choices)
+        by = {inspect.unwrap(f.fn).__name__: f for f in demo.fns if f.fn is not None}
+        up = inspect.unwrap(by["do_refresh_models"].fn)()
+        assert [v for _, v in up["choices"]] == [""], up
+    finally:
+        _app._checkpoint_choices = old
+
+
+@test("Every .py file in the repo compiles without an invalid escape sequence: Python 3.12 (python-rocm) prints a SyntaxWarning at every start, a later Python refuses the file; run_tests.py's, lora_trainer.py's and check_nodes.py's docstrings had one")
+def _():
+    import warnings
+    root = APP_DIR.parent
+    skip = {"python-3.10", "python-rocm", "site-packages", "node_modules", ".hf_cache", "models", "_setup_check", ".git"}
+    bad = []
+    for p in sorted(root.rglob("*.py")):
+        if skip & set(p.relative_to(root).parts):
+            continue
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")                                  # 3.10 reports these as a DeprecationWarning
+            try:
+                compile(p.read_text(encoding="utf-8", errors="replace"), str(p), "exec")
+            except (SyntaxError, SyntaxWarning, DeprecationWarning) as e:
+                bad.append(f"{p.relative_to(root)}: {e}")
+    assert not bad, bad
+
 
 @test("Civitai ▶ Next stops at the last page: an API call or a quick double click went to 'Page 2 / 1' with empty cards")
 def _():

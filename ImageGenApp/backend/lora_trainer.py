@@ -295,7 +295,7 @@ def _unique_path(path: Path) -> Path:
 
 
 def safe_output_name(name: str) -> str:
-    """File-system-safe LoRA name (Windows forbids <>:"/\|?* and trailing dots/spaces)."""
+    r"""File-system-safe LoRA name (Windows forbids <>:"/\|?* and trailing dots/spaces)."""
     import re
     n = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", (name or "").strip()).strip(". ")
     if n.split(".")[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),

@@ -70,7 +70,7 @@ def main() -> int:
     from backend.model_manager import list_checkpoints, list_loras, checkpoint_arch, lora_arch
     from backend.sd_pipeline import SDPipeline
     from backend import detail_tools as dt
-    print(f"device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}", flush=True)
+    print(f"device: {torch.cuda.get_device_name(torch.cuda.current_device()) if torch.cuda.is_available() else 'CPU'}", flush=True)
     ckpt = pick(list_checkpoints(), checkpoint_arch, "sd1", arg("--ckpt"))
     lora = pick(list_loras(), lora_arch, "sd1", arg("--lora"))
     if not ckpt:

@@ -165,7 +165,7 @@ def build_handlers(ns, n_lora_dds):
         return f'<p style="color:#a6e3a1">✅ Caption saved for {filename}</p>'
 
     def do_refresh_models():
-        return gr.update(choices=ns._checkpoint_choices())
+        return gr.update(choices=ns._train_model_choices())
 
     def _parse_res(res_choice):
         if "1024" in res_choice:
@@ -251,7 +251,7 @@ def build_handlers(ns, n_lora_dds):
         color = "#a6e3a1" if "✅" in msg else "#f38ba8"
         try:
             import torch as _t
-            _vram = (_t.cuda.get_device_properties(_t.device(cfg.device if cfg.device.startswith("cuda") else "cuda:0")).total_memory / 2**30
+            _vram = (_t.cuda.get_device_properties(_t.device(cfg.device if cfg.device.startswith("cuda") else "cuda")).total_memory / 2**30
                      if cfg.device in ("auto", "cuda") and _t.cuda.is_available() else None)
         except Exception:
             _vram = None

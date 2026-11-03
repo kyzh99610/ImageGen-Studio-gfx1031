@@ -153,6 +153,13 @@ def get_device(gpu_index: int | None = None, backend: str | None = None) -> str:
                 # MIOpen, and make GPU VAE decode usable. IMAGEGEN_CUDNN=1 reverts.
                 if os.environ.get("IMAGEGEN_CUDNN") != "1":
                     torch.backends.cudnn.enabled = False
+            # Plain "cuda", device-0 reads and the memory statistics follow the chosen GPU. Under ZLUDA HIP shows every GPU, and
+            # EasyOCR, SmartSplit's UNet, the trainer and the VRAM-spill note used GPU 0 whichever one was chosen (native ROCm
+            # shows only the chosen one, so it is always 0 there).
+            try:
+                torch.cuda.set_device(dev_idx)
+            except Exception:
+                pass
             return f"cuda:{dev_idx}"
     except ImportError:
         pass

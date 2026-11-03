@@ -85,7 +85,7 @@ def _on_integrated_gpu() -> bool:
     try:
         import torch
         from backend.hardware_detector import _classify_gpu
-        return torch.cuda.is_available() and _classify_gpu(torch.cuda.get_device_name(0))[1]
+        return torch.cuda.is_available() and _classify_gpu(torch.cuda.get_device_name(torch.cuda.current_device()))[1]
     except Exception:
         return False
 

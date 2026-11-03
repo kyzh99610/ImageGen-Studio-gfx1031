@@ -89,8 +89,14 @@ def _no_shape_search(fn):
         if not getattr(_cfg, "NATIVE_ROCM", False):
             return fn(*args, **kwargs)
         import torch
-        with torch.backends.cudnn.flags(enabled=False):
+        # only `enabled`: cudnn.flags() also set every other flag (deterministic off, a benchmark limit MIOpen warns about on every
+        # process, the TF32 / precision switches) for the length of the pass
+        was = torch.backends.cudnn.enabled
+        torch.backends.cudnn.enabled = False
+        try:
             return fn(*args, **kwargs)
+        finally:
+            torch.backends.cudnn.enabled = was
     return run
 
 

@@ -71,14 +71,33 @@ def _get_ocr_reader(langs: list[str]):
             # same text, ~4× faster than CPU on the RX 6800M.
             # Only fall back to CPU if MIOpen was re-enabled (IMAGEGEN_CUDNN=1).
             if use_gpu and torch.backends.cudnn.enabled:
-                name = torch.cuda.get_device_name(0)
+                name = torch.cuda.get_device_name(torch.cuda.current_device())
                 if "ZLUDA" in name or "AMD" in name or "Radeon" in name:
                     use_gpu = False
         except Exception:
             use_gpu = False
-        _ocr_reader = easyocr.Reader(langs, gpu=use_gpu)
+        device = False
+        if use_gpu:
+            from config import DEVICE
+            device = DEVICE if str(DEVICE).startswith("cuda") else True
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r"[\s\S]*imbalance between your GPUs")
+            _ocr_reader = easyocr.Reader(langs, gpu=device)
+        _unwrap_data_parallel(_ocr_reader)
         _ocr_langs  = list(langs)
     return _ocr_reader
+
+
+def _unwrap_data_parallel(reader) -> None:
+    """EasyOCR wraps its detector and recognizer in torch.nn.DataParallel over every visible GPU, whose forward wants the model on
+    cuda:0. Under ZLUDA both GPUs are visible, so OCR ran on GPU 0 whatever GPU the app was on (it asked for plain 'cuda'), and on
+    the app's own cuda:1 DataParallel would have refused to run. The plain modules run where Reader put them."""
+    import torch
+    for name in ("detector", "recognizer"):
+        m = getattr(reader, name, None)
+        if isinstance(m, torch.nn.DataParallel):
+            setattr(reader, name, m.module)
 
 
 def _get_lama_session():
