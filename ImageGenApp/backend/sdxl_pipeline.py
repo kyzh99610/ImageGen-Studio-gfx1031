@@ -854,7 +854,8 @@ class SDXLPipeline:
 
             model_name = path.stem if is_local else model_path_or_id
             fam = self.model_family.capitalize() + (" · v-pred" if self.prediction.get("v_pred") else "")
-            return f"✅ Loaded: {model_name} ({fam}, {self.device})"
+            from backend.sd_pipeline import _dml_igpu_note
+            return f"✅ Loaded: {model_name} ({fam}, {self.device})" + _dml_igpu_note(self.device)
 
         except Exception as e:
             self._unload()

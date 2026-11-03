@@ -649,7 +649,7 @@ class SDPipeline:
             # LoRA restore snapshot is taken lazily on first load_lora():
             # saves a full CPU copy of the weights (~6.6 GB for SDXL) when no LoRA is used.
             model_name = path.stem if is_local else model_path_or_id
-            return f"✅ Loaded: {model_name} (SD, {self.device})"
+            return f"✅ Loaded: {model_name} (SD, {self.device})" + _dml_igpu_note(self.device)
 
         except Exception as e:
             self._unload()
@@ -1110,6 +1110,24 @@ def _dml_index(device) -> int:
         return int(str(device).rsplit(":", 1)[1])
     except (IndexError, ValueError):
         return 0
+
+
+def _dml_igpu_note(device) -> str:
+    """A warning for the load line when the DirectML model sits on an integrated GPU, else "": a 780M through DirectML drew black
+    (NaN) pictures now and then with torch-directml 0.2.5 and ran clean on native ROCm, and the laptop's Vega hung its display
+    driver under DirectML (SmartSplit, 887A0006)."""
+    if "privateuseone" not in str(device):
+        return ""
+    try:
+        import torch_directml
+        from backend.hardware_detector import _classify_gpu
+        name = str(torch_directml.device_name(_dml_index(device))).rstrip("\x00").strip()      # torch-directml ends names with a NUL
+        if _classify_gpu(name)[1]:
+            return (f"\n⚠ DirectML on an integrated GPU ({name}): pictures can come out black (NaN) now and then. A 780M runs "
+                    "clean on native ROCm (launch.bat without --dml); on a laptop, pick the dedicated GPU.")
+    except Exception:
+        pass
+    return ""
 
 
 def _make_generators(seed: int, device: str, n: int) -> tuple:

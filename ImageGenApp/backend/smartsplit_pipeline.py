@@ -98,7 +98,7 @@ def detect_smartsplit_capability() -> SmartSplitCapability:
             if _n >= 2:
                 _IGPU_KW = ("780m", "760m", "880m", "680m", "vega 8", "vega 11",
                             "610m", "618m", "radeon(tm) graphics", "780", "760")
-                _dml_names = [(i, _tdml.device_name(i)) for i in range(_n)]
+                _dml_names = [(i, _tdml.device_name(i).rstrip("\x00")) for i in range(_n)]     # names end with a NUL
                 igpu_i = next(
                     (i for i, nm in _dml_names
                      if any(k in nm.lower() for k in _IGPU_KW)), -1

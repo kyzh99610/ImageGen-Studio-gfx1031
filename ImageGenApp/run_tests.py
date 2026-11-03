@@ -706,6 +706,27 @@ def _():
     assert len(sdp._decode_latents(vae, lat)) == 1
 
 
+@test("DirectML on an integrated GPU warns at load (a 780M drew black / NaN pictures there now and then, the laptop's Vega hung its display driver); a dedicated card, CUDA / ZLUDA and the CPU get no note")
+def _():
+    import sys as _sys, types
+    from backend import sd_pipeline as SP
+    names = {0: "AMD Radeon 780M Graphics\x00", 1: "AMD Radeon RX 9070 XT\x00", 2: "AMD Radeon(TM) Graphics\x00"}   # as torch-directml returns them
+    saved = _sys.modules.get("torch_directml")
+    _sys.modules["torch_directml"] = types.SimpleNamespace(device_name=lambda i: names[i])
+    try:
+        assert "780M" in SP._dml_igpu_note("privateuseone:0") and "native ROCm" in SP._dml_igpu_note("privateuseone:0")
+        assert "\x00" not in SP._dml_igpu_note("privateuseone:0") and "(AMD Radeon 780M Graphics)" in SP._dml_igpu_note("privateuseone:0")
+        assert "Radeon(TM) Graphics" in SP._dml_igpu_note("privateuseone:2")
+        assert SP._dml_igpu_note("privateuseone:1") == ""
+        assert SP._dml_igpu_note("cuda:0") == "" and SP._dml_igpu_note("cpu") == ""
+        assert SP._dml_igpu_note("privateuseone:0").startswith("\n⚠")          # a line of its own under "✅ Loaded"
+    finally:
+        if saved is None:
+            _sys.modules.pop("torch_directml", None)
+        else:
+            _sys.modules["torch_directml"] = saved
+
+
 @test("smoke_gpu.py --ckpt / --xl-ckpt take a file name, a stem or a path, and stop on a name that matches nothing: a path matched nothing and the test silently ran another model")
 def _():
     import importlib.util
