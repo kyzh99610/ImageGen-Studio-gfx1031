@@ -2118,11 +2118,13 @@ def _():
             assert dxgi.offload_igpu()[0] is None and "Vega-class" in dxgi.offload_igpu()[1] and dxgi.dml_index(True) == 0
         with patch.object(dxgi, "adapters", lambda: [{"index": 0, "name": "AMD Radeon 780M Graphics", "software": False, "vendor": 0x1002, "device": 0x15BF}]):
             assert dxgi.offload_igpu() == (0, "")
-        # SmartSplit under ZLUDA on the laptop: nothing to offload to, and it says why
+        # SmartSplit under ZLUDA on the laptop: nothing to offload to, and it says why (the laptop has no NPU; on a PC with a
+        # Ryzen AI NPU SmartSplit would still have that stage, so the bridge is switched off here)
         import torch
         from backend import smartsplit_pipeline as SP
         with patch.object(dxgi, "adapters", lambda: vega), patch.object(torch.cuda, "is_available", lambda: True), \
-                patch.object(torch.cuda, "get_device_name", lambda i=0: "AMD Radeon RX 6800M [ZLUDA]"):
+                patch.object(torch.cuda, "get_device_name", lambda i=0: "AMD Radeon RX 6800M [ZLUDA]"), \
+                patch("backend.npu_bridge.check_npu_bridge_available", lambda: (False, "no NPU")):
             cap = SP.detect_smartsplit_capability()
         assert not cap.possible and not cap.igpu_vae_available and "Vega-class" in cap.reason, cap
     # the real DXGI list of this PC (Windows): hardware adapters have a name and a LUID, the numbers count from 0
