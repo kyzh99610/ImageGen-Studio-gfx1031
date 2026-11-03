@@ -69,8 +69,10 @@ def _get_ocr_reader(langs: list[str]):
             # EasyOCR's cuDNN RNN is broken under ZLUDA (MIOpen). config.py
             # disables cuDNN on AMD, and then PyTorch's native LSTM works:
             # same text, ~4× faster than CPU on the RX 6800M.
-            # Only fall back to CPU if MIOpen was re-enabled (IMAGEGEN_CUDNN=1).
-            if use_gpu and torch.backends.cudnn.enabled:
+            # Only fall back to CPU if MIOpen was re-enabled (IMAGEGEN_CUDNN=1). Native ROCm keeps MIOpen on for the main passes
+            # and runs OCR on the GPU with it off (_readtext): 0.12-0.15 s a picture against 1.3-1.7 s on that torch's CPU.
+            import config as _c
+            if use_gpu and torch.backends.cudnn.enabled and not getattr(_c, "NATIVE_ROCM", False):
                 name = torch.cuda.get_device_name(torch.cuda.current_device())
                 if "ZLUDA" in name or "AMD" in name or "Radeon" in name:
                     use_gpu = False
@@ -87,6 +89,22 @@ def _get_ocr_reader(langs: list[str]):
         _unwrap_data_parallel(_ocr_reader)
         _ocr_langs  = list(langs)
     return _ocr_reader
+
+
+def _readtext(reader, img_np):
+    """reader.readtext, with MIOpen off on native ROCm: EasyOCR's VGG has batch norm, whose MIOpen kernel is built at run time and
+    fails with that wheel ('type_traits' file not found -> miopenStatusUnknownError), and its input size changes with every picture,
+    so MIOpen would tune each one. torch's own GPU kernels read the same text."""
+    import config as _c
+    if not getattr(_c, "NATIVE_ROCM", False):
+        return reader.readtext(img_np)
+    import torch
+    was = torch.backends.cudnn.enabled
+    torch.backends.cudnn.enabled = False
+    try:
+        return reader.readtext(img_np)
+    finally:
+        torch.backends.cudnn.enabled = was
 
 
 def _unwrap_data_parallel(reader) -> None:
@@ -155,7 +173,7 @@ def detect_text_regions(
     reader = _get_ocr_reader(langs)
     img_np = np.array(image.convert("RGB"))
 
-    raw = reader.readtext(img_np)
+    raw = _readtext(reader, img_np)
     regions = []
     for (bbox_pts, text, conf) in raw:
         if conf < min_confidence:

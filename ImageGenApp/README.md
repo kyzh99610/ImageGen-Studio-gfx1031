@@ -137,7 +137,7 @@ Drop any image made by this app, A1111/Forge or Civitai to see its prompt and se
 
 Remove watermarks, logos, and overlaid text from images:
 
-- **Auto-Detect** — EasyOCR (on the GPU under ZLUDA) finds text regions; corner heuristic catches corner logos. Detected regions are expanded to include surrounding graphic elements (borders, icons) and merged when close together.
+- **Auto-Detect** — EasyOCR (on the GPU under ZLUDA and native ROCm) finds text regions; corner heuristic catches corner logos. Detected regions are expanded to include surrounding graphic elements (borders, icons) and merged when close together.
 - **Draw-on-image** — Paint red brush strokes directly on the image to mark additional regions for removal.
 - **OCR-off mode** — Toggle OCR detection off to use draw-only selection, keeping desired text intact (useful for emoji, manga, etc.).
 - **Auto-downscale** — Large images (>2048px) are automatically downscaled for the editor canvas. Full resolution preserved in output.
@@ -311,6 +311,6 @@ the [main README](../README.md#troubleshooting).
 | Accelerated TE says no iGPU is reachable through torch-directml | Native ROCm has no torch-directml; the text encoders run on the GPU as usual |
 | Settings' GPU choice can't be clicked | Native ROCm runs one GPU per start: close the app and use `launch.bat --gpu N` (the hint under it says which number is which) |
 | Watermark remover white spots | Increase mask dilation to 30–40px; Poisson blending handles most edge artifacts |
-| EasyOCR "Using CPU" message | Only expected on DirectML/CPU, or if `IMAGEGEN_CUDNN=1` is set. Under ZLUDA OCR runs on the GPU |
+| EasyOCR "Using CPU" message | Only expected on DirectML/CPU, or if `IMAGEGEN_CUDNN=1` is set under ZLUDA. Under ZLUDA and native ROCm OCR runs on the GPU (native: with MIOpen off for it) |
 | Black images from generation | Check LoRA compatibility; mismatched base (e.g., SD1.5 LoRA on SDXL) causes this |
 | Auto-loop stop kills current batch | By design — stop button aborts immediately, not after current batch finishes |

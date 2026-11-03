@@ -602,7 +602,7 @@ def _():
         torch.backends.cuda.enable_mem_efficient_sdp(mem_eff)
 
 
-@test("EasyOCR follows the app's GPU: under ZLUDA it asked for plain 'cuda' (GPU 0) and wrapped its models in DataParallel over every visible GPU, which wants them on cuda:0; now it gets config.DEVICE and plain modules (MIOpen on: CPU, as before)")
+@test("EasyOCR follows the app's GPU: under ZLUDA it asked for plain 'cuda' (GPU 0) and wrapped its models in DataParallel over every visible GPU, which wants them on cuda:0; now it gets config.DEVICE and plain modules. ZLUDA with MIOpen re-enabled: CPU, as before; native ROCm: the GPU (it was the CPU, 11x slower) with MIOpen off for the call only (its batch-norm kernel doesn't build there)")
 def _():
     import sys as _sys, types, torch, config
     from backend import watermark_remover as W
@@ -613,22 +613,41 @@ def _():
             seen["gpu"] = gpu
             self.detector, self.recognizer = det, rec
     saved = (_sys.modules.get("easyocr"), W._ocr_reader, W._ocr_langs, W._memory.make_room, config.DEVICE,
-             torch.cuda.is_available, torch.cuda.get_device_name, torch.backends.cudnn.enabled)
+             torch.cuda.is_available, torch.cuda.get_device_name, torch.backends.cudnn.enabled, config.NATIVE_ROCM)
     try:
         _sys.modules["easyocr"] = types.SimpleNamespace(Reader=FakeReader)
         W._ocr_reader, W._memory.make_room, config.DEVICE = None, (lambda *a, **k: None), "cuda:1"
         torch.cuda.is_available = lambda: True
         torch.cuda.get_device_name = lambda *a: "AMD Radeon RX 9070 XT [ZLUDA]"
-        torch.backends.cudnn.enabled = False
+        torch.backends.cudnn.enabled, config.NATIVE_ROCM = False, False
         r = W._get_ocr_reader(["en"])
         assert seen["gpu"] == "cuda:1", seen
         assert r.detector is det.module and r.recognizer is rec.module
         W._ocr_reader, torch.backends.cudnn.enabled = None, True
         W._get_ocr_reader(["en"])
         assert seen["gpu"] is False, seen
+        W._ocr_reader, config.NATIVE_ROCM = None, True                      # native: MIOpen stays on for the main passes
+        W._get_ocr_reader(["en"])
+        assert seen["gpu"] == "cuda:1", seen
+
+        class Probe:
+            def readtext(self, a, fail=False):
+                seen["miopen_in_call"] = torch.backends.cudnn.enabled
+                if a == "fail":
+                    raise RuntimeError("boom")
+                return []
+        assert W._readtext(Probe(), "x") == [] and seen["miopen_in_call"] is False and torch.backends.cudnn.enabled is True
+        try:
+            W._readtext(Probe(), "fail")
+        except RuntimeError:
+            pass
+        assert torch.backends.cudnn.enabled is True
+        config.NATIVE_ROCM = False
+        W._readtext(Probe(), "x")
+        assert seen["miopen_in_call"] is True                               # ZLUDA / CPU: untouched
     finally:
         (mod, W._ocr_reader, W._ocr_langs, W._memory.make_room, config.DEVICE,
-         torch.cuda.is_available, torch.cuda.get_device_name, torch.backends.cudnn.enabled) = saved
+         torch.cuda.is_available, torch.cuda.get_device_name, torch.backends.cudnn.enabled, config.NATIVE_ROCM) = saved
         if mod is None:
             _sys.modules.pop("easyocr", None)
         else:
