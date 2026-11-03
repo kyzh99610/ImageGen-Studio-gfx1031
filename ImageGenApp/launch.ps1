@@ -141,6 +141,8 @@ $GpuIndex = if ($Gpu -ge 0) { $Gpu } elseif ($null -ne $Rocm.gpu_index) { [int]$
 # ZLUDA v6: do NOT set HIP_VISIBLE_DEVICES — it breaks multi-GPU detection.
 # IMAGEGEN_GPU makes the app pick the matching torch.cuda device instead.
 $env:IMAGEGEN_GPU = "$GpuIndex"
+# HIP's automatic pick is a HIP number; DirectML numbers the GPUs its own way, so config.py picks the dGPU by name there
+if ($Gpu -ge 0) { Remove-Item Env:IMAGEGEN_GPU_AUTO -ErrorAction SilentlyContinue } else { $env:IMAGEGEN_GPU_AUTO = "1" }
 if ($Cpu) { $env:FORCE_CPU = "1" }
 
 Write-Host ""

@@ -2154,6 +2154,65 @@ def _():
         assert real and [a["index"] for a in real] == list(range(len(real))) and all(a["name"] and a["luid"].startswith("luid_0x") for a in real), real
 
 
+@test("DirectML's device without a chosen GPU is the discrete one by name: the launchers' automatic pick is HIP's number (8700G bench: RX 9070 XT 0) and torch-directml's order is its own (780M 0), so `launch.bat --dml` and every plain python-3.10 process (this suite too) ran DirectML on the 780M; a chosen number stays torch-directml's own, and Settings' choice counts as a choice in child processes")
+def _():
+    from types import SimpleNamespace
+    import config
+
+    def tdml(*names):
+        return SimpleNamespace(device_count=lambda: len(names), device_name=lambda i: names[i] + "\x00",       # torch-directml's names end with a NUL
+                               device=lambda i=0: f"privateuseone:{i}")
+    bench, laptop = tdml("AMD Radeon 780M Graphics", "AMD Radeon RX 9070 XT"), tdml("AMD Radeon RX 6800M", "AMD Radeon(TM) Graphics")
+    assert config._dml_device_index(bench, 0, chosen=False) == 1
+    assert config._dml_device_index(laptop, 0, chosen=False) == 0
+    assert config._dml_device_index(tdml("AMD Radeon 780M Graphics"), 0, chosen=False) == 0           # an APU on its own: its iGPU
+    assert config._dml_device_index(tdml("AMD Radeon RX 7800 XT", "AMD Radeon 610M"), 0, chosen=False) == 0
+    assert [config._dml_device_index(bench, i, chosen=True) for i in (0, 1, 5)] == [0, 1, 0]            # chosen: as given (out of range: 0, as before)
+    for env, want in (({}, False), ({"IMAGEGEN_GPU": " "}, False), ({"IMAGEGEN_GPU": "0", "IMAGEGEN_GPU_AUTO": "1"}, False),
+                      ({"IMAGEGEN_GPU": "0"}, True), ({"IMAGEGEN_GPU": "1", "IMAGEGEN_GPU_AUTO": ""}, True)):
+        with patch.dict(os.environ, env):
+            for k in ("IMAGEGEN_GPU", "IMAGEGEN_GPU_AUTO"):
+                if k not in env:
+                    os.environ.pop(k, None)
+            assert config._gpu_chosen() is want, (env, config._gpu_chosen())
+    with patch.dict(sys.modules, {"torch_directml": bench}), patch.dict(os.environ, {"IMAGEGEN_GPU": "0", "IMAGEGEN_GPU_AUTO": "1"}):
+        os.environ.pop("FORCE_CPU", None)
+        assert config.get_device(None, backend="directml") == "privateuseone:1"        # --dml with the launcher's pick: the card
+        assert config.get_device(0, backend="directml") == "privateuseone:0"           # Settings passes torch-directml's own number (by name)
+        os.environ.pop("IMAGEGEN_GPU_AUTO")
+        assert config.get_device(None, backend="directml") == "privateuseone:0"        # --dml --gpu 0: the 780M, as asked
+    with patch.dict(os.environ, {"IMAGEGEN_GPU": "0", "IMAGEGEN_GPU_AUTO": "1"}), patch.object(config, "get_device", lambda *a, **k: "cpu"), \
+            patch.object(config, "SELECTED_GPU_INDEX", config.SELECTED_GPU_INDEX), patch.object(config, "DEVICE", config.DEVICE):
+        config.set_active_gpu(1)
+        assert os.environ["IMAGEGEN_GPU"] == "1" and "IMAGEGEN_GPU_AUTO" not in os.environ, dict(os.environ)
+
+
+@test("SmartSplit on the DirectML backend: iGPU and dGPU by the detector's name rules (the keywords '780' / '760' made an RX 7800 XT the 'iGPU' and the 610M the UNet's 'dGPU'), and a Vega iGPU gets no stage there either: 'Nothing to offload to' with the reason, as under ZLUDA (its sessions ran on the CPU while the split said iGPU)")
+def _():
+    from types import SimpleNamespace
+    import torch
+    from backend import dxgi, smartsplit_pipeline as SP
+    import backend.npu_bridge as NB     # patched as this object: a test that first imported it inside patch.dict(sys.modules) leaves a stale package attribute behind
+
+    def tdml(*names):
+        return SimpleNamespace(device_count=lambda: len(names), device_name=lambda i: names[i] + "\x00")
+    rdna_igpu =[{"index": 0, "name": "AMD Radeon RX 7800 XT", "software": False, "vendor": 0x1002, "device": 0x747E},
+                 {"index": 1, "name": "AMD Radeon 610M", "software": False, "vendor": 0x1002, "device": 0x164E}]
+    vega = [{"index": 0, "name": "AMD Radeon(TM) Graphics", "software": False, "vendor": 0x1002, "device": 0x1638},
+            {"index": 1, "name": "AMD Radeon RX 6800M", "software": False, "vendor": 0x1002, "device": 0x73DF}]
+    with patch.object(torch.cuda, "is_available", lambda: False), \
+            patch.object(NB, "check_npu_bridge_available", lambda: (False, "no NPU")):
+        with patch.dict(sys.modules, {"torch_directml": tdml("AMD Radeon RX 7800 XT", "AMD Radeon 610M")}), patch.object(dxgi, "adapters", lambda: rdna_igpu):
+            cap = SP.detect_smartsplit_capability()
+        assert (cap.dgpu_dml_idx, cap.igpu_dml_idx, cap.dgpu_name) == (0, 1, "AMD Radeon RX 7800 XT"), cap
+        assert cap.possible and cap.igpu_vae_available, cap
+        with patch.dict(sys.modules, {"torch_directml": tdml("AMD Radeon RX 6800M", "AMD Radeon(TM) Graphics")}), patch.object(dxgi, "adapters", lambda: vega):
+            cap = SP.detect_smartsplit_capability()
+        assert cap.dgpu_dml_idx == 0 and cap.dgpu_name == "AMD Radeon RX 6800M", cap
+        assert not cap.possible and not cap.igpu_vae_available and not cap.igpu_te_available, cap
+        assert cap.reason.startswith("Nothing to offload to") and "Vega-class" in cap.reason, cap.reason
+
+
 @test("download_models: a download goes to .part, resumes there, and gets its name only with the right size and SHA-256; a half file from the old script resumes, the wrong hash is removed")
 def _():
     import hashlib
@@ -2429,7 +2488,7 @@ def _():
         del got
 
 
-@test("A PC with only python-rocm (no python-3.10, no ZLUDA): launch.bat and launch.ps1 find it, start on native ROCm and don't warn about ZLUDA; install_rocm.bat refuses a folder too deep for the kernels' file names")
+@test("A PC with only python-rocm (no python-3.10, no ZLUDA): launch.bat and launch.ps1 find it, start on native ROCm and don't warn about ZLUDA, and mark HIP's automatic GPU pick (IMAGEGEN_GPU_AUTO=1, not with --gpu N); install_rocm.bat refuses a folder too deep for the kernels' file names")
 def _():
     import importlib.util
     import shutil
@@ -2460,18 +2519,22 @@ def _():
             "import sys\nif '--json' in sys.argv:\n    import json\n    print(json.dumps({'arch': 'gfx1201', 'gpu_index': 0, 'native_python': sys.executable, 'rocm_bin': ''}))\n"
             "else:\n    print('set \"ROCM_ARCH=gfx1201\"')\n    print('set \"ROCM_GPU_INDEX=0\"')\n    print('set \"ROCM_NATIVE_PY=' + sys.executable + '\"')\n", encoding="utf-8")
         (app_dir / "config.py").write_text("", encoding="utf-8")
-        (app_dir / "app.py").write_text("import sys\nprint('STUB APP ' + sys.prefix)\n", encoding="utf-8")
-        env = {k: v for k, v in os.environ.items() if k not in ("IMAGEGEN_GPU", "IMAGEGEN_BACKEND")}
+        (app_dir / "app.py").write_text("import os, sys\nprint('STUB APP ' + sys.prefix + ' GPU=[' + os.environ.get('IMAGEGEN_GPU', '') + '] AUTO=[' + os.environ.get('IMAGEGEN_GPU_AUTO', '') + ']')\n", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if k not in ("IMAGEGEN_GPU", "IMAGEGEN_BACKEND", "IMAGEGEN_GPU_AUTO")}
         runs = {"launch.bat": ["cmd", "/d", "/c", str(app_dir / "launch.bat"), "--port", "7999", "--no-browser", "--no-pause"]}
+        gpu_flag = {"launch.bat": ["--gpu", "1"], "launch.ps1": ["-Gpu", "1"]}
         shell = shutil.which("pwsh") or shutil.which("powershell")
         if shell:
             runs["launch.ps1"] = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(app_dir / "launch.ps1"), "-Port", "7999", "-NoBrowser", "-NoPause"]
-        for name, cmd in runs.items():
+        for (name, cmd), (extra, want) in ((nc, ew) for nc in runs.items() for ew in (([], "GPU=[0] AUTO=[1]"), (None, "GPU=[1] AUTO=[]"))):
+            # HIP's automatic pick is marked for DirectML (config.py then takes the dGPU by name there); --gpu N is a choice
+            cmd = cmd + (gpu_flag[name] if extra is None else extra)
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL, env=env, encoding="utf-8", errors="replace")
             out = r.stdout + r.stderr
             assert "native ROCm" in out and "Launching on native" in out, (name, out[-900:])
             assert "STUB APP" in out and "python-rocm" in out[out.index("STUB APP"):], (name, out[-900:])
             assert "ZLUDA not found" not in out and "Bundled Python" not in out, (name, out[-900:])
+            assert want in out, (name, want, out[-600:])
 
 
 @test("First-run kernel note: ZLUDA v6's zluda2.db (or the older zluda.db) counts as compiled, a small or missing one warns, native ROCm never warns")

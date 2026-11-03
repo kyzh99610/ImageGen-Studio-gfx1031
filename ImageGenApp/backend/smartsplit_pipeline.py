@@ -96,22 +96,24 @@ def detect_smartsplit_capability() -> SmartSplitCapability:
             import torch_directml as _tdml
             _n = _tdml.device_count()
             if _n >= 2:
-                _IGPU_KW = ("780m", "760m", "880m", "680m", "vega 8", "vega 11",
-                            "610m", "618m", "radeon(tm) graphics", "780", "760")
+                # By the hardware detector's name rules: the old keywords "780" / "760" also matched an RX 7800 XT / RX 7600 (XT),
+                # which then became the "iGPU" and the real iGPU the UNet's "dGPU"
+                from backend.hardware_detector import _classify_gpu
                 _dml_names = [(i, _tdml.device_name(i).rstrip("\x00")) for i in range(_n)]     # names end with a NUL
-                igpu_i = next(
-                    (i for i, nm in _dml_names
-                     if any(k in nm.lower() for k in _IGPU_KW)), -1
-                )
-                dgpu_i = next((i for i, nm in _dml_names if i != igpu_i), -1)
+                igpu_i = next((i for i, nm in _dml_names if _classify_gpu(nm)[1]), -1)
+                dgpu_i = next((i for i, nm in _dml_names if not _classify_gpu(nm)[1]), -1)
                 if igpu_i >= 0 and dgpu_i >= 0:
                     cap.dgpu_available     = True
                     cap.dgpu_dml_idx       = dgpu_i
                     cap.igpu_dml_idx       = igpu_i
                     cap.dgpu_name          = _dml_names[dgpu_i][1]
                     cap.igpu_name          = _dml_names[igpu_i][1]
-                    cap.igpu_vae_available = True
-                    cap.igpu_te_available  = True
+                    # A Vega-class iGPU gets no stage on this backend either (Fix history 53): its ONNX sessions would run on the CPU
+                    # while the split said iGPU, and "Nothing to offload to" below never showed under --dml
+                    from backend import dxgi
+                    if dxgi.offload_igpu()[0] is not None:
+                        cap.igpu_vae_available = True
+                        cap.igpu_te_available  = True
         except Exception:
             pass
 
