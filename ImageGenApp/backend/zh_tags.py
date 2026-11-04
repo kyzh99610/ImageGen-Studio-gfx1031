@@ -86,69 +86,106 @@ WORDS = {
     "灯笼": "lantern", "剑": "sword", "枪": "gun",
 }
 
+# whole words that would otherwise start with a one-character word (猫耳 is cat ears, not a cat)
+WORDS.update({"猫耳": "cat ears", "兽耳": "animal ears", "狐耳": "fox ears", "兔耳": "rabbit ears", "猫娘": "cat girl", "狐狸": "fox",
+              "海军服": "naval uniform", "军装": "military uniform", "看书": "reading, book", "花园": "garden", "雨伞": "umbrella",
+              "雪人": "snowman", "云朵": "cloud", "山顶": "mountain top", "湖边": "lakeside", "河边": "riverbank", "桥上": "on bridge"})
+CLOTHES.update({"体恤": "t-shirt"})
+
 _TABLE: dict[str, str] = {}
 for _d in (WORDS, CLOTHES, HAIR, EYES):
     _TABLE.update(_d)
 _KEYS = sorted(set(_TABLE) | set(COLOURS), key=len, reverse=True)
-_SPLIT = re.compile(r"[，,、。；;！!？?\n/]+")
+# small words that carry no picture of their own ("in", "wearing", "of" …)
+_FILLER = "的了和与在着很非常一点有个地得里中上是也又把被正穿戴"
+# Chinese punctuation separates tags; ASCII punctuation (weights, emoticons such as ;) or !?) is left as it is
+_PUNCT = str.maketrans({"，": ",", "、": ",", "。": ",", "；": ",", "！": ",", "？": ",", "\n": ",", "（": ",", "）": ",", "：": ","})
+
+
+def _key_at(piece: str, i: int) -> str | None:
+    return next((k for k in _KEYS if piece.startswith(k, i)), None)
 
 
 def _segment(piece: str) -> tuple[list[str], list[str]]:
     """Greedy longest match of one Chinese piece over the table: (tags, words not understood)."""
     tags, unknown, i, junk = [], [], 0, ""
+
+    def flush():
+        nonlocal junk
+        if junk:
+            unknown.append(junk)
+            junk = ""
     while i < len(piece):
-        hit = next((k for k in _KEYS if piece.startswith(k, i)), None)
+        hit = _key_at(piece, i)
+        # a one-character word counts only when it stands alone (the end, a small word or another known word follows): 猫耳 is not 'cat'
+        if hit and len(hit) == 1 and i + 1 < len(piece) and piece[i + 1] not in _FILLER and _key_at(piece, i + 1) is None:
+            hit = None
         if hit is None:
             ch = piece[i]
-            if ch.strip() and ch not in "的了和与在着很非常一点有个地得里中上是也又把被正":
+            if ch.strip() and ch not in _FILLER:
                 junk += ch
-            elif junk:
-                unknown.append(junk); junk = ""
+            else:
+                flush()
             i += 1
             continue
-        if junk:
-            unknown.append(junk); junk = ""
+        flush()
         i += len(hit)
         if hit in COLOURS:
-            nxt = next((k for k in _KEYS if piece.startswith(k, i) and k in CLOTHES), None)
-            hair_eye = next((k for k in ("头发", "发", "眼睛", "眼", "瞳") if piece.startswith(k, i)), None)
-            if nxt:
-                tags.append(f"{COLOURS[hit]} {CLOTHES[nxt]}")
-                i += len(nxt)
-            elif hair_eye:
-                tags.append(f"{COLOURS[hit]} {'hair' if '发' in hair_eye else 'eyes'}")
-                i += len(hair_eye)
+            colour, j = COLOURS[hit], i
+            while j < len(piece) and piece[j] == "的":            # 红色的裙子
+                j += 1
+            cloth = next((k for k in _KEYS if piece.startswith(k, j) and k in CLOTHES), None)
+            hair = next((k for k in _KEYS if piece.startswith(k, j) and k in HAIR), None)
+            part = next((k for k in ("头发", "眼睛", "发", "眼", "瞳") if piece.startswith(k, j)), None)
+            if cloth:
+                tags.append(f"{colour} {CLOTHES[cloth]}")
+                i = j + len(cloth)
+            elif hair:                                               # 黑色长发 -> black hair, long hair
+                tags += [f"{colour} hair"] + ([HAIR[hair]] if HAIR[hair] != "hair" else [])
+                i = j + len(hair)
+            elif part:
+                tags.append(f"{colour} {'hair' if '发' in part else 'eyes'}")
+                i = j + len(part)
             else:
-                tags.append(COLOURS[hit])
+                tags.append(colour)
             continue
         tags.append(_TABLE[hit])
-    if junk:
-        unknown.append(junk)
+        if hit.endswith("眼") and piece.startswith("睛", i):          # 蓝眼睛
+            i += 1
+    flush()
     return tags, unknown
 
 
 def to_tags(text: str) -> tuple[str, list[str]]:
-    """'海边，回头看，微笑, cowboy shot' -> ('beach, looking back, smile, cowboy shot', []); Chinese words not in the table come back in the list."""
+    """'海边，回头看，微笑, cowboy shot' -> ('beach, looking back, smile, cowboy shot', []); Chinese words not in the table come back in the list.
+    Tags without Chinese pass through unchanged (weights, wildcards like __set/name__, {a|b} groups, emoticons)."""
+    from backend.prompt_tools import split_tags
+    text = re.sub(r"[Tt]恤", "体恤", text or "").translate(_PUNCT)
     out, unknown = [], []
-    for piece in _SPLIT.split(text or ""):
-        piece = piece.strip()
-        if not piece:
-            continue
-        if not _CJK.search(piece):
-            out.append(piece)
-            continue
-        # mixed text: the English runs stay, the Chinese runs are looked up
-        for run in re.findall(r"[一-鿿]+|[^一-鿿]+", piece):
-            if _CJK.search(run):
-                t, u = _segment(run)
-                out += t
-                unknown += u
-            elif run.strip(" ,"):
-                out.append(run.strip(" ,"))
+
+    def words(run: str) -> list[str]:
+        t, u = _segment(run)
+        unknown.extend(u)
+        return [x.strip() for tag in t for x in tag.split(",") if x.strip()]
+    for tag in split_tags(text):
+        if not _CJK.search(tag):
+            out.append(tag)
+        elif any(c in tag for c in "{}()[]|<>") or "__" in tag:
+            # a group or a weight: translate the Chinese inside and keep the structure ({微笑|大笑} -> {smile|laughing, open mouth})
+            new = re.sub(r"[一-鿿]+", lambda m: ", ".join(words(m.group(0))), tag)
+            new = re.sub(r"([{(\[|])\s*,\s*", r"\1", new)
+            new = re.sub(r"\s*,\s*([})\]|:])", r"\1", new).strip(" ,")
+            if new:
+                out.append(new)
+        else:
+            for run in re.findall(r"[一-鿿]+|[^一-鿿]+", tag):          # mixed text: the English runs stay, the Chinese runs are looked up
+                if _CJK.search(run):
+                    out += words(run)
+                elif run.strip(" ,"):
+                    out.append(run.strip(" ,"))
     seen, tags = set(), []
-    for t in ", ".join(out).split(","):
-        t = t.strip()
-        if t and t.lower() not in seen:
+    for t in out:
+        if t.lower() not in seen:
             seen.add(t.lower())
             tags.append(t)
     return ", ".join(tags), unknown

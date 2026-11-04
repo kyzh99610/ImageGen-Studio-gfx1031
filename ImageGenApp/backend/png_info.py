@@ -214,9 +214,9 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
         result["composition_control"] = {"model": m.group(1).strip(), "strength": float(m.group(2))}
     if re.search(r"\bMax detail: 2× Real-ESRGAN\b", param_text):
         result["max_detail"] = {"scale": 2, "method": "Real-ESRGAN (ONNX)"}
-    m = re.search(r"\bPolish: ([^,]+?) \(auto\)", param_text)                       # round 50: only Auto names the recipe that ran
+    m = re.search(r"\bPolish: ([^,]+?) \(auto( — best)?\)", param_text)                 # round 50: only Auto names the recipe that ran (2026-11-03: "— best" = Auto — best)
     if m:
-        result["polish"] = {"recipe": m.group(1).strip(), "auto": True}
+        result["polish"] = {"recipe": m.group(1).strip(), "auto": True, **({"best": True} if m.group(2) else {})}
 
     # ImageGen Studio's own record: exact model / VAE / LoRA files and weights
     rec = _parse_json(info.get("imagegen")) if "imagegen" in info else None

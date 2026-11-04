@@ -115,7 +115,7 @@ def toggle_button_html() -> str:
 
 
 _JS = r"""
-  const IG_ZH = __TABLE__;
+  const IG_ZH = Object.assign(Object.create(null), __TABLE__);     // no prototype: a text 'toString' / 'valueOf' is not a key
   const IG_PAT = __PATTERNS__.map((p) => [new RegExp(p[0]), p[1]]);    // messages with values in them (backend/ui_messages.TEMPLATES)
   const IG_KEY = __KEY__;
   const igLang = () => (localStorage.getItem(IG_KEY) === 'en' ? 'en' : 'zh');
@@ -135,7 +135,7 @@ _JS = r"""
         if (!z) for (const [r, s] of IG_PAT) { if (r.test(n)) { z = n.replace(r, s); break; } }
       }
       if (!z) return;
-      const s = cur.replace(t, z);
+      const s = cur.replace(t, () => z);                 // a function: a '$' in the Chinese stays literal
       igOrig.set(node, cur); igShown.set(node, s); node.data = s;
     } else if (igShown.get(node) === cur && igOrig.has(node)) {
       const o = igOrig.get(node); igShown.delete(node); node.data = o;

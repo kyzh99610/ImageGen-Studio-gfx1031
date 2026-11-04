@@ -194,7 +194,7 @@ def check_plan(ns, plan: dict, now=None) -> str:
         n = q["count"]
         round_s += n * secs
         pics += n
-        pol = s["polish"] if s["polish"] != "Auto" else "Auto → " + ", ".join(k for k, _ in s["picks"].most_common(2))
+        pol = s["polish"] if s["polish"] not in ("Auto", "Auto — best") else f"{s['polish']} → " + ", ".join(k for k, _ in s["picks"].most_common(2))
         rows.append(f"<tr><td>{e(name)}</td><td>{n}</td><td>{e(pol)}</td>"
                     f"<td>{SI.fmt_secs(secs)}{'' if meas.get(name) else ' ~'}</td><td>{e(s['checkpoint'])}</td></tr>")
     now = now or _dt.datetime.now()

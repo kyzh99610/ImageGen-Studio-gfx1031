@@ -110,11 +110,30 @@ def recipe_choice(framing: str, detail: str) -> str:
 
 
 def recipe_extra(framing: str, detail: str) -> dict:
-    """The detail-pass settings the plan sets (Auto sets its own per picture inside Generate)."""
+    """The detail-pass settings the plan sets (Auto sets its own per picture inside Generate). The 2× stage (md_on) is switched off
+    unless the recipe itself sets it: the Polish recipes leave md_on alone, so a saved setting's Max detail would otherwise ride along."""
     if detail == "fast":
         return dict(FAST)
     ch = recipe_choice(framing, detail)
-    return {} if PO.is_auto(ch) else PO.recipe(ch)
+    return dict(md_on=False) if PO.is_auto(ch) else dict(dict(md_on=False), **PO.recipe(ch))
+
+
+# what the wildcard parser resolves as __name__ (backend/wildcards._WILD): a letter or digit first, no dots
+_WILDCARD_NAME = re.compile(r"[A-Za-z0-9][\w\-/ ]*")
+
+
+def usable_wildcard(name: str) -> bool:
+    return bool(_WILDCARD_NAME.fullmatch(str(name or "")))
+
+
+def _top_level_pipes(text: str) -> str:
+    """An outfit's own '|' outside braces would split the random-outfit group: make it a comma ({red|blue} dress stays a group)."""
+    out, depth = [], 0
+    for ch in text:
+        depth += ch == "{"
+        depth -= ch == "}" and depth > 0
+        out.append(", " if ch == "|" and depth == 0 else ch)
+    return "".join(out)
 
 
 def picks(prompt: str, choice: str, draws: int = 20) -> dict:
@@ -242,9 +261,11 @@ def plan(choices: dict, env) -> dict:
                 _note(notes, "Not installed, left out: LoRA " + ", ".join(missing) + ".", "没有安装，已略过：LoRA " + "、".join(missing) + "。")
             outfits = card.get("outfits") or {}
             outfit = c["outfit"]
-            if outfit == RANDOM_OUTFIT and outfits:
-                # one outfit per picture: a wildcard group, picked from each picture's seed like any {a|b}
-                group = "{" + "|".join(v.replace("|", " ") for v in outfits.values() if v.strip()) + "}"
+            vals = [v.strip() for v in outfits.values() if v.strip()]
+            if outfit == RANDOM_OUTFIT and vals:
+                # one outfit per picture: a wildcard group, picked from each picture's seed like any {a|b}; a single outfit goes in as it is
+                # (a one-option {x} is not a wildcard: its braces would reach the model)
+                group = vals[0] if len(vals) == 1 else "{" + "|".join(_top_level_pipes(v) for v in vals) + "}"
                 a["prompt"] = _join(env.card_prompt(card, None, ""), group, what)
             else:
                 a["prompt"] = env.card_prompt(card, outfit if outfit in outfits else None, what)
@@ -279,9 +300,12 @@ def plan(choices: dict, env) -> dict:
         a["prompt"] = _join("1girl, solo" if what and not re.search(r"\b(\d\+?(girl|boy)s?|solo|no humans|multiple)\b", what) else "", what)
 
     if c["variety"] != NO_WILDCARD:
-        name = re.sub(r"[^\w\-/ .]", "", c["variety"]).strip()
-        if name:
+        name = c["variety"].strip()
+        if usable_wildcard(name):
             a["prompt"] = _join(a["prompt"], f"__{name}__")
+        else:
+            _note(notes, f"The wildcard file '{name}' can't be used: a name must start with a letter or digit and hold no dots. It was left out.",
+                  f"通配符文件“{name}”用不了：名字要以字母或数字开头，不能有点号。已略过。")
 
     # framing: a chosen framing replaces the prompt's own framing tags and runs its recipe
     if c["framing"] != "auto":
@@ -375,7 +399,7 @@ def read_times(path) -> dict:
     for k, v in _raw_times(path).items():
         xs = sorted(float(x) for x in (v if isinstance(v, list) else [v]) if isinstance(x, (int, float)))
         if xs:
-            out[k] = xs[len(xs) // 2]
+            out[k] = xs[(len(xs) - 1) // 2]           # the lower middle: with [warm, cold] the warm run
     return out
 
 

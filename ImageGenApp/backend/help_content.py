@@ -79,10 +79,9 @@ def _is_cn_cell(c: str) -> bool:
 def _table(headers: list[str], rows: list[list[str]]) -> str:
     n = len(headers)
     zh_cols = {i for i in range(n) if all(_is_cn_cell(r[i]) for r in rows if i < len(r)) and (_CN_SPAN.search(headers[i]) or "中文" in headers[i])}
-    plain_en = lambda j: j < n and j not in zh_cols and not any(_HAS_CJK.search(str(r[j])) for r in rows if j < len(r))
-    # the English explanation paired with a Chinese column: the column before it (never the first, the row's name), else the one after it
-    en_cols = {(i - 1) if i - 1 > 0 and i - 1 not in zh_cols else (i + 1) for i in zh_cols
-               if (i - 1 > 0 and i - 1 not in zh_cols) or plain_en(i + 1)}
+    # the English explanation that the Chinese column translates is the column right before it (never the first, the row's name);
+    # a Chinese column right after the name (the glossary's 中文 = the term's Chinese name) leaves the English explanation shown in both
+    en_cols = {i - 1 for i in zh_cols if i - 1 > 0 and i - 1 not in zh_cols}
     cls = lambda i: ' class="ig-zh"' if i in zh_cols else (' class="ig-en"' if i in en_cols else "")
     ths = "".join(f"<th{cls(i)}>{_split_slash(h)}</th>" for i, h in enumerate(headers))
     trs = ""

@@ -8993,8 +8993,12 @@ def _():
         slots = _re.findall(r"\{(\d*)\}", zh)
         assert len(slots) == en.count("{}") or all(s.isdigit() for s in slots), (en, zh)      # every value lands somewhere
         assert I.has_zh(zh), en
-    for rx, _rep in M.patterns():
-        _re.compile(rx.replace("\\/", "/"))
+    pats = M.patterns()
+    for i, (en, _zh) in enumerate(M.TEMPLATES):                                 # no template is shadowed by an earlier, broader one (the first match wins)
+        sample = M._norm(en.replace("{}", "X1"))
+        first = next(j for j, (rx, _rep) in enumerate(pats) if _re.match(rx.replace("\\/", "/"), sample))
+        assert first == i, (en, M.TEMPLATES[first][0])
+    assert M.translate("Page 2 / 5  (40 results total)") == "第 2 / 5 页（共 40 个结果）" and M.translate("Click to Upload") == "点击上传"
     for en, zh in M.EXACT.items():                                              # Chinese, or only the entry's own technical words ("CFG（Pony / IL）")
         assert I.has_zh(zh) or set(_re.findall(r"[A-Za-z]+", zh)) <= set(_re.findall(r"[A-Za-z]+", en)), en
     # the Help: a table's Chinese column is hidden in English, the English explanation column in Chinese; headings and notes split
@@ -9002,6 +9006,19 @@ def _():
     assert '<th class="ig-zh">' in h and '<th class="ig-en">' in h and '<span class="ig-zh">生成参数</span>' in h
     s = H.start_here_html()
     assert "新手指南" in s and "Start here" in s and "🪄 Quick picture" in s
+    g = H.glossary_html()                                                      # 中文 there is the term's name, not a translation of the definition:
+    assert '<td class="ig-zh">' in g and '<td class="ig-en">' not in g and '<th class="ig-en">' not in g                     # the English definition stays visible in Chinese mode
+    assert "Object.create(null)" in cfg["js"]                                  # a text 'toString' / 'valueOf' is no key of the page's dictionary
+    # the page script and every event script must parse (a stray brace once made the Quick picture button do nothing): node --check when Node is here
+    import shutil as _sh, subprocess as _sp, tempfile as _tfn
+    node = _sh.which("node")
+    if node:
+        scripts = [cfg["js"]] + [d["js"] for d in cfg["dependencies"] if isinstance(d.get("js"), str) and d["js"].strip()]
+        for k, js in enumerate(scripts):
+            f = _tfn.mkdtemp() + f"/s{k}.js"
+            open(f, "w", encoding="utf-8").write("(" + js + ");\n")
+            r = _sp.run([node, "--check", f], capture_output=True, text=True)
+            assert r.returncode == 0, (js[:120], r.stderr[-400:])
     acc = [c["props"].get("label") for c in comps if c["type"] == "accordion"]
     assert "🪄 Start here" in acc and tab["🪄 Start here"] == "🪄 新手指南"
 
@@ -9065,8 +9082,43 @@ def _():
     assert plan(source="setting", setting="everyday/walk", model="missing.safetensors")["errors"]
     c = SM.clean_choices({"source": "x", "count": 99, "seed": "junk", "framing": "?", "detail": None})
     assert (c["source"], c["count"], c["seed"], c["framing"], c["detail"]) == ("setting", 8, -1, "auto", "follow")
-    # the words table, Auto — best, and its record / restore
+    # a saved setting's 2× stage (Max detail) does not ride along under another recipe; Best on a wide shot sets it itself
+    settings["everyday/md"] = dict(settings["everyday/walk"], extra=dict(settings["everyday/walk"]["extra"], md_on=True, polish="Full body — max detail"))
+    assert plan(source="setting", setting="everyday/md")["args"]["md_on"] is True                    # As saved: as saved
+    assert plan(source="setting", setting="everyday/md", framing="portrait", detail="standard")["args"]["md_on"] is False
+    assert plan(source="setting", setting="everyday/md", detail="standard")["args"]["md_on"] is False   # Auto
+    assert plan(source="setting", setting="everyday/md", detail="fast")["args"]["md_on"] is False
+    assert plan(source="setting", setting="everyday/md", framing="wide", detail="best")["args"]["md_on"] is True
+    # the random outfit: one outfit goes in as it is (a one-option {x} is not a wildcard), an outfit's own {a|b} stays a group
+    one = dict(card, outfits={"coat": "black coat, scarf"})
+    env.load_card = lambda n: dict(one)
+    a = plan(source="card", card="Her", outfit=SM.RANDOM_OUTFIT)["args"]
+    assert "black coat, scarf" in a["prompt"] and "{" not in a["prompt"]
+    env.load_card = lambda n: dict(card, outfits={"a": "{red|blue} dress", "b": "coat | scarf"})
+    a = plan(source="card", card="Her", outfit=SM.RANDOM_OUTFIT)["args"]
+    assert "{{red|blue} dress|coat ,  scarf}" in a["prompt"], a["prompt"]
+    from backend import wildcards as WC2
+    assert WC2.resolve(a["prompt"], 3) and "{" not in WC2.resolve(a["prompt"], 3)            # it resolves fully
+    env.load_card = lambda n: dict(card) if n == "Her" else None
+    # a wildcard file whose name the parser can't resolve is left out with a note
+    p_bad = plan(source="setting", setting="everyday/walk", variety="dk.v2")
+    assert "__dk.v2__" not in p_bad["args"]["prompt"] and any("dk.v2" in en for en, _ in p_bad["notes"])
+    assert "__set/name__" in plan(source="setting", setting="everyday/walk", variety="set/name")["args"]["prompt"]
+    assert SM.usable_wildcard("dk_fork_neg") and not SM.usable_wildcard("_x") and not SM.usable_wildcard("服装")
+    # the measured time: the lower middle (two runs [cold, warm] show the warm one)
+    import tempfile as _tf2
+    from pathlib import Path as _P2
+    tf = _P2(_tf2.mkdtemp()) / "t.json"
+    info = {"model": "m", "size": (1, 1), "choice": "Auto", "detail": "follow"}
+    SM.record_time(tf, info, 60.0); SM.record_time(tf, info, 20.0)
+    assert SM.read_times(tf)[SM.time_key(info)] == 20.0
+    # the words table
     assert ZT.to_tags("红色连衣裙 坐在窗边看书") == ("red dress, sitting, by window, reading, book", [])
+    for zh_in, tags_out in (("红色的裙子", "red skirt"), ("黑色长发", "black hair, long hair"), ("红色双马尾", "red hair, twintails"),
+                            ("蓝眼睛", "blue eyes"), ("猫耳", "cat ears"), ("海军服", "naval uniform"), ("白色T恤", "white t-shirt"),
+                            ("穿着红色连衣裙", "red dress"), ("__dk/outfit__, ;)", "__dk/outfit__, ;)"), ("（微笑）", "smile"),
+                            ("{微笑|大笑}", "{smile|laughing, open mouth}"), ("(微笑:1.2)", "(smile:1.2)")):
+        assert ZT.to_tags(zh_in) == (tags_out, []), (zh_in, ZT.to_tags(zh_in))
     assert PO.AUTO_BEST in PO.CHOICES and PO.auto_pick(PO.AUTO_BEST, "1girl, full body") == "Full body — max detail"
     assert PO.auto_pick("Auto", "1girl, full body") == "Full body" and PO.auto_pick(PO.AUTO_BEST, "1girl, upper body") == "Portrait — hires"
     import app as _app
@@ -9075,6 +9127,21 @@ def _():
     assert _app._plan_extra_updates(dict(plan0, polish={"recipe": "Full body", "auto": True}))[-1] == "Auto"
     ex, name = _app._apply_polish_auto(_app._clean_extra({"polish": PO.AUTO_BEST}), "1girl, wide shot")
     assert name == "Wide shot — max detail" and ex["md_on"] and ex["polish"] == PO.AUTO_BEST
+    # the A1111 text names Auto — best, and PNG Info reads it back (a picture whose record is gone restores Auto — best too)
+    rec = {"prompt": "x", "steps": 12, "cfg_scale": 6, "seed": 1, "width": 64, "height": 64, "scheduler": "Euler",
+           "polish": {"recipe": "Wide shot — max detail", "auto": True, "best": True}}
+    text = _app._params_text(rec)
+    assert "Polish: Wide shot — max detail (auto — best)" in text
+    import tempfile as _tf3
+    from PIL import Image as _Im3
+    from PIL.PngImagePlugin import PngInfo as _Pi3
+    f3 = _tf3.mkdtemp() + "/p.png"
+    pi = _Pi3(); pi.add_text("parameters", text)
+    _Im3.new("RGB", (8, 8)).save(f3, pnginfo=pi)
+    from backend.png_info import read_image_metadata
+    meta = read_image_metadata(f3)
+    assert meta.get("polish") == {"recipe": "Wide shot — max detail", "auto": True, "best": True}, meta.get("polish")
+    assert _app._plan_extra_updates(_app._restore_plan(meta))[-1] == PO.AUTO_BEST
 
 
 @test("🪄 Quick picture tab: one new GPU endpoint (/do_simple_generate, 15 inputs, the language last) that runs Generate's own function; More like it / Redo in more detail / Open in Generate reuse the last run's choices and the picked seed; the choices and the measured time are remembered")
@@ -9088,6 +9155,8 @@ def _():
     cfg = demo.get_config_file()
     deps = [d for d in cfg["dependencies"] if d.get("api_name") == "do_simple_generate"]
     assert len(deps) == 1 and len(deps[0]["inputs"]) == 15
+    js = deps[0]["js"]
+    assert "a.slice(0, 15)" in js and "b[14]" in js and js.count("{") == js.count("}") and js.count("(") == js.count(")")   # the page must be able to parse it
     by = {inspect.unwrap(f.fn).__name__: f for f in demo.fns if f.fn is not None}
     for n in ("do_simple_generate", "do_simple_more", "do_simple_finer"):
         assert by[n].concurrency_id == "gpu", n                                 # GPU jobs: one at a time with every other Generate
@@ -9121,11 +9190,33 @@ def _():
             assert _j.loads((tmp / US.LAST_FILE_NAME).read_text(encoding="utf-8"))["setting"] == "t/one"
             assert list(SM.read_times(tmp / SM.TIMES_FILE_NAME).values())                    # the measured time per picture is kept
             calls.clear()
-            by["do_simple_more"].fn(state, 1, False)                                     # More like the picked one: its seed, small variations, one call per picture
+            assert state["variations"] == [(-1, 0.0), (-1, 0.0)]                       # plain pictures: no variation
+            _g, _r, st2 = by["do_simple_more"].fn(state, 1, False)                         # More like the picked one: its seed, small variations, one call per picture
             assert len(calls) == 2 and {c["seed"] for c in calls} == {1235} and all(c["var_strength"] == 0.1 and c["batch"] == 1 for c in calls)
+            vs0 = calls[0]["var_seed"]
+            assert st2["seeds"] == [1234, 1234] or st2["seeds"][0] == 1234                  # (the fake's seed list)
+            assert st2["variations"] == [(vs0, 0.1), (vs0 + 1, 0.1)]                        # each picture remembers its variation
             calls.clear()
             by["do_simple_finer"].fn(state, 0, False)                                    # Redo in more detail: one picture, Best
             assert len(calls) == 1 and calls[0]["seed"] == 1234 and calls[0]["batch"] == 1 and calls[0]["polish"] == "Auto — best"
+            assert calls[0]["var_strength"] == 0.0
+            calls.clear()
+            by["do_simple_finer"].fn(st2, 1, False)                                      # the picked picture is a variation: redo THAT picture
+            assert len(calls) == 1 and (calls[0]["var_seed"], calls[0]["var_strength"]) == (vs0 + 1, 0.1)
+            adv2 = by["on_to_advanced"].fn(st2, 1)
+            names = [n for n in inspect.signature(real).parameters if n != "progress"]
+            assert adv2[names.index("var_seed")] == vs0 + 1 and adv2[names.index("var_strength")] == 0.1
+            # a Stop before any picture is finished says so (not "no picture was made")
+            def stopped(**kw):
+                _app._generation_abort.set()
+                return [], '<p>⏹ Generation stopped.</p>', [], "", [], ""
+            _app._GEN_HELPERS["generate_ui"] = functools.wraps(real)(stopped)
+            try:
+                res_stop = fn("setting", "t/one", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "", SM.NO_WILDCARD, "auto", "fast", "follow", "follow", 1, -1, False, "zh")[1]
+            finally:
+                _app._generation_abort.clear()
+                _app._GEN_HELPERS["generate_ui"] = fake
+            assert "已停止" in res_stop and "Stopped before a picture was finished" in res_stop
             refused = fn("setting", "", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "", SM.NO_WILDCARD, "auto", "fast", "follow", "follow", 1, -1, False, "zh")
             assert "请先选一个已保存的设置" in refused[1]                                  # nothing runs without a setting
             adv = by["on_to_advanced"].fn(state, 1)

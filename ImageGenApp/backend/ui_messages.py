@@ -130,8 +130,6 @@ TEMPLATES: list[tuple[str, str]] = [
     ("Seed: {} | Steps: {} | CFG: {} | Scheduler: {} | Size: {} | Time: {}s | Device: {}", "种子：{} | 步数：{} | CFG：{} | 采样器：{} | 尺寸：{} | 用时：{} 秒 | 设备：{}"),
     ("Seeds: {} | Steps: {} | CFG: {} | Scheduler: {} | Size: {} | Time: {}s | Device: {}", "种子：{} | 步数：{} | CFG：{} | 采样器：{} | 尺寸：{} | 用时：{} 秒 | 设备：{}"),
     ("img2img | Strength: {} | Seed: {} | Steps: {} | CFG: {} | Time: {}s", "图生图 | 幅度：{} | 种子：{} | 步数：{} | CFG：{} | 用时：{} 秒"),
-    ("Saved: {}", "已保存：{}"),
-    ("✅ Loaded: {} ({}, {})", "✅ 已加载：{}（{}，{}）"),
     ("Could not open folder: {}", "打不开文件夹：{}"),
     ("SmartSplit does not apply: {} — switch SmartSplit off in Settings to use them.", "多设备分流不适用于：{} — 要用它们，请在设置里关掉多设备分流。"),
     ("SmartSplit | Seed:{} | Steps:{} | {}×{}", "多设备分流 | 种子：{} | 步数：{} | {}×{}"),
@@ -321,6 +319,13 @@ EXACT.update({
     "⏹ Stop Loop": "⏹ 停止循环", "⏹ Stop after this picture": "⏹ 这张画完后停止", "📄 Open in PNG Info": "📄 在图片信息中打开",
 })
 
+# Gradio's own words in its upload boxes and editors (it would translate them only for a Chinese browser locale)
+EXACT.update({
+    "Drop Image Here": "把图片拖到这里", "- or -": "- 或 -", "Click to Upload": "点击上传", "Drop File Here": "把文件拖到这里",
+    "Drop Video Here": "把视频拖到这里", "Drop Audio Here": "把音频拖到这里", "Upload": "上传", "Clear": "清除", "Undo": "撤销", "Redo": "重做",
+    "Brush": "画笔", "Eraser": "橡皮擦", "Layers": "图层", "Crop": "裁剪", "Download": "下载", "Share": "分享", "Copy": "复制", "Copied!": "已复制",
+})
+
 TEMPLATES += [
     ("API error: {}", "API 出错：{}"), ("Could not open the folder: {}", "打不开文件夹：{}"), ("Page {} / {} ({} results total)", "第 {} / {} 页（共 {} 个结果）"),
     ("Saved: outputs/{}", "已保存：outputs/{}"), ("page {} of {} · {} image(s)", "第 {} / {} 页 · {} 张"),
@@ -361,6 +366,8 @@ TEMPLATES += [
     (", ~{} pictures. ‘~’ = a rough estimate with the heat pause (no loop run has timed that setting yet); settings that keep failing get parked and starred ones get more, so later rounds differ.",
      "，约 {} 张图。“~” = 包含过热暂停的粗略估计（还没有循环给这个设置计过时）；一直失败的设置会被搁置，加星的会多画，所以后面的轮次会不一样。"),
 ]
+# generic templates last: the first template that matches wins, so a broad one must not shadow a specific one
+TEMPLATES += [("Page {}", "第 {} 页"), ("Saved: {}", "已保存：{}"), ("✅ Loaded: {} ({}, {})", "✅ 已加载：{}（{}，{}）")]
 
 
 def _norm(s: str) -> str:

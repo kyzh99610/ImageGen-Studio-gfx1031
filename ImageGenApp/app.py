@@ -7042,7 +7042,7 @@ def _params_text(rec: dict) -> str:
     if isinstance(rec.get("max_detail"), dict):
         parts.append("Max detail: 2× Real-ESRGAN")
     if isinstance(rec.get("polish"), dict) and rec["polish"].get("auto") and rec["polish"].get("recipe"):
-        parts.append(f"Polish: {rec['polish']['recipe']} (auto)")
+        parts.append(f"Polish: {rec['polish']['recipe']} (auto{' — best' if rec['polish'].get('best') else ''})")
     if isinstance(rec.get("colour"), dict) and rec["colour"].get("strength") is not None:
         parts.append(f"Colour strength: {_num(rec['colour']['strength'], 1.0):g}")
     if isinstance(rec.get("composition_control"), dict) and rec["composition_control"].get("model"):

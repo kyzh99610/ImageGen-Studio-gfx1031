@@ -180,12 +180,13 @@ def result_html(n: int, secs: float, check: str, bad: list[int], details: str) -
     out += check
     if bad:
         nums = "、".join(str(k) for k in bad)
-        out += _p(f"Next: click a picture that looks off and press ⬆ Redo it in more detail, or 🔀 More like it for small changes. "
-                  f"For a broken hand, 🔧 Open in Generate → 🖌 Inpaint → 🖐 Re-draw hand.",
+        out += _p(f"Next: click a picture that looks off (picture {nums.replace('、', ', ')}) and press ⬆ Redo the picked one in more detail, "
+                  f"or 🔀 More like the picked one for small changes. For a broken hand, 🔧 Open in Generate → 🖌 Inpaint → 🖐 Re-draw hand.",
                   f"下一步：点一下有问题的图（第 {nums} 张），再按「⬆ 更精细地重画这张」，或者按「🔀 再来几张类似的」做小改动。"
                   f"手画坏了：按「🔧 在高级页打开」→ 局部重绘 → 🖐 重画手。", WARN)
     else:
-        out += _p("Next: click the picture you like best, then 🔀 More like it, ⬆ Redo it in more detail, or ⭐ to keep it in History's favourites.",
+        out += _p("Next: click the picture you like best, then 🔀 More like the picked one, ⬆ Redo the picked one in more detail, "
+                  "or ⭐ to keep it in History's favourites.",
                   "下一步：点你最喜欢的那张，再按「🔀 再来几张类似的」「⬆ 更精细地重画这张」，或者按 ⭐ 收藏到历史记录里。")
     if details:
         out += (f'<details style="margin-top:6px;"><summary style="cursor:pointer;color:{MUTED};font-size:13px;">'
@@ -202,7 +203,7 @@ def build_tab(ns) -> dict:
     settings = ns._list_saved_settings()
     cards = list_cards()
     ckpts = [n for n, _ in list_checkpoints()]
-    wcs = list_wildcards()
+    wcs = [w for w in list_wildcards() if SM.usable_wildcard(w)]
     get = lambda k, ok, d: last.get(k) if last.get(k) in ok else d
     src0 = get("source", SM._values(SM.SOURCES), "setting" if settings else ("card" if cards else "prompt"))
     card0 = get("card", cards, cards[0] if cards else "")
@@ -287,6 +288,16 @@ def _outfits(card_name) -> list[str]:
     return [SM.RANDOM_OUTFIT, SM.NO_OUTFIT] + list((c or {}).get("outfits") or {})
 
 
+def _variation(state: dict, i: int) -> tuple[int, float]:
+    """(variation seed, strength) of picture i of the last run; (-1, 0.0) when it is not a variation (or an older state)."""
+    v = (state or {}).get("variations") or []
+    try:
+        vs, st = v[i]
+        return int(vs), float(st)
+    except (IndexError, TypeError, ValueError):
+        return -1, 0.0
+
+
 def _gen_kwargs(ns, args: dict) -> dict:
     """The plan's arguments as do_generate_ui takes them: the extra settings made safe, unknown keys dropped."""
     fn = ns._GEN_HELPERS["generate_ui"]
@@ -308,24 +319,31 @@ def run_plan(ns, p: dict, check: bool, progress, calls: list[dict] | None = None
     calls = calls or [{}]
     ns._SAVE_LOG = []
     t0 = time.time()
-    imgs, seeds, details, status = [], [], [], ""
+    imgs, seeds, variations, details, status = [], [], [], [], ""
     try:
         for ov in calls:
-            out = ns._GEN_HELPERS["generate_ui"](**dict(kw, **ov), progress=progress)
+            call = dict(kw, **ov)
+            out = ns._GEN_HELPERS["generate_ui"](**call, progress=progress)
             got, info, _last, status, sd_seeds, _loras = out
             details.append(info if isinstance(info, str) else "")
             if not got:
                 break
             imgs += list(got)
             seeds += list(sd_seeds) if isinstance(sd_seeds, (list, tuple)) else []
+            vs, st = int(call.get("var_seed", -1)), float(call.get("var_strength", 0) or 0)
+            # a batch of one call draws var_seed, var_seed + 1, … (sd_pipeline.variation_latents); no variation: (-1, 0)
+            variations += [((vs + k) % 2**32 if vs >= 0 and st > 0 else -1, st if vs >= 0 else 0.0) for k in range(len(got))]
             if ns._generation_abort.is_set():
                 break
         files = [str(f) for f in (ns._SAVE_LOG or [])]
     finally:
         ns._SAVE_LOG = None
     secs = time.time() - t0
-    state = dict(choices=p["choices"], seeds=seeds, files=files, info={k: v for k, v in p["info"].items() if k != "picks"})
+    state = dict(choices=p["choices"], seeds=seeds, variations=variations, files=files,
+                 info={k: v for k, v in p["info"].items() if k != "picks"})
     if not imgs:
+        if ns._generation_abort.is_set():
+            return [], _p("⏹ Stopped before a picture was finished: nothing new was saved.", "⏹ 已停止：这次还没有画完的图，没有保存新图片。", WARN), state
         msg = "".join(details) or (status if isinstance(status, str) else "")
         return [], (_p("No picture was made. What Generate said:", "没有出图。生成页的提示：", ERR) + msg), state
     if not ns._generation_abort.is_set() and len(imgs) == sum(int(dict(kw, **ov).get("batch", 1)) for ov in calls):
@@ -363,7 +381,8 @@ def wire(ns, ui: dict, main_tabs) -> None:
 
     def do_simple_generate(source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, count, seed, check, lang,
                            progress=gr.Progress()):
-        """🪄 Quick picture: the plan from the plain choices, run through Generate. lang = 'zh' / 'en' (the page passes the chosen one)."""
+        """🪄 Quick picture: the plan from the plain choices, run through Generate. lang = 'zh' / 'en', the page's language (its js= sets it);
+        the HTML answer carries both languages either way, so an HTTP client may pass either."""
         vals = (source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, count, seed)
         p = make_plan(*vals)
         box = plan_html(p, SM.read_times(_times_file(ns)).get(SM.time_key(p["info"])))
@@ -376,16 +395,19 @@ def wire(ns, ui: dict, main_tabs) -> None:
     do_simple_generate._gpu_job = True
 
     def do_simple_follow(kind, state, idx, check, progress=gr.Progress()):
-        """🔀 More like the picked one (same seed, small variations) / ⬆ Redo it in more detail (same seed, Best, one picture)."""
+        """🔀 More like the picked one (same seed, small variations) / ⬆ Redo it in more detail (same seed, Best, one picture).
+        A picked variation is redone as itself; 🔀 on a variation makes new variations of the same base picture (a variation of a variation
+        is not something the pipeline can draw), which look alike at strength 0.1."""
         seeds = (state or {}).get("seeds") or []
         if not seeds:
             return gr.update(), _p("Make some pictures first.", "请先出几张图。", WARN), gr.update()
         i = idx if isinstance(idx, int) and 0 <= idx < len(seeds) else 0
         c = dict(state["choices"], seed=int(seeds[i]))
+        vs, st = _variation(state, i)
         if kind == "finer":
             c.update(count=1, detail="best")
             p = SM.plan(c, _env(ns))
-            calls = [{}]
+            calls = [dict(var_seed=vs, var_strength=st)] if st > 0 else [{}]     # the picked picture itself, variation included
         else:
             p = SM.plan(c, _env(ns))
             base = random.randint(0, 2**32 - 1 - 8)
@@ -416,7 +438,7 @@ def wire(ns, ui: dict, main_tabs) -> None:
         from backend.wildcards import list_wildcards
         s, c = ns._list_saved_settings(), list_cards()
         m = [SM.FOLLOW] + [n for n, _ in list_checkpoints()]
-        w = [SM.NO_WILDCARD] + list_wildcards()
+        w = [SM.NO_WILDCARD] + [x for x in list_wildcards() if SM.usable_wildcard(x)]
         keep = lambda v, xs: v if v in xs else (xs[0] if xs else "")
         return (gr.update(choices=s or [""], value=keep(setting_now, s)), gr.update(choices=c or [""], value=keep(card_now, c)),
                 gr.update(choices=m, value=keep(model_now, m)), gr.update(choices=w, value=keep(variety_now, w)))
@@ -450,6 +472,10 @@ def wire(ns, ui: dict, main_tabs) -> None:
             c["seed"] = int(seeds[idx if isinstance(idx, int) and 0 <= idx < len(seeds) else 0])
         p = SM.plan(c, _env(ns))
         kw = _gen_kwargs(ns, p["args"])
+        if seeds:
+            vs, st = _variation(state, idx if isinstance(idx, int) and 0 <= idx < len(seeds) else 0)
+            if st > 0:
+                kw.update(var_seed=vs, var_strength=st)              # the picked picture is a variation: the Generate tab gets it too
         fn = ns._GEN_HELPERS["generate_ui"]
         names = [n for n in inspect.signature(fn).parameters if n != "progress"]
         vals = []
@@ -466,7 +492,9 @@ def wire(ns, ui: dict, main_tabs) -> None:
     ui["refresh"].click(on_refresh, [ui["setting"], ui["card"], ui["model"], ui["variety"]],
                         [ui["setting"], ui["card"], ui["model"], ui["variety"]], api_name=False)
     run_inputs = inputs + [ui["check"], ui["lang"]]
-    lang_js = ("(...a) => { a[a.length - 1] = (" + LANG_ARG_JS + ")(); return a; }")
+    # Gradio 4.19 hands the js the inputs followed by more values: keep the inputs, set the last one (the language)
+    n_in = len(run_inputs)
+    lang_js = f"(...a) => {{ const b = a.slice(0, {n_in}); b[{n_in - 1}] = (" + LANG_ARG_JS + ")(); return b; }"
     ui["go"].click(do_simple_generate, run_inputs, [ui["gallery"], ui["result"], ui["state"], ui["plan_box"]],
                    api_name="do_simple_generate", js=lang_js)
     ui["new"].click(lambda: -1, None, ui["seed"], api_name=False).then(
