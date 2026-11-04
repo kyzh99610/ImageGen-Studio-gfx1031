@@ -482,7 +482,17 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   `Compel`; no line = A1111's maths, as for A1111 / Forge pictures) and PNG Info reads both back; restore names the mode when the
   prompt has weights. The saved pref is not applied under `IMAGEGEN_TESTS` (the suite runs on the default). A user whose
   `_prefs.json` already says `"a1111"` (the old default, saved by the Settings radio) keeps the old maths until they switch.
-  Not re-measured on this bench: the laptop's numbers are from its RX 6800M under ZLUDA; the GPU A/B on the RX 9070 XT, other
+  **Measured on the RX 9070 XT (native ROCm, 2026-11-04):** an Illustrious checkpoint with two character LoRAs at 0.5, base pictures
+  only, the same seeds through the real app in each mode (116 pictures; each record names its mode). On 12 saved settings × 3 seeds
+  (most weights 1.1–1.2) the two modes draw the same picture with small changes in the details (mean 19.6/255), identity equal (CCIP
+  paired 0.000 ± 0.003), and rated blind 33 of 36 pairs were ties. Three of those settings carry two tags at 1.7: there A1111 left the
+  weighted tokens at ×1.76 on CLIP-L against ×1.57 with Norm-keep, and those tags came out a little weaker with Norm-keep (WD14 0.79 →
+  0.66, lower in 8 of 9 pairs). The laptop's failure did not reproduce: a chunk of five phrases at 1.48–1.56 with one on the cheeks drew
+  no blob in 32 pictures in either mode, and a probe tag rose about as much from 1.0 to 1.5 in both (WD14 +0.17 with A1111, +0.14 with
+  Norm-keep, 8 of 8 seeds each), although the rescale differed as on the laptop (that chunk's weighted tokens ×1.61 on CLIP-L with
+  A1111, ×1.19 with Norm-keep; its tags came out stronger with A1111, WD14 rain 0.87 against 0.76). A first chunk with most tags at
+  1.2–1.4 was not shrunk here (×0.84 plain / ×1.12 weighted with A1111, ×0.85 / ×1.13 with Norm-keep; identity +0.013 with Norm-keep,
+  6 of 6). So the swing is real but drew no defect on this checkpoint; Norm-keep mainly applies very high weights less hard. Other
   checkpoints and the full chain (hires / eyes) are open.
 - **BREAK** between the subject and the scene tags: my hair-band metric said SDXL −19 %, but the second session's
   subject-only metric (U2-Net mask + WD14) found the hair tint unchanged (+0.2) and background chroma −12 % — BREAK
