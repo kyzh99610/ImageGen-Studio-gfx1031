@@ -9109,6 +9109,9 @@ def _():
     p = plan(source="setting", setting="everyday/walk", model="sd15.safetensors")
     assert p["args"]["lora1"] == "none" and any("Left out: LoRA her" in en for en, _ in p["notes"]) and not p["info"]["loras"]
     assert not any("may not fit" in en for en, _ in p["notes"])                # no LoRA left: the vaguer note goes
+    assert any("may not look like the character" in en and "可能不像这个角色" in zh for en, zh in p["notes"])   # her face came from them
+    p = plan(source="card", card="Her", model="sd15.safetensors")
+    assert p["args"]["lora1"] == "none" and any("may not look like the character" in en for en, _ in p["notes"])
     assert plan(source="setting", setting="everyday/walk")["args"]["lora1"] == "/l/her.safetensors"     # the right class keeps it
     del env.lora_arch
     # a Pony checkpoint: Generate skips the eye pass there, so the plan box doesn't promise it
@@ -9134,8 +9137,22 @@ def _():
     # refusals
     assert plan(source="setting", setting="nope/none")["errors"] and plan(source="prompt", what="")["errors"]
     assert plan(source="setting", setting="everyday/walk", model="missing.safetensors")["errors"]
-    c = SM.clean_choices({"source": "x", "count": 99, "seed": "junk", "framing": "?", "detail": None})
-    assert (c["source"], c["count"], c["seed"], c["framing"], c["detail"]) == ("setting", 8, -1, "auto", "follow")
+    c = SM.clean_choices({"source": "x", "count": 99, "seed": "junk", "framing": "?", "detail": None, "look": "<x>"})
+    assert (c["source"], c["count"], c["seed"], c["framing"], c["detail"], c["look"]) == ("setting", 8, -1, "auto", "follow", "follow")
+    # the drawing style: the main pass's sampler / steps / CFG / PAG (as saved, softer lines, painterly), on Illustrious / NoobAI models only
+    look = lambda p: (p["args"]["scheduler"], p["args"]["steps"], p["args"]["cfg"], p["args"]["pag_scale"])
+    assert look(plan(source="setting", setting="everyday/walk")) == ("DPM++ 2M AYS", 12, 6.0, 2.0)                    # as saved
+    p = plan(source="setting", setting="everyday/walk", look="soft")
+    assert look(p) == ("DPM++ 2M Karras", 28, 5.0, 0.0) and p["info"]["look"] == "soft" and p["info"]["sampler"] == ("DPM++ 2M Karras", 28, 5.0, 0.0)
+    assert p["args"]["hires_on"] is True and p["args"]["cs"] == 0.75 and p["args"]["lora1"] == "/l/her.safetensors"          # nothing else changes
+    assert look(plan(source="card", card="Her", look="painterly")) == ("Euler a", 28, 5.0, 0.0)
+    assert look(plan(source="prompt", what="1girl", look="soft")) == ("DPM++ 2M Karras", 28, 5.0, 0.0)
+    p = plan(source="setting", setting="everyday/walk", model="sd15.safetensors", look="soft")            # not measured there: kept, and said
+    assert look(p) == ("DPM++ 2M AYS", 12, 6.0, 2.0) and p["info"]["look"] == "follow" and any("drawing style" in en for en, _ in p["notes"])
+    assert not any("drawing style" in en for en, _ in plan(source="setting", setting="everyday/walk", model="sd15.safetensors")["notes"])
+    from backend import ui_simple as _US
+    box = _US.plan_html(plan(source="setting", setting="everyday/walk", look="painterly"))
+    assert "手绘感" in box and "Painterly" in box and "Euler a" in box and "不开 PAG" in box and "no PAG" in box
     # a saved setting's 2× stage (Max detail) does not ride along under another recipe; Best on a wide shot sets it itself
     settings["everyday/md"] = dict(settings["everyday/walk"], extra=dict(settings["everyday/walk"]["extra"], md_on=True, polish="Full body — max detail"))
     assert plan(source="setting", setting="everyday/md")["args"]["md_on"] is True                    # As saved: as saved
@@ -9166,6 +9183,7 @@ def _():
     info = {"model": "m", "size": (1, 1), "choice": "Auto", "detail": "follow"}
     SM.record_time(tf, info, 60.0); SM.record_time(tf, info, 20.0)
     assert SM.read_times(tf)[SM.time_key(info)] == 20.0
+    assert SM.time_key(dict(info, look="follow")) == SM.time_key(info) != SM.time_key(dict(info, look="soft"))     # times from before keep their key
     # the words table
     assert ZT.to_tags("红色连衣裙 坐在窗边看书") == ("red dress, sitting, by window, reading, book", [])
     for zh_in, tags_out in (("红色的裙子", "red skirt"), ("黑色长发", "black hair, long hair"), ("红色双马尾", "red hair, twintails"),
@@ -9198,7 +9216,7 @@ def _():
     assert _app._plan_extra_updates(_app._restore_plan(meta))[-1] == PO.AUTO_BEST
 
 
-@test("🪄 Quick picture tab: one new GPU endpoint (/do_simple_generate, 15 inputs, the language last) that runs Generate's own function; More like it / Redo in more detail / Open in Generate reuse the last run's choices and the picked seed; the choices and the measured time are remembered")
+@test("🪄 Quick picture tab: one new GPU endpoint (/do_simple_generate, 16 inputs, the language last) that runs Generate's own function; More like it / Redo in more detail / Open in Generate reuse the last run's choices and the picked seed; the choices and the measured time are remembered")
 def _():
     import functools, inspect, json as _j, tempfile as _tf
     from pathlib import Path as _P
@@ -9208,9 +9226,9 @@ def _():
     demo = _app.build_app()
     cfg = demo.get_config_file()
     deps = [d for d in cfg["dependencies"] if d.get("api_name") == "do_simple_generate"]
-    assert len(deps) == 1 and len(deps[0]["inputs"]) == 15
+    assert len(deps) == 1 and len(deps[0]["inputs"]) == 16
     js = deps[0]["js"]
-    assert "a.slice(0, 15)" in js and "b[14]" in js and js.count("{") == js.count("}") and js.count("(") == js.count(")")   # the page must be able to parse it
+    assert "a.slice(0, 16)" in js and "b[15]" in js and js.count("{") == js.count("}") and js.count("(") == js.count(")")   # the page must be able to parse it
     by = {inspect.unwrap(f.fn).__name__: f for f in demo.fns if f.fn is not None}
     for n in ("do_simple_generate", "do_simple_more", "do_simple_finer"):
         assert by[n].concurrency_id == "gpu", n                                 # GPU jobs: one at a time with every other Generate
@@ -9237,8 +9255,10 @@ def _():
              patch("backend.sd_pipeline._model_family", lambda p: "illustrious"):
             fn = by["do_simple_generate"].fn
             imgs, res, state, box = fn("setting", "t/one", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "海边", SM.NO_WILDCARD, "auto", "fast",
-                                       "follow", "follow", 2, -1, False, "zh")
+                                       "follow", "follow", "soft", 2, -1, False, "zh")
             assert len(imgs) == 2 and len(calls) == 1 and calls[0]["batch"] == 2 and calls[0]["prompt"] == "1girl, autumn, beach"
+            assert (calls[0]["scheduler"], calls[0]["steps"], calls[0]["cfg"], calls[0]["pag_scale"]) == ("DPM++ 2M Karras", 28, 5.0, 0.0)
+            assert _j.loads((tmp / US.LAST_FILE_NAME).read_text(encoding="utf-8"))["look"] == "soft"            # remembered
             assert calls[0]["model_path"] == "/m/wai.safetensors" and calls[0]["ed_on"] and not calls[0]["hires_on"]
             assert "完成" in res and "Done" in res and state["seeds"] == [1234, 1235] and len(state["files"]) == 2
             assert _j.loads((tmp / US.LAST_FILE_NAME).read_text(encoding="utf-8"))["setting"] == "t/one"
@@ -9266,12 +9286,12 @@ def _():
                 return [], '<p>⏹ Generation stopped.</p>', [], "", [], ""
             _app._GEN_HELPERS["generate_ui"] = functools.wraps(real)(stopped)
             try:
-                res_stop = fn("setting", "t/one", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "", SM.NO_WILDCARD, "auto", "fast", "follow", "follow", 1, -1, False, "zh")[1]
+                res_stop = fn("setting", "t/one", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "", SM.NO_WILDCARD, "auto", "fast", "follow", "follow", "follow", 1, -1, False, "zh")[1]
             finally:
                 _app._generation_abort.clear()
                 _app._GEN_HELPERS["generate_ui"] = fake
             assert "已停止" in res_stop and "Stopped before a picture was finished" in res_stop
-            refused = fn("setting", "", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "", SM.NO_WILDCARD, "auto", "fast", "follow", "follow", 1, -1, False, "zh")
+            refused = fn("setting", "", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "", SM.NO_WILDCARD, "auto", "fast", "follow", "follow", "follow", 1, -1, False, "zh")
             assert "请先选一个已保存的设置" in refused[1]                                  # nothing runs without a setting
             adv = by["on_to_advanced"].fn(state, 1)
             assert len(adv) == len(_app._GEN_HELPERS["gen_inputs"]) + 1 and adv[0] == "/m/wai.safetensors" and 1235 in adv

@@ -27,6 +27,7 @@ for _en, _zh in (("Saved setting", "已保存的设置"), ("Character card", "�
                  ("Portrait", "头像"), ("Cowboy shot (thighs up)", "半身（到大腿）"), ("Full body", "全身"), ("Wide shot", "远景"),
                  ("As saved", "按设置"), ("Fast", "快"), ("Standard", "标准"), ("Best (slower)", "精细（更慢）"), ("Tall", "竖图"),
                  ("Square", "方图"), ("Wide", "横图"), ("Vivid", "鲜艳"), ("Natural", "自然"), ("Soft", "柔和"),
+                 ("Softer lines", "线条柔和"), ("Painterly", "手绘感"), ("Drawing style", "画风"),
                  (SM.FOLLOW, "（按设置）"), (SM.RANDOM_OUTFIT, "（随机服装）"), (SM.NO_OUTFIT, "（不加服装）"),
                  # the tab's labels and buttons
                  ("🪄 Quick picture", "🪄 一键出图"), ("Start from", "从哪开始"), ("Saved setting", "已保存的设置"), ("Character card", "角色卡"),
@@ -85,15 +86,15 @@ def _read_last(ns) -> dict:
 
 def _write_last(ns, c: dict) -> None:
     try:
-        keep = {k: c[k] for k in ("source", "setting", "card", "outfit", "model", "variety", "framing", "detail", "shape", "colour", "count")}
+        keep = {k: c[k] for k in ("source", "setting", "card", "outfit", "model", "variety", "framing", "detail", "shape", "colour", "look", "count")}
         (ns.SETTINGS_DIR / LAST_FILE_NAME).write_text(json.dumps(keep, ensure_ascii=False, indent=1), encoding="utf-8")
     except (OSError, KeyError):
         pass
 
 
-def _choices(source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, count, seed):
+def _choices(source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, look, count, seed):
     return dict(source=source, setting=setting, card=card, outfit=outfit, model=model, what=what, variety=variety, framing=framing,
-                detail=detail, shape=shape, colour=colour, count=count, seed=seed)
+                detail=detail, shape=shape, colour=colour, look=look, count=count, seed=seed)
 
 
 # ── the plan box ("what I'll do") ────────────────────────────────────────────────────────────────────────────
@@ -121,6 +122,13 @@ def plan_html(p: dict, measured: float | None = None) -> str:
     col = "" if i["colour"] in (None, 1.0) else f" · colour {i['colour']:g}"
     col_zh = "" if i["colour"] in (None, 1.0) else f" · 色彩 {i['colour']:g}"
     rows.append(L(f"<b>Size</b>: {w}×{h} · {i['count']} picture(s) · {seed_en}{col}", f"<b>尺寸</b>：{w}×{h} · {i['count']} 张 · {seed_zh}{col_zh}"))
+    if i.get("sampler"):
+        sch, st, cfg, pag = i["sampler"]
+        look = i.get("look", "follow")
+        look_en = {v: k for k, v in SM.LOOKS}.get(look, look)
+        pag_en, pag_zh = (f"PAG {float(pag):g}", f"PAG {float(pag):g}") if pag else ("no PAG", "不开 PAG")
+        rows.append(L(f"<b>Drawing</b>: {_e(look_en)} — {_e(sch)} · {st} steps · CFG {float(cfg):g} · {pag_en}",
+                      f"<b>画风</b>：{SM.LOOK_ZH.get(look, look)} — {_e(sch)} · {st} 步 · CFG {float(cfg):g} · {pag_zh}"))
     if measured:
         t_en, t_zh = f"about {measured:.0f} s a picture here last time", f"上次在这台电脑上每张约 {measured:.0f} 秒"
     else:
@@ -246,6 +254,16 @@ def build_tab(ns) -> dict:
                                          "recipe for the framing. Best: hires and 2× detail where that measured better, 3-4× slower.",
                                          "按设置：用设置里自己的步骤（角色卡和只写一句话时等于标准）。快：只修眼睛。标准：这种取景实测过的配方。"
                                          "精细：在实测更好的地方加高清修复和 2 倍细节，慢 3–4 倍。"))
+                # new users start on the softer lines (2026-11-03: the measured 12-step PAG recipe looked stiff to the user); a remembered choice stays
+                look = gr.Radio(SM.LOOKS, value=get("look", SM._values(SM.LOOKS), "soft"), label="Drawing style",
+                                info=T("As saved: the setting's or card's own sampler (the measured 12-step recipe with PAG 2: thick outlines, hard light). "
+                                       "Softer lines: 28 steps, CFG 5, no PAG: thinner outlines and gentler shading, the character as recognisable as before. "
+                                       "Painterly: Euler a, 28 steps: the softest, a little less like the character in the test. "
+                                       "Illustrious / NoobAI models only; other models keep their settings.",
+                                       "按设置：用设置或角色卡自己的采样（实测的 12 步 + PAG 2 配方：描边粗、明暗硬）。"
+                                       "线条柔和：28 步、CFG 5、不开 PAG，描边更细、明暗更柔，角色和原来一样好认。"
+                                       "手绘感：Euler a 28 步，最柔，测试里稍微没那么像角色。"
+                                       "只对 Illustrious / NoobAI 模型生效，其他模型保持原设置。"))
                 with gr.Row():
                     shape = gr.Radio(SM.SHAPES, value=get("shape", SM._values(SM.SHAPES), "follow"), label="Picture shape")
                     colour = gr.Radio(SM.COLOURS, value=get("colour", SM._values(SM.COLOURS), "follow"), label="Colour",
@@ -278,7 +296,7 @@ def build_tab(ns) -> dict:
         state = gr.State({})
         picked = gr.State(0)
     return dict(source=source, setting=setting, card_row=card_row, card=card, outfit=outfit, model=model, what=what, variety=variety,
-                framing=framing, detail=detail, shape=shape, colour=colour, count=count, seed=seed, check=check, lang=lang, go=go,
+                framing=framing, detail=detail, shape=shape, colour=colour, look=look, count=count, seed=seed, check=check, lang=lang, go=go,
                 stop=stop, refresh=refresh, plan_box=plan_box, gallery=gallery, result=result, more=more, finer=finer, new=new, fav=fav,
                 to_adv=to_adv, follow=follow, state=state, picked=picked)
 
@@ -368,7 +386,8 @@ def run_plan(ns, p: dict, check: bool, progress, calls: list[dict] | None = None
 
 def wire(ns, ui: dict, main_tabs) -> None:
     """Connect the tab's events (after the Generate tab is built)."""
-    inputs = [ui[k] for k in ("source", "setting", "card", "outfit", "model", "what", "variety", "framing", "detail", "shape", "colour", "count", "seed")]
+    inputs = [ui[k] for k in ("source", "setting", "card", "outfit", "model", "what", "variety", "framing", "detail", "shape", "colour", "look",
+                              "count", "seed")]
 
     def make_plan(*vals):
         return SM.plan(_choices(*vals), _env(ns))
@@ -380,11 +399,11 @@ def wire(ns, ui: dict, main_tabs) -> None:
         except Exception as e:
             return _p(f"Could not build the plan: {_e(e)}", f"没能生成计划：{_e(e)}", ERR)
 
-    def do_simple_generate(source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, count, seed, check, lang,
+    def do_simple_generate(source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, look, count, seed, check, lang,
                            progress=gr.Progress()):
         """🪄 Quick picture: the plan from the plain choices, run through Generate. lang = 'zh' / 'en', the page's language (its js= sets it);
         the HTML answer carries both languages either way, so an HTTP client may pass either."""
-        vals = (source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, count, seed)
+        vals = (source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, look, count, seed)
         p = make_plan(*vals)
         box = plan_html(p, SM.read_times(_times_file(ns)).get(SM.time_key(p["info"])))
         if p["errors"]:

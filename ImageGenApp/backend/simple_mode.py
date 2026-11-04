@@ -5,7 +5,8 @@ Nothing here invents a recipe. The choices map onto what was measured and shippe
     chosen checkpoint (backend/character_cards), or just a prompt on a checkpoint with ⚡ the measured recipe of its family (backend/recipes);
   * framing + detail -> ✨ Polish (backend/polish): Auto picks per picture from that picture's own prompt; a fixed framing puts its tag in the
     prompt and runs its recipe; Fast = the eye pass only, Best = Auto — best (the slower recipe measured better for each framing);
-  * shape -> the family's usual sizes, colour -> 🎨 colour strength (the user's own card measured best at 0.75-0.8).
+  * shape -> the family's usual sizes, colour -> 🎨 colour strength (the user's own card measured best at 0.75-0.8);
+  * drawing style -> the main pass's sampler / steps / CFG / PAG: as saved, or one of two softer recipes measured on Illustrious (LOOK_RECIPE).
 The plan is a dict of `do_generate_ui`'s arguments, so the picture, its record, ⭐, History and restore work as for any other picture.
 This module only reads: the settings / cards / file lists come in through `env` (a SimpleNamespace), which keeps it testable on the CPU.
 """
@@ -31,6 +32,18 @@ FRAMINGS = [("Auto", "auto"), ("Portrait", "portrait"), ("Cowboy shot (thighs up
 DETAILS = [("As saved", "follow"), ("Fast", "fast"), ("Standard", "standard"), ("Best (slower)", "best")]
 SHAPES = [("As saved", "follow"), ("Tall", "tall"), ("Square", "square"), ("Wide", "wide")]
 COLOURS = [("As saved", "follow"), ("Vivid", "vivid"), ("Natural", "natural"), ("Soft", "soft")]
+# the drawing style: the sampler, steps, CFG and PAG of the main pass (the passes after it follow it, as in Generate). "As saved" = the setting's /
+# card's own, or the family's measured recipe for a plain prompt (Illustrious / NoobAI: DPM++ 2M AYS 12, CFG 6, PAG 2).
+# 2026-11-03, the user: "many pictures look stiff". Measured on an Illustrious checkpoint with a two-LoRA character setup, 3 saved settings × 3 seeds,
+# the same Polish chain (Cowboy shot — hires + eyes), only the main sampler changed: PAG 2 + CFG 6 draw the thick black outlines and the hard light;
+# 24 AYS steps alone changed little. 28 steps of DPM++ 2M Karras at CFG 5 without PAG: thinner outlines, gentler shading, CCIP to the character
+# 0.927 against 0.930 (9 pictures, her own pictures 0.946 ± 0.024), 17 s against ~19 s a picture (PAG runs the model twice a step); Euler a 28 at
+# CFG 5 without PAG: the softest, painterly, 0.915 (3 of 9 under her spread against 1). Only measured on Illustrious / NoobAI models.
+LOOKS = [("As saved", "follow"), ("Softer lines", "soft"), ("Painterly", "painterly")]
+LOOK_RECIPE = {"soft": dict(scheduler="DPM++ 2M Karras", steps=28, cfg=5.0, pag=0.0),
+               "painterly": dict(scheduler="Euler a", steps=28, cfg=5.0, pag=0.0)}
+LOOK_FAMILIES = ("illustrious",)
+LOOK_ZH = {"follow": "按设置", "soft": "线条柔和", "painterly": "手绘感"}
 
 FRAMING_TAG = {"portrait": "upper body", "cowboy": "cowboy shot", "full": "full body", "wide": "wide shot"}
 FRAMING_ZH = {"auto": "自动", "portrait": "头像", "cowboy": "半身（到大腿）", "full": "全身", "wide": "远景"}
@@ -69,7 +82,7 @@ def clean_choices(c: dict) -> dict:
                 model=str(c.get("model") or FOLLOW), what=str(c.get("what") or "")[:2000],
                 variety=str(c.get("variety") or NO_WILDCARD), framing=pick(c.get("framing"), FRAMINGS, "auto"),
                 detail=pick(c.get("detail"), DETAILS, "follow"), shape=pick(c.get("shape"), SHAPES, "follow"),
-                colour=pick(c.get("colour"), COLOURS, "follow"), count=min(8, max(1, count)),
+                colour=pick(c.get("colour"), COLOURS, "follow"), look=pick(c.get("look"), LOOKS, "follow"), count=min(8, max(1, count)),
                 seed=seed if 0 <= seed < 2**32 else -1)
 
 
@@ -347,11 +360,19 @@ def plan(choices: dict, env) -> dict:
                 dropped.append(Path(str(path)).stem)
                 a[f"lora{i}"] = "none"
         if dropped:
-            if all(a[f"lora{i}"] in ("none", "", None) for i in (1, 2, 3)):     # nothing left that 'may not fit': say what happened instead
+            none_left = all(a[f"lora{i}"] in ("none", "", None) for i in (1, 2, 3))
+            if none_left:     # nothing left that 'may not fit': say what happened instead
                 notes[:] = [n for n in notes if "its LoRAs may not fit" not in n[0]]
             kind_en, kind_zh = ("SD 1.5", "SD 1.5") if size_class(fam) == "sdxl" else ("SDXL", "SDXL")
             _note(notes, f"Left out: LoRA {', '.join(dropped)} (made for {kind_en} models; this model can't load it).",
                   f"已略过：LoRA {'、'.join(dropped)}（是给 {kind_zh} 模型用的，这个模型加载不了）。")
+            if none_left and c["source"] in ("setting", "card"):
+                # a character's LoRA is what makes the face (2026-11-03: a saved setting on an SD 1.5 model, its SDXL LoRAs left out: CCIP 0.73
+                # against 0.95 for the character's own pictures)
+                _note(notes, "Without them the picture won't have what those LoRAs draw (a character's face, a style): it may not look like the "
+                             "character. For that look, keep the model 'as saved' or pick one of the same family.",
+                      "没有它们，画出来就不会有这些 LoRA 带来的东西（角色的脸、画风），可能不像这个角色。想要原来的样子，"
+                      "模型请选“按设置”或同一类的模型。")
     if c["shape"] != "follow" or not (a["width"] and a["height"]):
         a["width"], a["height"] = sizes["tall" if c["shape"] == "follow" else c["shape"]]
     elif own_family and fam and size_class(own_family) != size_class(fam):
@@ -364,6 +385,14 @@ def plan(choices: dict, env) -> dict:
               f"保存的尺寸 {w}×{h} 是给另一类模型的：改用 {a['width']}×{a['height']}（形状不变）。")
     if c["colour"] != "follow":
         extra["cs"] = COLOUR_VALUE[c["colour"]]
+    look = c["look"] if c["look"] in LOOK_RECIPE and fam in LOOK_FAMILIES else "follow"
+    if look != "follow":
+        r = LOOK_RECIPE[look]
+        a.update(scheduler=r["scheduler"], steps=r["steps"], cfg=r["cfg"])
+        extra["pag_scale"] = r["pag"]
+    elif c["look"] != "follow" and fam:
+        _note(notes, "The drawing style was measured on Illustrious / NoobAI models only: this model keeps its own sampler settings.",
+              "画风选项只在 Illustrious / NoobAI 模型上实测过：这个模型保持它自己的采样设置。")
     eyes = fam != "pony"          # Generate skips the eye pass on Pony checkpoints (app._eye_pass_skipped: it softened them, round 5)
     if not eyes and (extra.get("ed_on") or choice != "(off)"):
         _note(notes, "Pony checkpoints skip the eye pass (it made their eyes softer in the tests); the rest runs as planned.",
@@ -375,7 +404,8 @@ def plan(choices: dict, env) -> dict:
                 loras=[(Path(str(a[f"lora{i}"])).stem, a[f"w{i}"]) for i in (1, 2, 3) if a[f"lora{i}"] not in ("none", "", None)],
                 what=what, choice=choice, picks=pk, factor=round(time_factor(pk, extra), 1), passes={k: extra.get(k) for k in FAST}, size=(a["width"], a["height"]), count=c["count"],
                 seed=c["seed"], framing=c["framing"], detail=c["detail"], family=fam, eyes=eyes,
-                colour=extra.get("cs"), dynamic=WC.is_dynamic(a["prompt"]))
+                colour=extra.get("cs"), dynamic=WC.is_dynamic(a["prompt"]), look=look,
+                sampler=(str(a["scheduler"]), a["steps"], a["cfg"], extra.get("pag_scale") or 0.0))
     return dict(args=a, notes=notes, errors=errors, info=info, choices=c)
 
 
@@ -422,7 +452,8 @@ TIMES_FILE_NAME = "_simple_times.json"
 
 
 def time_key(info: dict) -> str:
-    return f"{info['model']}|{info['size'][0]}x{info['size'][1]}|{info['choice']}|{info['detail']}"
+    look = info.get("look", "follow")          # 'as saved' keeps the key of the times measured before the drawing style existed
+    return f"{info['model']}|{info['size'][0]}x{info['size'][1]}|{info['choice']}|{info['detail']}" + ("" if look == "follow" else f"|{look}")
 
 
 def _raw_times(path) -> dict:

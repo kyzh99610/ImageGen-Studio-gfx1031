@@ -128,10 +128,17 @@ def start_here_html() -> str:
          "(a cowboy shot gets hires, a wide shot hires + face). <b>Best</b>: also the 2× detail stage where it measured better; 3–4× slower.",
          "<b>按设置</b>：用设置里自己的步骤。<b>快</b>：出图 + 修眼睛。<b>标准</b>：这种取景实测过的配方（半身加高清修复，远景加高清修复和修脸）。"
          "<b>精细</b>：在实测更好的地方再加 2 倍细节；慢 3–4 倍。"),
-        ("<b>5. Shape, colour, how many</b>", "<b>5. 形状、色彩、张数</b>",
+        ("<b>5. Drawing style</b>", "<b>5. 画风</b>",
+         "<b>As saved</b>: the setting's or card's own sampler (the measured 12-step recipe with PAG 2: thick outlines, hard light). "
+         "<b>Softer lines</b>: 28 steps, CFG 5, no PAG: thinner outlines and gentler shading, the character as recognisable as before, no slower. "
+         "<b>Painterly</b>: Euler a, 28 steps: the softest, a little less like the character in the test. On Illustrious / NoobAI models only.",
+         "<b>按设置</b>：用设置或角色卡自己的采样（实测的 12 步 + PAG 2 配方：描边粗、明暗硬）。"
+         "<b>线条柔和</b>：28 步、CFG 5、不开 PAG，描边更细、明暗更柔，角色和原来一样好认，也不更慢。"
+         "<b>手绘感</b>：Euler a 28 步，最柔，测试里稍微没那么像角色。只对 Illustrious / NoobAI 模型生效。"),
+        ("<b>6. Shape, colour, how many</b>", "<b>6. 形状、色彩、张数</b>",
          "Tall / square / wide use the model family's own sizes. Soft colour = paler pictures, same drawing. Seed -1 = new pictures every time.",
          "竖图 / 方图 / 横图用这类模型自己的尺寸。柔和 = 颜色淡一些，画的内容不变。种子 -1 = 每次都是新图。"),
-        ("<b>6. Press ✨ Make the pictures</b>", "<b>6. 按 ✨ 生成</b>",
+        ("<b>7. Press ✨ Make the pictures</b>", "<b>7. 按 ✨ 生成</b>",
          "The box above the pictures says what will happen before you press it, and how long it took here last time. Afterwards every picture is checked "
          "(stars, faces, hands) and the next steps are suggested.",
          "按之前，图片上方的框会写出将要做什么、上次在这台电脑上用了多久。出图后会检查每张图（打星、数脸、看手），并建议下一步。"),

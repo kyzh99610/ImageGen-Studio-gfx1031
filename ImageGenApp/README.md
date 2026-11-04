@@ -50,12 +50,19 @@ The first tab: a few plain choices and one button, for good pictures without kno
 - **Framing** (Auto / portrait / cowboy shot / full body / wide shot) and **Detail** (As saved / Fast / Standard / Best) map onto ✨ Polish's
   measured recipes; Best is the new Polish entry **Auto — best** (the slower recipe measured better for each framing: hires on a cowboy shot,
   the 2× detail stage on a full body or wide shot).
+- **Drawing style**: As saved (the setting's or card's own sampler; for a prompt the measured AYS 12 / CFG 6 / PAG 2), **Softer lines**
+  (DPM++ 2M Karras 28 steps, CFG 5, no PAG: thinner outlines and gentler shading; the default for a new user) or **Painterly** (Euler a 28 steps,
+  CFG 5, no PAG: the softest). Measured on an Illustrious checkpoint with a character LoRA setup, 3 saved settings × 3 seeds, the same detail
+  passes: PAG 2 + CFG 6 draw the thick outlines and hard light, 24 steps alone changed little; Softer lines kept the character as recognisable
+  (CCIP 0.927 against 0.930) at no extra time (PAG runs the model twice a step), Painterly a little less (0.915). Illustrious / NoobAI only:
+  other families keep their own sampler and the plan says so.
 - **Shape**, **colour** (vivid / natural / soft = colour strength 1 / 0.85 / 0.75), **how many** and the **seed**.
 - A box says what will happen before you press the button (model, recipe, size, the time it took here last time). Afterwards every picture
   is checked with the models already on the PC (stars, faces, hands) and the next steps are suggested: 🔀 More like the picked one,
   ⬆ Redo it in more detail, 🎲 New pictures, ⭐ Favourite, 🔧 Open in Generate (the Generate tab takes the run, with the picked seed).
 - It runs the Generate tab's own pipeline, so records, restore, History and ⭐ work as for any picture. HTTP API: `/do_simple_generate`
-  (source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, count, seed, check, lang).
+  (source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, look, count, seed, check, lang; look = follow / soft /
+  painterly).
 
 ### 中文 / English
 
