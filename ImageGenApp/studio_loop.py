@@ -172,7 +172,7 @@ class Scorer:
         sc = self.IS.score_images([img], tags, identity=self.identity)[0]
         faces = len(self.DT.detect_faces(img, "anime") or [])
         off, judged = self.DT.hands_look_off(img)
-        wd = self.WD.tag_image(img, general_threshold=0.3)
+        wd = self.WD.tag_image(img, general_threshold=min(0.3, LP.HOLD_THRESHOLD))    # low enough for the stray-object check's holding* tags
         probs = dict(wd["general"])
         probs["explicit"] = max(probs.get("explicit", 0.0), wd["rating"].get("explicit", 0.0))
         return dict(stars=sc.get("stars"), flags=sc.get("flags") or [], faces=faces, hands_off=off, hands=judged, tags=probs)

@@ -543,26 +543,37 @@ def parameters_html() -> str:
              "\"very long hair\", \"hair ornament\" against \"butterfly hair ornament\". A qualified tag stays: \"exposed …\" when the prompt says "
              "\"covered …\", \"black hair\" against \"black hair streak\". A few aliases count too: \"blurry\" against \"depth of field\" / \"bokeh\", "
              "\"see-through\" against \"sheer\"; add your own in settings/neg_conflicts.json as {\"negative tag\": [\"prompt tag\", …]}. "
-             "A tag written twice is kept once at its strongest weight, inside weighted groups too. Prompt tags that negate (\"no gloves\") and long "
-             "prose phrases never drop anything; LoRA tags, BREAK and embeddings are left alone. The result line lists what was dropped; the picture's "
-             "record holds the negative that ran. Why: long negatives gather tags from presets, cards and pasted prompts, and a tag that names what the "
+             "A tag written twice is kept once at its strongest weight, inside weighted groups too. The prompt's own repeats run once as well, where the "
+             "tag first appears and at its strongest weight (the box keeps what you typed): a repeat is not emphasis, write one weight such as (tag:1.2). "
+             "Prompt tags that negate anywhere (\"no gloves\", \"nylon not rubber\") and long "
+             "prose phrases never drop anything; LoRA tags, BREAK and embeddings are left alone. The result line lists what was dropped and merged; the picture's "
+             "record holds the prompt and negative that ran. Why: long negatives gather tags from presets, cards and pasted prompts, and a tag that names what the "
              "prompt asks for works against it — on 60 long community prompts \"blurry\" fought the prompt's own depth of field in 38. "
              "Merging repeats alone already changes the details of a picture (same pose and outfit): a picture saved before this, or with hygiene "
-             "off, whose negative had repeats or a conflicting tag regenerates differently with it on — turn it off to repeat such a picture exactly.",
+             "off, whose prompt or negative had repeats or a conflicting tag regenerates differently with it on — turn it off to repeat such a picture exactly "
+             "(Send to Generate says so for a repeated prompt tag).",
              _cn("设置 → Negative hygiene（默认开启）会在每张图之前、通配符展开之后，按正向提示清理负面提示："
                  "负面标签的所有词都包含在某个正向标签里、且包含该标签的中心词时会被去掉——例如正向写 \"very long hair\" 时去掉负面的 \"long hair\"，"
                  "正向写 \"butterfly hair ornament\" 时去掉 \"hair ornament\"。带限定词的会保留：正向写 \"covered …\" 时保留负面的 \"exposed …\"，"
                  "\"black hair streak\" 不会去掉 \"black hair\"。少量同义项也算冲突：\"blurry\" 对 \"depth of field\" / \"bokeh\"，\"see-through\" 对 \"sheer\"；"
                  "可在 settings/neg_conflicts.json 里自行添加 {\"负面标签\": [\"正向标签\", …]}。重复的负面标签只保留权重最强的一个（权重分组内也一样）。"
-                 "否定形式的正向标签（\"no gloves\"）和较长的描述句不会去掉任何东西；LoRA 标签、BREAK 和嵌入不受影响。结果行会列出去掉了什么，"
-                 "图片记录里保存实际使用的负面提示。仅合并重复标签就会改变画面细节（姿势和服装不变）：之前保存、或在关闭时生成、且负面提示含重复或冲突标签的图片，"
-                 "开启后重新生成会不同——要完全复现这类图片请先关闭此项。")],
+                 "正向提示词里重复的标签也只用一次：放在它第一次出现的位置，取最强的权重（输入框里保持你写的样子）。重复写不等于加强，要加强就写一个权重，例如 (tag:1.2)。"
+                 "带否定词的正向标签（无论否定词在哪：\"no gloves\"、\"nylon not rubber\"）和较长的描述句不会去掉任何东西；LoRA 标签、BREAK 和嵌入不受影响。结果行会列出去掉和合并了什么，"
+                 "图片记录里保存实际使用的正向和负面提示。仅合并重复标签就会改变画面细节（姿势和服装不变）：之前保存、或在关闭时生成、且提示词含重复或冲突标签的图片，"
+                 "开启后重新生成会不同——要完全复现这类图片请先关闭此项（提示词里有重复标签时，“发送到生成”会提醒）。")],
             ["⚖️ Prompt weights & colour bleeding",
-             "(tag:1.3) works like A1111 now (Settings → Prompt weights): the app used to apply weights 2–5× harder, so "
-             "weighted background / lighting / colour tags flooded their colour onto the character. If a scene colour "
-             "still bleeds, lower that tag's weight.",
-             _cn("权重 (tag:1.3) 现与 A1111 相同（设置 → Prompt weights）；之前权重过强，背景/光照颜色会染到角色身上。"
-                 "仍有串色时降低场景标签的权重。")],
+             "Settings → Prompt weights decides how (tag:1.3) acts. Norm-keep (the default since 2026-11-03) multiplies the tag and keeps the "
+             "rest of its 75-token chunk at its strength, on both of SDXL's text encoders. A1111 (old) is A1111 / Forge's own maths: on SDXL's "
+             "first encoder it can weaken a chunk full of weighted tags or inflate it 1.5–1.8×, and five skin / hair phrases at 1.5 drew blobs on "
+             "the cheeks in 7 of 8 pictures (Norm-keep 1 of 8). Compel applies weights 2–5× harder, so weighted background / lighting / colour tags "
+             "flood their colour onto the character. Keep weights at 1.25 or below on a few tags: when most tags of a chunk are weighted, none "
+             "stands out. Saved settings tuned under A1111 render a little differently now; a picture records its mode, and Send to Generate says "
+             "when it differs.",
+             _cn("设置 → Prompt weights 决定 (tag:1.3) 怎么起作用。Norm-keep（2026-11-03 起默认）放大这个标签，同一段 75 个词元里其余部分的强度不变，"
+                 "SDXL 的两个文本编码器都是这样。A1111 (old) 是 A1111 / Forge 原本的算法：在 SDXL 的第一个编码器上，一段里加权的标签多了，整段可能被削弱，"
+                 "也可能被放大 1.5–1.8 倍；五个皮肤 / 头发描述用 1.5 时，8 张里有 7 张脸颊长出色块（Norm-keep 8 张里 1 张）。Compel 的权重强 2–5 倍，"
+                 "加权的背景/光照/颜色标签会染到角色身上。权重最好不超过 1.25，只给少数几个标签：一段里大部分标签都加权时，哪个都不突出。"
+                 "按 A1111 调好的已保存设置现在出图会有些不同；每张图都记录了它的算法，“发送到生成”时算法不同会提醒。")],
             ["🎲 Samplers on SDXL",
              "LMS and PNDM used to fill SDXL pictures with colour noise (4th-order multistep methods are unstable on "
              "SDXL); on SDXL-family models (SDXL, Pony, Illustrious, NoobAI) they now run as 2nd-order methods and are "
@@ -681,7 +692,7 @@ def parameters_html() -> str:
              "(the loaded one when none is selected). Only Illustrious / NoobAI has one so far: DPM++ 2M AYS, 12 steps, CFG 6, PAG 2 — measured on five Illustrious / NoobAI checkpoints with one "
              "character LoRA: the recipe sits on a plateau (CFG 5, a stronger LoRA, Euler a at 20 steps, a bigger size, CFG rescale, PAG 3 were each no better), while 10-step bases, no PAG and Compel prompt weights cost something. "
              "For any other family (Pony, SDXL base, SD 1.5) it says there is no measured recipe yet and changes nothing. It never touches the prompt, size, LoRAs, seed or any default — a fresh install still starts at "
-             "Steps 20 / CFG 7.5 / DPM++ 2M Karras until you press it. The recipe was measured with A1111 prompt weights (Settings → Prompt weights, the default); the note warns when it is set to Compel.",
+             "Steps 20 / CFG 7.5 / DPM++ 2M Karras until you press it. The recipe was measured with A1111 prompt weights (Settings → Prompt weights); the note warns when it is set to Compel.",
              _cn("“Steps / CFG”下方的按钮，按 Generate 页所选底模的系列填入采样器、步数、CFG 和 PAG（未选择时用已加载的模型）。目前只有 Illustrious / NoobAI 有实测方案：DPM++ 2M AYS、12 步、CFG 6、PAG 2——"
                  "在五个 Illustrious / NoobAI 模型上配合一个角色 LoRA 测得：该方案处在平台期（CFG 5、更强的 LoRA、Euler a 20 步、更大尺寸、CFG rescale、PAG 3 都没有更好），"
                  "而 10 步底图、关闭 PAG、Compel 提示词权重都会有代价。其他系列（Pony、SDXL 基础版、SD 1.5）会提示“暂无实测方案”并保持不变。它不会改动提示词、尺寸、LoRA、种子或任何默认值——"

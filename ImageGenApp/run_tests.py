@@ -7271,7 +7271,7 @@ def _():
     m = np.asarray(_ramp_mask(100, 80, 20, 0, 0, 10))
     assert m[:, 0].max() == 0 and m[40, 50] == 255 and m[0, 99] == 255 and m[-1, 50] == 0
 
-@test("Prompt weights: A1111 emphasis (multiply, keep the mean) is the default; Compel mode unchanged; SDXL cache keyed by mode")
+@test("Prompt weights: Norm-keep (multiply, keep the tokens' mean length) is the default; A1111 (old: keep the mean value) and Compel unchanged; names and labels map to modes; SDXL cache keyed by mode")
 def _():
     import torch, inspect
     try:
@@ -7292,19 +7292,39 @@ def _():
                returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED)
     old = PS.EMPHASIS["mode"]
     try:
-        assert old == "a1111" or True
+        assert old == PS.DEFAULT_MODE == "a1111_normkeep", old                 # the suite runs on the shipped default
+        ids = tok("a girl, sunset").input_ids
+        k = ids.index(tok.convert_tokens_to_ids("sunset</w>"))
         PS.set_emphasis("a1111")
         plain = c("a girl, sunset")
         w = c(PS.a1111_to_compel("a girl, (sunset:1.4)"))
         assert abs(w.mean().item() - plain.mean().item()) < 1e-5            # mean kept (A1111 "Original")
-        ids = tok("a girl, sunset").input_ids
-        k = ids.index(tok.convert_tokens_to_ids("sunset</w>"))
         ratio = (w[0, k] / plain[0, k]).mean().item()
         assert 1.2 < ratio < 1.6, ratio                                      # the weighted token ≈ ×1.4 (rescaled)
+        PS.set_emphasis("a1111_normkeep")
+        n = c(PS.a1111_to_compel("a girl, (sunset:1.4)"))
+        assert abs(n.norm(dim=-1).mean().item() - plain.norm(dim=-1).mean().item()) < 1e-4   # the tokens' mean length kept
+        others = [i for i in range(n.shape[1]) if i != k]
+        lift = n[0, k].norm() / plain[0, k].norm()
+        rest = (n[0, others].norm(dim=-1) / plain[0, others].norm(dim=-1)).mean()
+        assert 1.25 < (lift / rest).item() < 1.5 and 0.95 < rest.item() < 1.0, (lift.item(), rest.item())   # the tag ×1.4 over the rest
+        assert torch.equal(c("a girl, sunset"), plain)                     # unit weights: Compel's own path, whatever the mode
+        # a chunk whose mean value sits near zero (SDXL's CLIP-L): A1111's factor swings, Norm-keep's does not
+        z = torch.randn(1, 77, 32)
+        z = z - z.mean()
+        cw = torch.ones(77)
+        cw[1:40] = 1.5
+        a = PS.rescale_chunk(z, cw, "a1111")
+        nk = PS.rescale_chunk(z, cw, "a1111_normkeep")
+        assert abs(nk.norm(dim=-1).mean().item() - z.norm(dim=-1).mean().item()) < 1e-4
+        assert abs(a.norm(dim=-1).mean().item() / z.norm(dim=-1).mean().item() - 1) > abs(nk.norm(dim=-1).mean().item() / z.norm(dim=-1).mean().item() - 1)
+        assert torch.equal(PS.rescale_chunk(z, torch.zeros(77), "a1111_normkeep"), z * 0)   # all weights 0: no division by zero
         PS.set_emphasis("compel")
         wc = c(PS.a1111_to_compel("a girl, (sunset:1.4)"))
-        assert not torch.allclose(wc, w) and torch.equal(c("a girl, sunset"), plain)   # unit weights identical
-        assert PS.set_emphasis("Compel (stronger)") == "compel" and PS.set_emphasis("A1111 (default)") == "a1111"
+        assert not torch.allclose(wc, w) and not torch.allclose(wc, n)
+        for name, mode in (("Compel (stronger)", "compel"), ("A1111 (old)", "a1111"), ("a1111", "a1111"), ("A1111 (default)", "a1111"),
+                           ("Norm-keep (default)", "a1111_normkeep"), ("a1111_normkeep", "a1111_normkeep"), ("", PS.DEFAULT_MODE), ("junk", PS.DEFAULT_MODE)):
+            assert PS.set_emphasis(name) == mode, (name, mode)
     finally:
         PS.set_emphasis(old)
     # the SDXL embedding cache must not serve one weighting mode's embeddings to the other
@@ -7316,11 +7336,14 @@ def _():
         SX._SDXL_EMBED_CACHE.clear()
         SX._SDXL_EMBED_CACHE[("p", "n", "m", "a1111")] = {"prompt_embeds": torch.zeros(1)}
         SX._SDXL_EMBED_CACHE[("p", "n", "m", "compel")] = {"prompt_embeds": torch.ones(1)}
+        SX._SDXL_EMBED_CACHE[("p", "n", "m", "a1111_normkeep")] = {"prompt_embeds": torch.full((1,), 2.0)}
         try:
             PS.set_emphasis("a1111")
             assert SX._build_sdxl_embeds(fake_pipe, "p", "n")["prompt_embeds"].item() == 0.0
             PS.set_emphasis("compel")
             assert SX._build_sdxl_embeds(fake_pipe, "p", "n")["prompt_embeds"].item() == 1.0
+            PS.set_emphasis("a1111_normkeep")
+            assert SX._build_sdxl_embeds(fake_pipe, "p", "n")["prompt_embeds"].item() == 2.0
         finally:
             PS.set_emphasis(old)
     finally:
@@ -7378,17 +7401,29 @@ def _():
         rec = _app._gen_record(None, prompt="1girl, (sunset:1.3)", steps=20)
         assert rec["emphasis"] == "compel" and "Emphasis: Compel" in _app._params_text(rec)
         PS.set_emphasis("a1111")
-        assert "Emphasis" not in _app._params_text(_app._gen_record(None, prompt="x", steps=20))
+        assert "Emphasis" not in _app._params_text(_app._gen_record(None, prompt="x", steps=20))   # A1111's own maths: no line
+        PS.set_emphasis("a1111_normkeep")
+        rec = _app._gen_record(None, prompt="x", steps=20)
+        assert rec["emphasis"] == "a1111_normkeep" and "Emphasis: Norm-keep" in _app._params_text(rec)
         info = PngInfo(); info.add_text("parameters", "1girl, (sunset:1.3)\nSteps: 20, Sampler: Euler, Seed: 1, "
                                                       "Emphasis: Compel")
         with _tf.TemporaryDirectory() as d:
             f = Path(d) / "e.png"; Image.new("RGB", (8, 8)).save(f, pnginfo=info)
             meta = read_image_metadata(f)
+            for line, want in (("Emphasis: Norm-keep", "a1111_normkeep"), ("Model: x", None)):
+                i2 = PngInfo(); i2.add_text("parameters", f"1girl, (sunset:1.3)\nSteps: 20, Sampler: Euler, Seed: 1, {line}")
+                Image.new("RGB", (8, 8)).save(f, pnginfo=i2)
+                assert read_image_metadata(f).get("emphasis") == want, line
         assert meta["emphasis"] == "compel"
         plan = _app._restore_plan(meta)
         assert any("Compel prompt weighting" in n for n in plan["notes"]), plan["notes"]
         meta["prompt"] = "1girl, sunset"                                    # no weights → no note
         assert not any("weighting" in n for n in _app._restore_plan(meta)["notes"])
+        # an A1111 / Forge picture (no Emphasis line) under the Norm-keep default: the note names A1111 (old)
+        plan = _app._restore_plan({"prompt": "1girl, (sunset:1.3)", "steps": 20})
+        assert any("A1111 (old) prompt weighting" in n for n in plan["notes"]), plan["notes"]
+        PS.set_emphasis("a1111")
+        assert not any("weighting" in n for n in _app._restore_plan({"prompt": "1girl, (sunset:1.3)", "steps": 20})["notes"])
     finally:
         PS.set_emphasis(old)
 
@@ -8429,7 +8464,10 @@ def _():
         ("ok", ["holds something the prompt does not ask for (holding pen 0.50)"])
     assert LP.verdict({"stars": 5, "flags": []}, {"holding": 0.71}, 1, g, prompt="1girl, holding umbrella")[0] == "best"
     assert LP.verdict({"stars": 5, "flags": []}, {"holding": 0.71}, 1, g)[0] == "best"                 # no prompt: not judged
-    assert LP.verdict({"stars": 5, "flags": []}, {"holding": 0.3}, 1, g, prompt="1girl")[0] == "best"
+    assert LP.verdict({"stars": 5, "flags": []}, {"holding": 0.15}, 1, g, prompt="1girl")[0] == "best"   # the clean pictures' highest was 0.15
+    assert LP.verdict({"stars": 5, "flags": []}, {"holding_tray": 0.27, "tray": 0.47}, 1, g, prompt="1girl, playboy bunny") == \
+        ("ok", ["holds something the prompt does not ask for (holding tray 0.27)"])                  # the laptop's tray (unseen at 0.35)
+    assert LP.verdict({"stars": 5, "flags": []}, {"card": 0.84, "playing card": 0.68}, 1, g, prompt="1girl, casino")[0] == "best"   # cards on the table
     assert LP.verdict({"stars": 3, "flags": ["2 faces"]}, {"holding": 0.9}, 1, g, prompt="1girl")[0] == "review"
     assert LP.verdict({"stars": 5, "flags": []}, {}, 2, g) == ("reject", ["2 faces"])
     assert LP.verdict({"stars": 5, "flags": []}, {}, 1, g) == ("best", [])
@@ -8472,7 +8510,7 @@ def _():
 
 
 
-@test("🧹 Negative hygiene: a negative tag whose words are all in one prompt tag (or an alias) is dropped, a qualified one ('exposed …') and anything a negating prompt tag names ('no gloves') stay, repeats are kept once at their strongest weight inside and across groups, LoRA / BREAK / embeddings untouched; a real Generate run uses the cleaned negative and says so; the Settings checkbox turns it off and saves the choice")
+@test("🧹 Negative hygiene: a negative tag whose words are all in one prompt tag (or an alias) is dropped, a qualified one ('exposed …') and anything a negating prompt tag names ('no gloves', 'nylon not rubber') stay, the prompt's own repeats run once (first place, strongest weight; the record holds what ran, Send to Generate and the warnings say so), repeats are kept once at their strongest weight inside and across groups, LoRA / BREAK / embeddings untouched; a real Generate run uses the cleaned negative and says so; the Settings checkbox turns it off and saves the choice")
 def _():
     import json as _j
     from unittest.mock import patch
@@ -8495,6 +8533,20 @@ def _():
     al = NH.load_aliases(tmp)
     assert NH.prune_negative("1girl, pixel art", "lowres, text", al)[1] == ["lowres"] and "blurry" in al
     assert "dropped 2" in NH.note_html(["a", "b"], 0) and "merged 3" in NH.note_html([], 3) and NH.note_html([], 0) == ""
+    # a negation anywhere in a prompt tag asks for the thing to be absent: it never drops the negative tag that keeps it out
+    assert NH.prune_negative("1girl, nylon not rubber, pantyhose", "rubber, latex, lowres") == ("rubber, latex, lowres", [], 0)
+    assert NH.prune_negative("1girl, gloves without fingers", "gloves, text")[1] == []
+    # the prompt's own repeats: once, where first written, at the strongest weight; a wildcard group written twice = two picks
+    assert NH.dedupe_prompt("1girl, smile") == ("1girl, smile", 0) and NH.dedupe_prompt("") == ("", 0)
+    assert NH.dedupe_prompt("masterpiece, 1girl, pantyhose, masterpiece, (pantyhose:1.2), smile, Pantyhose") == \
+        ("masterpiece, 1girl, (pantyhose:1.2), smile", 3)
+    assert NH.dedupe_prompt("{red|blue} dress, {red|blue} dress, x")[1] == 0
+    assert NH.dedupe_prompt("a, b BREAK a, c, <lora:x:0.5>") == ("a, b BREAK c, <lora:x:0.5>", 1)
+    nh = NH.note_html([], 0, 2)
+    assert "🧹 Prompt: 2 repeated" in nh and "正向提示词：2 个重复" in nh and "Negative" not in nh
+    from backend import prompt_tools as _pt
+    assert any("repeated" in w and "once" in w for w in _pt.prompt_warnings("1girl, smile, 1girl"))
+    assert not any("repeated" in w for w in _pt.prompt_warnings("1girl, smile, {a|b}, {a|b}"))
     # a real Generate: the negative that reaches the pipeline (and the record) is the cleaned one
     with _BatchEnv() as E:
         cl = dict(zip(E.xy.__code__.co_freevars, E.xy.__closure__))
@@ -8502,15 +8554,20 @@ def _():
         out_dir = E._app.OUTPUTS_DIR
         old = NH.CONFIG["on"]
         try:
-            for on, want in ((True, "bad hands, text"), (False, "bad hands, long hair, text")):
+            for on, want, want_p in ((True, "bad hands, text", "1girl, very long hair"),
+                                     (False, "bad hands, long hair, text", "1girl, very long hair, 1girl")):
                 NH.set_on(on)
                 for f in out_dir.glob("*.png"):
                     f.unlink()
-                _, info, _ = dg("1girl, very long hair", "bad hands, long hair, text", "Euler a", 4, 6.0, 64, 64, 1, 5, None, 0.5, False,
+                _, info, _ = dg("1girl, very long hair, 1girl", "bad hands, long hair, text", "Euler a", 4, 6.0, 64, 64, 1, 5, None, 0.5, False,
                                 auto_quality=False, extra={}, progress=lambda *a, **k: None)
                 rec = _j.loads(Image.open(next(out_dir.glob("*.png"))).info["imagegen"])
                 assert rec["negative_prompt"] == want, (on, rec["negative_prompt"])
-                assert ("🧹 Negative" in info) == on, info
+                assert rec["prompt"] == want_p, (on, rec["prompt"])                       # the record holds the prompt that ran
+                assert ("🧹 Negative" in info) == on and ("🧹 Prompt: 1 repeated" in info) == on, info
+                # Send to Generate: a recorded prompt that still repeats a tag ran it twice; with 🧹 on that is not repeatable
+                notes = E._app._restore_plan({"prompt": "1girl, smile, 1girl", "steps": 20})["notes"]
+                assert any("repeats a tag" in x for x in notes) == on, notes
         finally:
             NH.set_on(old)
     # the Settings checkbox

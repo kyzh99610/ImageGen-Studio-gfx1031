@@ -158,8 +158,9 @@ from backend.lora_keywords import chips_for, lora_keywords
 
 try:                                   # Settings → Prompt weights (saved choice)
     import json as _j0
-    from backend.prompt_syntax import set_emphasis as _set_emphasis
-    _set_emphasis(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("emphasis", "a1111"))
+    from backend.prompt_syntax import set_emphasis as _set_emphasis, DEFAULT_MODE as _EMPH_DEFAULT
+    if not os.environ.get("IMAGEGEN_TESTS"):         # the suite runs on the shipped default, not on the user's saved choice
+        _set_emphasis(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("emphasis", _EMPH_DEFAULT))
 except Exception:
     pass
 try:                                   # Settings → Eye style (saved choice)
@@ -2380,11 +2381,13 @@ def _build_generate_tab():
         tags_note = ((f'<br><span style="color:#9399b2;">Auto-added quality tags: <code>{added_tags}</code>'
                       + (f' · negative: <code>{added_neg}</code>' if added_neg else "") + '</span>')
                      if (added_tags or added_neg) else "") + fixes_note
-        # ── 🧹 Negative hygiene: drop the negative tags the prompt asks for, keep repeats once (Settings) ─
+        # ── 🧹 Negative hygiene: each repeated prompt tag once, drop the negative tags the prompt asks for, keep their repeats once
+        #    (Settings). The prompt box keeps what was typed; the record holds what ran.
         from backend import neg_hygiene as _nh
         if _nh.CONFIG["on"]:
+            prompt, _nh_prompt_merged = _nh.dedupe_prompt(prompt)
             neg_prompt, _nh_dropped, _nh_merged = _nh.prune_negative(prompt, neg_prompt, _nh.load_aliases(SETTINGS_DIR))
-            tags_note += _nh.note_html(_nh_dropped, _nh_merged)
+            tags_note += _nh.note_html(_nh_dropped, _nh_merged, _nh_prompt_merged)
 
         try:
             # ── SmartSplit path ────────────────────────────────────────────────
@@ -3631,7 +3634,7 @@ def _build_generate_tab():
         if r is None:
             return keep + [f'<p style="color:#f9e2af;font-size:13px;">⚡ No measured recipe for {html.escape(_rc.family_label(family))} yet; current settings kept.</p>']
         from backend import prompt_syntax as _ps
-        weights = ("" if _ps.EMPHASIS.get("mode", "a1111") == "a1111" else
+        weights = ("" if _ps.EMPHASIS.get("mode") != "compel" else
                    ' <span style="color:#f9e2af;">⚠ Settings → Prompt weights is “Compel”; the recipe was measured with A1111 weights.</span>')
         return ([gr.update(value=r["scheduler"]), gr.update(value=r["steps"]), gr.update(value=r["cfg"]), gr.update(value=r["pag"])]
                 + [f'<p style="color:#a6e3a1;font-size:13px;">⚡ {html.escape(_rc.family_label(family))}: {html.escape(_rc.summary(r))} — {html.escape(r["basis"])}. '
@@ -7054,8 +7057,8 @@ def _params_text(rec: dict) -> str:
         parts.append(f"Eye detail: denoise {_num(rec['eye_detail']['denoise'], 0.3):g}")
         if rec["eye_detail"].get("style") == "natural":
             parts.append("Eye style: natural")
-    if rec.get("emphasis") == "compel":
-        parts.append("Emphasis: Compel")
+    if rec.get("emphasis") in ("compel", "a1111_normkeep"):      # no line = A1111's own maths (what A1111 / Forge pictures use)
+        parts.append("Emphasis: " + ("Compel" if rec["emphasis"] == "compel" else "Norm-keep"))
     if rec.get("pag_scale"):
         parts.append(f"PAG scale: {rec['pag_scale']:g}")
     if rec.get("freeu"):

@@ -131,9 +131,11 @@ def load_plan(path) -> dict:
 
 
 # WD14 'holding*' on the whole picture. Measured on 144 pictures of a same-seed A/B (2026-11-03): a thing in her hands that the prompt never asked
-# for (a pen, a card, a key, a glowing orb) was there in 16 by eye; holding* >= 0.35 found 5 of them (the pen and the cards) and flagged nothing
-# else. So it is a reason that keeps a picture out of 'best', never a reject.
-HOLD_THRESHOLD = 0.35
+# for (a pen, a card, a key, a glowing orb) was there in 16 by eye (labelled blind). holding* >= 0.35 found 5 of them; >= 0.2 finds 8 (the pen,
+# all the cards, a glowing star) and still flags none of the other 128, whose highest holding* is 0.15. A playboy-bunny tray on the laptop scored
+# holding_tray 0.27 (tray 0.47) and went unseen at 0.35. An object tag alone ("tray", "card") is no sign: the casino scene's table cards scored
+# card 0.3-0.84 in clean pictures. So it is a reason that keeps a picture out of 'best', never a reject.
+HOLD_THRESHOLD = 0.2
 
 
 def stray_hold(tags: dict, prompt: str) -> str | None:

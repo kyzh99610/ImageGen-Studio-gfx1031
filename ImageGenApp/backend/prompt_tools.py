@@ -343,6 +343,21 @@ def _warnings(prompt: str, negative: str = "", important=(), tokenizer=None) -> 
     both = [pos[k] for k in (parse_tag(t)[0] for t in split_tags(negative) if t != "BREAK") if k in pos]
     if both:
         warn.append(("in both prompts (they cancel out): " + b(both[:6]), "正向和反向提示词里都有（会互相抵消）：" + b(both[:6])))
+    reps: dict[str, int] = {}
+    for t in split_tags(prompt):
+        if t != "BREAK" and not _DYNAMIC.search(t) and parse_tag(t)[0]:
+            reps[parse_tag(t)[0]] = reps.get(parse_tag(t)[0], 0) + 1
+    reps = {k: n for k, n in reps.items() if n > 1}
+    if reps:
+        from backend import neg_hygiene as _nh
+        shown = ", ".join(f"<b>{_esc(k)}</b> ×{n}" for k, n in list(reps.items())[:4])
+        if _nh.CONFIG["on"]:
+            warn.append(("repeated: " + shown + " — each runs once, at its strongest weight (🧹 Negative hygiene); a repeat is not emphasis: "
+                         "write one weight such as (tag:1.2)",
+                         "重复的标签：" + shown + "——每个只用一次，取最强的权重（🧹 反向提示词清理）；重复写不等于加强：要加强就写一个权重，例如 (tag:1.2)"))
+        else:
+            warn.append(("repeated: " + shown + " — with 🧹 Negative hygiene off each copy runs; for emphasis write one weight such as (tag:1.2)",
+                         "重复的标签：" + shown + "——🧹 反向提示词清理关着，每一份都会生效；要加强就写一个权重，例如 (tag:1.2)"))
     day, night = lighting_conflict(prompt)
     if day:
         warn.append(("lighting tags disagree: " + b(day[:3]) + " (daylight) and " + b(night[:3]) + " (night) — the picture follows one of them, "
@@ -354,8 +369,8 @@ def _warnings(prompt: str, negative: str = "", important=(), tokenizer=None) -> 
 
 def prompt_warnings(prompt: str, negative: str = "", important=(), tokenizer=None) -> list[str]:
     """Things that quietly weaken a prompt: a LoRA trigger word pushed out of the first
-    chunk (it steers far less there), a tag in both prompts (they cancel out), and lighting tags
-    that disagree (golden hour / sunset / daytime together with night / neon / moonlight)."""
+    chunk (it steers far less there), a tag in both prompts (they cancel out), a repeated tag (run once by 🧹; a repeat is
+    not emphasis), and lighting tags that disagree (golden hour / sunset / daytime together with night / neon / moonlight)."""
     return [en for en, _zh in _warnings(prompt, negative, important, tokenizer)]
 
 

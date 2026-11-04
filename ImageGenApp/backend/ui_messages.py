@@ -368,7 +368,8 @@ EXACT.update({
     "saved setting": "已保存的设置", "per round": "每轮", "per picture": "每张", "checkpoint": "模型", "(off)": "（关闭）",
     "best": "best 最好", "ok": "ok 还行", "review": "review 待看", "reject": "reject 淘汰",
     # Settings
-    "⚖️ Prompt weights": "⚖️ 提示词权重", "A1111 (default)": "A1111（默认）", "Compel (stronger)": "Compel（更强）", "👁 Eye style": "👁 眼睛样式",
+    "⚖️ Prompt weights": "⚖️ 提示词权重", "A1111 (default)": "A1111（默认）", "Compel (stronger)": "Compel（更强）",
+    "Norm-keep (default)": "Norm-keep（默认）", "A1111 (old)": "A1111（旧算法）", "👁 Eye style": "👁 眼睛样式",
     "Round pupils (default)": "圆瞳孔（默认）", "🧹 Negative hygiene": "🧹 反向提示词清理", "🌡 Power profile": "🌡 功耗档位",
     "Full power (Turbo, unlimited CPU): cool 1.5 + pause above 88 °C": "满功率（Turbo，CPU 不限功率）：降温 1.5 + 超过 88 °C 暂停",
     "Power-limited (USB-C charger, or Manual with a CPU limit): cool 0 + pause above 88 °C": "限功率（USB-C 充电器，或手动模式限制了 CPU 功率）：降温 0 + 超过 88 °C 暂停",

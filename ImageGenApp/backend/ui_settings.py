@@ -35,19 +35,21 @@ def power_choice():
 
 
 def build_prefs_section(ns) -> None:
-    from backend.prompt_syntax import EMPHASIS as _EMPH, set_emphasis as _set_emph
+    from backend.prompt_syntax import EMPHASIS as _EMPH, set_emphasis as _set_emph, MODE_LABELS as _EMPH_LABELS
     gr.Markdown("### ⚖️ Prompt weights")
+    _emph_choices = {"a1111_normkeep": "Norm-keep (default)", "a1111": "A1111 (old)", "compel": "Compel (stronger)"}
     emph_rb = gr.Radio(
-        ["A1111 (default)", "Compel (stronger)"],
-        value="Compel (stronger)" if _EMPH["mode"] == "compel" else "A1111 (default)",
+        list(_emph_choices.values()),
+        value=_emph_choices.get(_EMPH["mode"], "Norm-keep (default)"),
         label="How (tag:1.2) weights are applied",
-        info=T("A1111 = like A1111 / Forge / Civitai (recommended). Compel = the app's old way: a weighted tag counts ~5× more, and weighted background or colour tags bleed into the character. Remembered for the next start.", "A1111 = 和 A1111 / Forge / Civitai 一样（推荐）。Compel = app 以前的算法：加权的标签作用大约强 5 倍，背景或颜色标签加权后会染到角色身上。下次启动仍然有效。"))
+        info=T("Norm-keep = a weight lifts its tag over the tags beside it and the rest of the prompt keeps its strength (recommended). A1111 (old) = A1111 / Forge's own maths: on SDXL a chunk full of weighted tags can come out weaker or much stronger than written, and high weights on skin / hair phrases drew blobs. Compel = a weighted tag counts ~5× more, and weighted background or colour tags bleed into the character. Remembered for the next start.",
+               "Norm-keep = 加权只让这个标签比旁边的标签更突出，提示词其余部分的强度不变（推荐）。A1111 (old) = A1111 / Forge 原本的算法：在 SDXL 上，一段里加权的标签一多，整段可能比写的弱、也可能强很多；皮肤 / 头发描述用高权重时画出过色块。Compel = 加权的标签作用大约强 5 倍，背景或颜色标签加权后会染到角色身上。下次启动仍然有效。"))
     emph_status = gr.HTML("")
 
     def on_emphasis(choice):
-        mode = _set_emph("compel" if str(choice).startswith("Compel") else "a1111")
+        mode = _set_emph(choice)
         ns._save_pref("emphasis", mode)
-        return f'<p style="color:#a6e3a1;font-size:13px;">✅ Prompt weights: {mode}</p>'
+        return f'<p style="color:#a6e3a1;font-size:13px;">✅ Prompt weights: {_EMPH_LABELS[mode]}</p>'
     emph_rb.change(on_emphasis, [emph_rb], [emph_status])
     from backend.detail_tools import EYE_STYLE as _EYE_STYLE, set_eye_style as _set_eye_style_ui
     gr.Markdown("### 👁 Eye style")
