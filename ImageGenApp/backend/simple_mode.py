@@ -409,6 +409,28 @@ def plan(choices: dict, env) -> dict:
     return dict(args=a, notes=notes, errors=errors, info=info, choices=c)
 
 
+def identity_card(lora_paths, cards) -> dict | None:
+    """The character card whose learned face (`identity`, backend/identity_score) the after-picture check uses for a plan that is not a card itself
+    (a saved setting): the card with an identity whose LoRAs, its own and its profiles', share the most files with the plan's LoRAs. None when none
+    shares one, or when two cards with different identities share as many (a style LoRA two characters have in common must not judge either).
+    Before 2026-11-03 a saved setting of the character got no likeness check at all."""
+    stem = lambda f: Path(str(f or "")).stem.lower()
+    want = {stem(p) for p in lora_paths if p and p not in ("none", "")}
+    best, score, tie = None, 0, False
+    for c in cards:
+        if not isinstance(c, dict) or not c.get("identity"):
+            continue
+        own = {stem(l.get("file")) for l in c.get("loras") or [] if isinstance(l, dict)}
+        for prof in (c.get("profiles") or {}).values():
+            own |= {stem(l.get("file")) for l in (prof or {}).get("loras") or [] if isinstance(l, dict)}
+        n = len(want & (own - {""}))
+        if n > score:
+            best, score, tie = c, n, False
+        elif n and n == score and (best or {}).get("identity", {}).get("centroid") != c["identity"].get("centroid"):
+            tie = True
+    return None if tie or not score else best
+
+
 def _w(v) -> float:
     try:
         return min(1.5, max(0.1, float(v)))

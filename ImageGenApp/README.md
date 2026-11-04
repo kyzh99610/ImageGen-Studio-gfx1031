@@ -61,7 +61,10 @@ The first tab: a few plain choices and one button, for good pictures without kno
   CFG 7.5), not the last run's sampler.
 - **Shape**, **colour** (vivid / natural / soft = colour strength 1 / 0.85 / 0.75), **how many** and the **seed**.
 - A box says what will happen before you press the button (model, recipe, size, the time it took here last time). Afterwards every picture
-  is checked with the models already on the PC (stars, faces, hands) and the next steps are suggested: 🔀 More like the picked one,
+  is checked with the models already on the PC (stars, faces, hands, and the face against the character's: a saved setting borrows the
+  learned face of the card that shares its LoRAs; a hat, a bun, a ponytail or glasses in the picture's own prompt widens the margin, as in the
+  outfit batch; the colour-specks note is left out, it fired on 93 of 162 good pictures). The Studio Loop's age guard runs on every picture,
+  check box or not, and names a picture WD14 reads as a child in red. Then the next steps are suggested: 🔀 More like the picked one,
   ⬆ Redo it in more detail, 🎲 New pictures, ⭐ Favourite, 🔧 Open in Generate (the Generate tab takes the run, with the picked seed).
 - It runs the Generate tab's own pipeline, so records, restore, History and ⭐ work as for any picture. HTTP API: `/do_simple_generate`
   (source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, look, count, seed, check, lang; look = follow / soft /

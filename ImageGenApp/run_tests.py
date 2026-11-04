@@ -9241,6 +9241,27 @@ def _():
     SM.record_time(tf, info, 60.0); SM.record_time(tf, info, 20.0)
     assert SM.read_times(tf)[SM.time_key(info)] == 20.0
     assert SM.time_key(dict(info, look="follow")) == SM.time_key(info) != SM.time_key(dict(info, look="soft"))     # times from before keep their key
+    # the after-picture check: which card's learned face judges a saved setting (the most LoRAs in common, profiles included; a tie between
+    # two different faces judges nothing), the margin for a hat / bun / glasses, the age guard, no colour-specks note
+    her = {"name": "Her", "identity": {"centroid": "A"}, "loras": [{"file": "canon.safetensors"}, {"file": "artbot.safetensors"}],
+           "profiles": {"hassaku.safetensors": {"loras": [{"file": "her_alt.safetensors"}]}}}
+    other = {"name": "Other", "identity": {"centroid": "B"}, "loras": [{"file": "rival.safetensors"}, {"file": "style.safetensors"}]}
+    plain = {"name": "NoFace", "loras": [{"file": "canon.safetensors"}]}
+    ic_ = lambda *ls: (SM.identity_card(["/l/" + x for x in ls] + ["none"], [plain, other, her]) or {}).get("name")
+    assert ic_("canon.safetensors", "artbot.safetensors") == "Her" and ic_("her_alt.safetensors") == "Her" and ic_("rival.safetensors") == "Other"
+    assert ic_() is None and ic_("unknown.safetensors") is None
+    her2 = dict(her, loras=her["loras"] + [{"file": "style.safetensors"}])
+    assert SM.identity_card(["/l/style.safetensors"], [other, her2]) is None                       # a shared style LoRA alone: no verdict
+    from backend import identity_score as IDS, image_score as IMS
+    from PIL import Image as _Im0
+    assert IDS.z_flag_for("1girl, semi-rimless eyewear, office") == IDS.Z_FLAG_HAIR and IDS.z_flag_for("hair bun, qipao") == IDS.Z_FLAG_HAIR
+    assert IDS.z_flag_for("1girl, hair ornament, x hair ornament, cowboy shot") is None
+    ages = IMS.age_flags([_Im0.new("RGB", (8, 8))] * 2, probs_fn=lambda im: {"loli": 0.5, "female_child": 0.4, "child": 0.1, "1girl": 0.9})
+    assert ages == [["loli 0.50", "female child 0.40"]] * 2
+    assert IMS.age_flags([_Im0.new("RGB", (8, 8))], probs_fn=lambda im: {"aged_down": 0.34}) == [[]]       # below the loop's 0.35
+    from backend import ui_simple as _US0
+    html_, bad_ = _US0.check_html([{"stars": 5, "flags": [], "notes": [IMS.SPECK_NOTE]}], [])
+    assert "看起来没问题" in html_ and "斑点" not in html_ and "specks" not in html_ and bad_ == []
     # the words table
     assert ZT.to_tags("红色连衣裙 坐在窗边看书") == ("red dress, sitting, by window, reading, book", [])
     for zh_in, tags_out in (("红色的裙子", "red skirt"), ("黑色长发", "black hair, long hair"), ("红色双马尾", "red hair, twintails"),
@@ -9322,6 +9343,12 @@ def _():
             assert "完成" in res and "Done" in res and state["seeds"] == [1234, 1235] and len(state["files"]) == 2
             assert _j.loads((tmp / US.LAST_FILE_NAME).read_text(encoding="utf-8"))["setting"] == "t/one"
             assert list(SM.read_times(tmp / SM.TIMES_FILE_NAME).values())                    # the measured time per picture is kept
+            calls.clear()
+            # the age guard runs with the check off too, and names the picture
+            with patch("backend.image_score.age_flags", lambda ims: [["loli 0.50"]] + [[] for _ in list(ims)[1:]]):
+                res_age = fn("setting", "t/one", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "", SM.NO_WILDCARD, "auto", "fast",
+                             "follow", "follow", "follow", 2, -1, False, "zh")[1]
+            assert "第 1 张：标签模型认为画的是儿童" in res_age and "Picture 1: the tagger reads a child" in res_age and "第 2 张：标签" not in res_age
             calls.clear()
             assert state["variations"] == [(-1, 0.0), (-1, 0.0)]                       # plain pictures: no variation
             _g, _r, st2 = by["do_simple_more"].fn(state, 1, False)                         # More like the picked one: its seed, small variations, one call per picture

@@ -172,6 +172,23 @@ def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=No
     return out
 
 
+def age_flags(images, probs_fn=None) -> list[list[str]]:
+    """Per picture the child tags WD14 reads on the whole picture at or above the Studio Loop's age-guard threshold (loop_plan.AGE_TAGS /
+    AGE_THRESHOLD), e.g. ['loli 0.41']; all empty when WD14 isn't on this PC (nothing downloads). 🪄 Quick picture runs it on every picture,
+    the check box or not, as the loop's guard is always on. Her pictures read ≤ 0.001 on every one of these tags (162 pictures, 2026-11-03)."""
+    from backend.loop_plan import AGE_TAGS, AGE_THRESHOLD
+    images = list(images)
+    if probs_fn is None:
+        if not ic.available():
+            return [[] for _ in images]
+        probs_fn = ic.probs
+    out = []
+    for im in images:
+        p = {str(k).replace("_", " "): float(v) for k, v in probs_fn(im.convert("RGB")).items()}
+        out.append([f"{t} {p[t]:.2f}" for t in AGE_TAGS if p.get(t, 0.0) >= AGE_THRESHOLD])
+    return out
+
+
 def badge(img: Image.Image, result: dict) -> Image.Image:
     """A copy of the picture with its rating (n/5) and flags written into the corner — for the contact sheet."""
     from PIL import ImageDraw, ImageFont

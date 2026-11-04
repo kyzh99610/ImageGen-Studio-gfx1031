@@ -142,8 +142,10 @@ def start_here_html() -> str:
          "竖图 / 方图 / 横图用这类模型自己的尺寸。柔和 = 颜色淡一些，画的内容不变。种子 -1 = 每次都是新图。"),
         ("<b>7. Press ✨ Make the pictures</b>", "<b>7. 按 ✨ 生成</b>",
          "The box above the pictures says what will happen before you press it, and how long it took here last time. Afterwards every picture is checked "
-         "(stars, faces, hands) and the next steps are suggested.",
-         "按之前，图片上方的框会写出将要做什么、上次在这台电脑上用了多久。出图后会检查每张图（打星、数脸、看手），并建议下一步。"),
+         "(stars, faces, hands, and whether the face looks like the character: a saved setting is compared with the card that uses the same LoRAs) "
+         "and the next steps are suggested. A picture the tagger reads as a child is always named in red, check box or not.",
+         "按之前，图片上方的框会写出将要做什么、上次在这台电脑上用了多久。出图后会检查每张图（打星、数脸、看手，以及脸像不像这个角色："
+         "已保存的设置会和用同样 LoRA 的角色卡比较），并建议下一步。标签模型认为画的是儿童的图，无论勾没勾检查，都会用红字标出来。"),
     ]
     h = '<div class="hg-h2">🪄 Start here &nbsp;<span class="cn">新手指南</span></div>'
     h += _tip("The app has two ways to work. <b>🪄 Quick picture</b> (the first tab): a few plain choices and one button; the app fills in everything else with "

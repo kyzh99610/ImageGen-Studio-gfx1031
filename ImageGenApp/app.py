@@ -1265,8 +1265,7 @@ def _eye_pass_skipped(pipe) -> bool:
     return str(getattr(pipe, "model_family", "") or "").lower() == "pony"
 
 
-_HAIR_COVER = re.compile(r"\b(hat|cap|bonnet|beret|veil|tiara|crown|headdress|headband|visor|beanie|goggles|headwear|hood|helmet|wig|bun|buns|"
-                         r"hair bun|ponytail|twintails|braid|braids|hairband|mask on head)\b", re.I)
+from backend.identity_score import HAIR_COVER as _HAIR_COVER       # hats, hairstyles, glasses: shared with 🪄 Quick picture's check
 
 
 def _identity_margins(card: dict, outfits, n_seeds: int, n: int) -> list:

@@ -162,7 +162,7 @@ def _flag_words(flag: str) -> tuple[str, str]:
 
 def check_html(scored: list, files: list) -> tuple[str, list[int]]:
     """Per picture: stars and what looks off; returns (html, the picture numbers that need a look)."""
-    from backend.image_score import HAND_NOTE, SPECK_NOTE
+    from backend.image_score import HAND_NOTE
     rows, bad = [], []
     for k, s in enumerate(scored, 1):
         en_bits, zh_bits = [], []
@@ -170,12 +170,11 @@ def check_html(scored: list, files: list) -> tuple[str, list[int]]:
             en, zh = _flag_words(f)
             en_bits.append(en); zh_bits.append(zh)
         for n in s.get("notes") or []:
+            # the colour-specks note is left out here: it fired on 93 of 162 good pictures of her (bokeh, lace, autumn leaves; 2026-11-03)
             if n == HAND_NOTE:
                 en_bits.append("a hand may be broken"); zh_bits.append("可能有一只手画坏了")
-            elif n == SPECK_NOTE:
-                en_bits.append("colour specks (lace or noise?)"); zh_bits.append("有彩色斑点（蕾丝还是噪点？）")
         stars = "⭐" * int(s.get("stars", 0))
-        if s.get("flags") or HAND_NOTE in (s.get("notes") or []):      # the speck note fires on lace and fur too: shown, not counted as a problem
+        if s.get("flags") or HAND_NOTE in (s.get("notes") or []):
             bad.append(k)
         if en_bits:
             rows.append(L(f"Picture {k} {stars}: " + _e("; ".join(en_bits)), f"第 {k} 张 {stars}：" + _e("；".join(zh_bits))))
@@ -372,17 +371,40 @@ def run_plan(ns, p: dict, check: bool, progress, calls: list[dict] | None = None
     chk, bad = "", []
     if check:
         try:
-            from backend import image_score as IS
-            card = None
-            if p["choices"]["source"] == "card":
-                from backend.character_cards import load_card
+            from backend import image_score as IS, identity_score as IDS
+            from backend.character_cards import list_cards, load_card
+            src, card, against = p["choices"]["source"], None, None
+            if src == "card":
                 card = load_card(p["choices"]["card"])
-            scored = IS.score_images(imgs, (card or {}).get("tags") or p["args"]["prompt"], identity=(card or {}).get("identity"),
+            elif src == "setting":            # a saved setting of a character: the card that shares its LoRAs lends its learned face
+                against = SM.identity_card([p["args"].get(f"lora{i}") for i in (1, 2, 3)], [load_card(n) for n in list_cards()])
+            ident = (card or against or {}).get("identity")
+            prompt = p["args"]["prompt"]
+            # a hat, a bun, a ponytail or glasses in a picture's own (resolved) prompt widens the likeness margin, as in the outfit batch
+            texts = [SM.WC.resolve(prompt, sd) for sd in seeds] if SM.WC.is_dynamic(prompt) and len(seeds) == len(imgs) else [prompt] * len(imgs)
+            scored = IS.score_images(imgs, (card or {}).get("tags") or prompt, identity=ident, identity_z=[IDS.z_flag_for(t) for t in texts],
                                      pause=ns._score_pause(progress))
             chk, bad = check_html(scored, files)
+            if against and ident:
+                chk += _p(f"Likeness compared with the face learned for the card {_e(against.get('name', ''))}.",
+                          f"像不像：和角色卡 {_e(against.get('name', ''))} 学到的脸比较。")
         except Exception as e:
             print(f"[Quick picture] check failed: {e}")
             chk = _p(f"The check could not run ({e}).", f"检查没能运行（{e}）。", WARN)
+    # the Studio Loop's age guard, always on (with or without the check): WD14's child tags on the whole picture
+    try:
+        from backend import image_score as IS2
+        ages = IS2.age_flags(imgs)
+    except Exception as e:
+        print(f"[Quick picture] age check failed: {e}")
+        ages = []
+    young = [k for k, a in enumerate(ages, 1) if a]
+    if young:
+        chk = "".join(_p(f"⚠ Picture {k}: the tagger reads a child here ({_e(', '.join(ages[k - 1]))}). Don't keep or share it; change the "
+                         f"prompt or press 🎲 New pictures.",
+                         f"⚠ 第 {k} 张：标签模型认为画的是儿童（{_e('、'.join(ages[k - 1]))}）。不要保留或分享这张，请改提示词或按「🎲 换一批」。", ERR)
+                      for k in young) + chk
+        bad = sorted(set(bad) | set(young))
     return imgs, result_html(len(imgs), secs, chk, bad, "".join(details)), state
 
 
