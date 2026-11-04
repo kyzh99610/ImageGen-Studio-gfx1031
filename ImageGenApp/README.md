@@ -55,7 +55,10 @@ The first tab: a few plain choices and one button, for good pictures without kno
   CFG 5, no PAG: the softest). Measured on an Illustrious checkpoint with a character LoRA setup, 3 saved settings × 3 seeds, the same detail
   passes: PAG 2 + CFG 6 draw the thick outlines and hard light, 24 steps alone changed little; Softer lines kept the character as recognisable
   (CCIP 0.927 against 0.930) at no extra time (PAG runs the model twice a step), Painterly a little less (0.915). Illustrious / NoobAI only:
-  other families keep their own sampler and the plan says so.
+  other families keep their own sampler and the plan says so. More steps (6 pictures per count, the same chain): AYS + PAG 2 at 20 / 30 steps
+  and Karras at 40 / 60 changed small details but did not look better (Karras at 12 was rougher); Euler a at 40 was a little sharper than
+  at 28 for +18 % time. On a family without a measured recipe, "just a prompt" uses the app's defaults (DPM++ 2M Karras, 20 steps,
+  CFG 7.5), not the last run's sampler.
 - **Shape**, **colour** (vivid / natural / soft = colour strength 1 / 0.85 / 0.75), **how many** and the **seed**.
 - A box says what will happen before you press the button (model, recipe, size, the time it took here last time). Afterwards every picture
   is checked with the models already on the PC (stars, faces, hands) and the next steps are suggested: 🔀 More like the picked one,

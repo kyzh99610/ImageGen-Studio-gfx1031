@@ -69,7 +69,9 @@ def _env(ns):
                            load_card=CC.load_card, card_for_checkpoint=CC.card_for_checkpoint, card_prompt=CC.card_prompt,
                            checkpoints=ckpts, loras=list_loras(), vaes=list_vaes(), family=family, lora_arch=lora_arch, recipe_for=RC.recipe_for,
                            default_model=default, to_tags=ZT.to_tags,
-                           defaults=dict(scheduler=last.get("scheduler") or "DPM++ 2M Karras", steps=ns.DEFAULT_STEPS, cfg=ns.DEFAULT_CFG))
+                           # a family without a measured recipe gets the app's defaults, not the last run's sampler: a Quick picture run (or any
+                           # Generate) becomes the last session, so a Pony prompt drew with Euler a after a Painterly run and with AYS after another
+                           defaults=dict(scheduler="DPM++ 2M Karras", steps=ns.DEFAULT_STEPS, cfg=ns.DEFAULT_CFG))
 
 
 def _times_file(ns):

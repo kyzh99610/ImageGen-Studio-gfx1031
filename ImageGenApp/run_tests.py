@@ -9254,6 +9254,8 @@ def _():
              patch("backend.model_manager.list_loras", lambda: []), patch("backend.model_manager.list_vaes", lambda: []), \
              patch("backend.sd_pipeline._model_family", lambda p: "illustrious"):
             fn = by["do_simple_generate"].fn
+            with patch.object(_app, "_read_last_session", lambda: {"scheduler": "Euler a"}):
+                assert US._env(_app).defaults["scheduler"] == "DPM++ 2M Karras"        # a family without a recipe: not the last run's sampler
             imgs, res, state, box = fn("setting", "t/one", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "海边", SM.NO_WILDCARD, "auto", "fast",
                                        "follow", "follow", "soft", 2, -1, False, "zh")
             assert len(imgs) == 2 and len(calls) == 1 and calls[0]["batch"] == 2 and calls[0]["prompt"] == "1girl, autumn, beach"

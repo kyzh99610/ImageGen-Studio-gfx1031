@@ -131,10 +131,12 @@ def start_here_html() -> str:
         ("<b>5. Drawing style</b>", "<b>5. 画风</b>",
          "<b>As saved</b>: the setting's or card's own sampler (the measured 12-step recipe with PAG 2: thick outlines, hard light). "
          "<b>Softer lines</b>: 28 steps, CFG 5, no PAG: thinner outlines and gentler shading, the character as recognisable as before, no slower. "
-         "<b>Painterly</b>: Euler a, 28 steps: the softest, a little less like the character in the test. On Illustrious / NoobAI models only.",
+         "<b>Painterly</b>: Euler a, 28 steps: the softest, a little less like the character in the test. On Illustrious / NoobAI models only. "
+         "More steps were measured too: past these the picture changes small details but does not look better, and takes longer.",
          "<b>按设置</b>：用设置或角色卡自己的采样（实测的 12 步 + PAG 2 配方：描边粗、明暗硬）。"
          "<b>线条柔和</b>：28 步、CFG 5、不开 PAG，描边更细、明暗更柔，角色和原来一样好认，也不更慢。"
-         "<b>手绘感</b>：Euler a 28 步，最柔，测试里稍微没那么像角色。只对 Illustrious / NoobAI 模型生效。"),
+         "<b>手绘感</b>：Euler a 28 步，最柔，测试里稍微没那么像角色。只对 Illustrious / NoobAI 模型生效。"
+         "更多步数也测过：再往上加，画面只是细节在变，不会更好看，还更慢。"),
         ("<b>6. Shape, colour, how many</b>", "<b>6. 形状、色彩、张数</b>",
          "Tall / square / wide use the model family's own sizes. Soft colour = paler pictures, same drawing. Seed -1 = new pictures every time.",
          "竖图 / 方图 / 横图用这类模型自己的尺寸。柔和 = 颜色淡一些，画的内容不变。种子 -1 = 每次都是新图。"),
