@@ -54,7 +54,7 @@ def _e(s) -> str:
 def _env(ns):
     from backend import character_cards as CC, recipes as RC, settings_info as SI, zh_tags as ZT
     from backend.sd_pipeline import _model_family
-    from backend.model_manager import list_checkpoints, list_loras, list_vaes
+    from backend.model_manager import list_checkpoints, list_loras, list_vaes, lora_arch
     last = ns._read_last_session() if hasattr(ns, "_read_last_session") else {}
     ckpts = list_checkpoints()
     default = last.get("model") if isinstance(last.get("model"), str) and Path(last.get("model") or "").is_file() else (ckpts[0][1] if ckpts else "")
@@ -66,7 +66,7 @@ def _env(ns):
             return ""
     return SimpleNamespace(read_setting=lambda n: SI.read(ns.SETTINGS_DIR, ns._settings_name(n)) if ns._settings_name(n) else None,
                            load_card=CC.load_card, card_for_checkpoint=CC.card_for_checkpoint, card_prompt=CC.card_prompt,
-                           checkpoints=ckpts, loras=list_loras(), vaes=list_vaes(), family=family, recipe_for=RC.recipe_for,
+                           checkpoints=ckpts, loras=list_loras(), vaes=list_vaes(), family=family, lora_arch=lora_arch, recipe_for=RC.recipe_for,
                            default_model=default, to_tags=ZT.to_tags,
                            defaults=dict(scheduler=last.get("scheduler") or "DPM++ 2M Karras", steps=ns.DEFAULT_STEPS, cfg=ns.DEFAULT_CFG))
 
@@ -108,11 +108,12 @@ def plan_html(p: dict, measured: float | None = None) -> str:
     what = f" + <code>{_e(i['what'])}</code>" if i["what"] else ""
     rows.append(L(f"<b>Content</b>: {_e(src_en)}{what}", f"<b>内容</b>：{_e(src_zh)}{what}"))
     fr_en = {v: k for k, v in SM.FRAMINGS}[i["framing"]]
+    eyes = i.get("eyes", True)          # False on a Pony checkpoint: Generate skips the eye pass
     if SM.PO.is_auto(i["choice"]):
-        how_en = f"each picture gets the recipe for its own framing ({SM.recipe_words(i['picks'], False)})"
-        how_zh = f"每张图按自己的取景选配方（{SM.recipe_words(i['picks'], True)}）"
+        how_en = f"each picture gets the recipe for its own framing ({SM.recipe_words(i['picks'], False, eyes)})"
+        how_zh = f"每张图按自己的取景选配方（{SM.recipe_words(i['picks'], True, eyes)}）"
     else:
-        how_en, how_zh = SM.recipe_words(i["picks"], False), SM.recipe_words(i["picks"], True)
+        how_en, how_zh = SM.recipe_words(i["picks"], False, eyes), SM.recipe_words(i["picks"], True, eyes)
     rows.append(L(f"<b>Framing</b>: {_e(fr_en)} → {_e(how_en)}", f"<b>取景</b>：{SM.FRAMING_ZH[i['framing']]} → {_e(how_zh)}"))
     w, h = i["size"]
     seed_en = "a new seed each time" if i["seed"] < 0 else f"seed {i['seed']}"
@@ -125,7 +126,7 @@ def plan_html(p: dict, measured: float | None = None) -> str:
     else:
         t_en, t_zh = f"about {i['factor']:g}× the time of a plain picture", f"约为普通出图的 {i['factor']:g} 倍"
     rows.append(L(f"<b>Time</b>: {t_en}", f"<b>用时</b>：{t_zh}"))
-    rows.append(L(f"<b>Steps</b>: {SM.steps_text(i['picks'], False, i['passes'])}", f"<b>步骤</b>：{SM.steps_text(i['picks'], True, i['passes'])}"))
+    rows.append(L(f"<b>Steps</b>: {SM.steps_text(i['picks'], False, i['passes'], eyes)}", f"<b>步骤</b>：{SM.steps_text(i['picks'], True, i['passes'], eyes)}"))
     head = _p("What I'll do", "我将要做", "#cba6f7")
     body = "".join(f'<li style="margin:2px 0;">{r}</li>' for r in rows)
     notes = "".join(_p(en, zh, WARN) for en, zh in p["notes"])

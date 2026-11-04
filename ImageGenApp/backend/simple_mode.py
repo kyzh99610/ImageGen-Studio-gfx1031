@@ -172,7 +172,8 @@ def plan(choices: dict, env) -> dict:
 
     env: read_setting(name) -> dict | None, load_card(name) -> dict | None, card_for_checkpoint(card, ckpt) -> (card, profile key),
     card_prompt(card, outfit, scene) -> str, checkpoints / loras / vaes = [(file name, path)], family(path) -> str,
-    recipe_for(family) -> dict | None, default_model -> path or '', defaults = {scheduler, steps, cfg}, to_tags(text) -> (tags, unknown)."""
+    recipe_for(family) -> dict | None, default_model -> path or '', defaults = {scheduler, steps, cfg}, to_tags(text) -> (tags, unknown),
+    optionally lora_arch(path) -> 'sdxl' / 'sd1' / None (a LoRA of the other size class than the model is left out)."""
     c = clean_choices(choices)
     notes, errors = [], []
     a = dict(model_path="", vae_path="none", lora1="none", w1=0.8, lora2="none", w2=0.7, lora3="none", w3=0.7, auto_quality=True,
@@ -180,6 +181,7 @@ def plan(choices: dict, env) -> dict:
              width=0, height=0, batch=c["count"], seed=c["seed"], init_img=None, strength=0.75, use_i2i=False)
     extra: dict = {}
     source_label = ("", "")
+    own_family = ""          # the family the setting's / card's own size was made for (a chosen model of another size class re-fits it)
     what, unknown = env.to_tags(c["what"]) if c["what"].strip() else ("", [])
     if unknown:
         _note(notes, "These words aren't known to the models and were left out: " + "、".join(unknown) + ". Write them in English or as Danbooru tags.",
@@ -200,7 +202,8 @@ def plan(choices: dict, env) -> dict:
                 _note(errors, f"The setting's model {Path(str(d['model'])).name} isn't installed: pick a model.",
                       f"这个设置用的模型 {Path(str(d['model'])).name} 没有安装，请选一个模型。")
             a["model_path"] = chosen_model or saved or env.default_model
-            if chosen_model and saved and env.family(chosen_model) != env.family(saved):
+            own_family = env.family(saved) if saved else ""
+            if chosen_model and saved and env.family(chosen_model) != own_family:
                 _note(notes, "The chosen model is another family than the setting's: its LoRAs may not fit.",
                       "选的模型和设置原来的模型不是同一类，设置里的 LoRA 可能用不了。")
             slots = d.get("lora_slots")
@@ -248,6 +251,11 @@ def plan(choices: dict, env) -> dict:
                 _note(errors, f"The card's model {card.get('checkpoint') or '(none)'} isn't installed: pick a model.",
                       f"角色卡用的模型 {card.get('checkpoint') or '（无）'} 没有安装，请选一个模型。")
             a["model_path"] = want or env.default_model
+            if not profile:          # a profile for the chosen model carries its own LoRAs and size
+                own_family = env.family(card_ckpt) if card_ckpt else ""
+                if chosen_model and card_ckpt and env.family(chosen_model) != own_family:
+                    _note(notes, "The chosen model is another family than the card's: its LoRAs may not fit.",
+                          "选的模型和角色卡原来的模型不是同一类，角色卡里的 LoRA 可能用不了。")
             if card.get("vae"):
                 a["vae_path"] = _find(card["vae"], env.vaes) or "none"
             missing = []
@@ -297,7 +305,8 @@ def plan(choices: dict, env) -> dict:
         if r:
             a.update(scheduler=r["scheduler"], steps=r["steps"], cfg=r["cfg"])
             extra["pag_scale"] = r["pag"]
-        a["prompt"] = _join("1girl, solo" if what and not re.search(r"\b(\d\+?(girl|boy)s?|solo|no humans|multiple)\b", what) else "", what)
+        # a subject unless the words name one (or none: scenery)
+        a["prompt"] = _join("1girl, solo" if what and not re.search(r"\b(\d\+?(girl|boy)s?|solo|no humans|multiple|scenery)\b", what) else "", what)
 
     if c["variety"] != NO_WILDCARD:
         name = c["variety"].strip()
@@ -325,18 +334,47 @@ def plan(choices: dict, env) -> dict:
     extra["var_strength"] = 0.0
 
     fam = env.family(a["model_path"]) if a["model_path"] else ""
-    sizes = SIZES["sdxl" if fam in _SDXL_FAMILIES else "sd15"]
+    size_class = lambda f: "sdxl" if f in _SDXL_FAMILIES else "sd15"
+    sizes = SIZES[size_class(fam)]
+    # a LoRA made for the other size class can't load into this model (Generate would refuse the whole run): leave it out and say so
+    lora_arch = getattr(env, "lora_arch", None)
+    if lora_arch and fam:
+        dropped = []
+        for i in (1, 2, 3):
+            path = a[f"lora{i}"]
+            arch = lora_arch(path) if path not in ("none", "", None) else None
+            if arch and (arch == "sdxl") != (size_class(fam) == "sdxl"):
+                dropped.append(Path(str(path)).stem)
+                a[f"lora{i}"] = "none"
+        if dropped:
+            if all(a[f"lora{i}"] in ("none", "", None) for i in (1, 2, 3)):     # nothing left that 'may not fit': say what happened instead
+                notes[:] = [n for n in notes if "its LoRAs may not fit" not in n[0]]
+            kind_en, kind_zh = ("SD 1.5", "SD 1.5") if size_class(fam) == "sdxl" else ("SDXL", "SDXL")
+            _note(notes, f"Left out: LoRA {', '.join(dropped)} (made for {kind_en} models; this model can't load it).",
+                  f"已略过：LoRA {'、'.join(dropped)}（是给 {kind_zh} 模型用的，这个模型加载不了）。")
     if c["shape"] != "follow" or not (a["width"] and a["height"]):
         a["width"], a["height"] = sizes["tall" if c["shape"] == "follow" else c["shape"]]
+    elif own_family and fam and size_class(own_family) != size_class(fam):
+        # 'as saved' with a model of the other size class: an SDXL size on SD 1.5 draws doubled figures, an SD 1.5 size on SDXL is mush.
+        # Keep the shape, take the chosen model's size for it.
+        w, h = int(a["width"]), int(a["height"])
+        shape = "tall" if h > w * 1.1 else "wide" if w > h * 1.1 else "square"
+        a["width"], a["height"] = sizes[shape]
+        _note(notes, f"The saved size {w}×{h} is for the other model family: {a['width']}×{a['height']} instead (same shape).",
+              f"保存的尺寸 {w}×{h} 是给另一类模型的：改用 {a['width']}×{a['height']}（形状不变）。")
     if c["colour"] != "follow":
         extra["cs"] = COLOUR_VALUE[c["colour"]]
+    eyes = fam != "pony"          # Generate skips the eye pass on Pony checkpoints (app._eye_pass_skipped: it softened them, round 5)
+    if not eyes and (extra.get("ed_on") or choice != "(off)"):
+        _note(notes, "Pony checkpoints skip the eye pass (it made their eyes softer in the tests); the rest runs as planned.",
+              "Pony 模型不做眼睛重绘（测试里它会让眼睛变糊）；其余照计划进行。")
     a.update(extra)
 
     pk = {"fast": 1.0} if c["detail"] == "fast" else picks(a["prompt"], choice)
     info = dict(source=source_label, model=Path(str(a["model_path"])).stem if a["model_path"] else "",
                 loras=[(Path(str(a[f"lora{i}"])).stem, a[f"w{i}"]) for i in (1, 2, 3) if a[f"lora{i}"] not in ("none", "", None)],
                 what=what, choice=choice, picks=pk, factor=round(time_factor(pk, extra), 1), passes={k: extra.get(k) for k in FAST}, size=(a["width"], a["height"]), count=c["count"],
-                seed=c["seed"], framing=c["framing"], detail=c["detail"], family=fam,
+                seed=c["seed"], framing=c["framing"], detail=c["detail"], family=fam, eyes=eyes,
                 colour=extra.get("cs"), dynamic=WC.is_dynamic(a["prompt"]))
     return dict(args=a, notes=notes, errors=errors, info=info, choices=c)
 
@@ -348,8 +386,9 @@ def _w(v) -> float:
         return 0.8
 
 
-def steps_text(pk: dict, zh: bool, passes: dict | None = None) -> str:
-    """The stages the picture goes through, in words (from the most likely recipe; "passes" = the plan's own switched-on passes)."""
+def steps_text(pk: dict, zh: bool, passes: dict | None = None, eyes: bool = True) -> str:
+    """The stages the picture goes through, in words (from the most likely recipe; "passes" = the plan's own switched-on passes;
+    eyes=False: the model skips the eye pass, a Pony checkpoint)."""
     top = max(pk.items(), key=lambda kv: kv[1])[0] if pk else "passes"
     r = dict(FAST) if top == "fast" else dict(passes or {}) if top == "passes" else PO.recipe(top)
     stages = ["加载模型", "画底图"] if zh else ["load the model", "draw the picture"]
@@ -361,17 +400,18 @@ def steps_text(pk: dict, zh: bool, passes: dict | None = None) -> str:
         stages.append("修脸" if zh else "face")
     if r.get("md_on"):
         stages.append("2 倍放大" if zh else "2× upscale")
-    if r.get("ed_on"):
+    if r.get("ed_on") and eyes:
         stages.append("修眼睛" if zh else "eyes")
     stages.append("保存" if zh else "save")
     return " → ".join(stages)
 
 
-def recipe_words(pk: dict, zh: bool) -> str:
-    """'Cowboy shot — hires 80 %, Full body 20 %' in words."""
+def recipe_words(pk: dict, zh: bool, eyes: bool = True) -> str:
+    """'Cowboy shot — hires 80 %, Full body 20 %' in words (eyes=False: Fast is the plain picture, a Pony checkpoint)."""
     parts = []
+    fast = ("只修眼睛" if zh else "eyes only") if eyes else ("只画底图" if zh else "the plain picture")
     for n, w in sorted(pk.items(), key=lambda kv: -kv[1]):
-        name = (("按设置里的步骤" if zh else "the passes as set") if n == "passes" else ("只修眼睛" if zh else "eyes only") if n == "fast"
+        name = (("按设置里的步骤" if zh else "the passes as set") if n == "passes" else fast if n == "fast"
                 else (RECIPE_ZH.get(n, n) if zh else (PO.summary(n) or n)))
         parts.append(name + (f" {round(100 * w)} %" if len(pk) > 1 else ""))
     return ("；" if zh else "; ").join(parts)

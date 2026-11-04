@@ -29,14 +29,19 @@ def _warn(t: str) -> str:
 
 
 def _files_status() -> str:
-    parts = []
-    parts.append("DWPose: " + ("✅" if pc.dwpose_available() else "❌ missing"))
+    from backend.i18n import L
+    en, zh = [], []
+    ok = pc.dwpose_available()
+    en.append("DWPose: " + ("✅" if ok else "❌ missing")); zh.append("DWPose：" + ("✅" if ok else "❌ 缺少"))
     models = pc.list_models("pose")
-    parts.append("OpenPose ControlNet: " + (", ".join(models) if models else "❌ none in models/controlnet/"))
-    parts.append("depth estimator: " + ("✅" if comp.estimator_available() else "❌ missing"))
+    en.append("OpenPose ControlNet: " + (", ".join(models) if models else "❌ none in models/controlnet/"))
+    zh.append("OpenPose ControlNet：" + (", ".join(models) if models else "❌ models/controlnet/ 里没有"))
+    ok = comp.estimator_available()
+    en.append("depth estimator: " + ("✅" if ok else "❌ missing")); zh.append("深度估计模型：" + ("✅" if ok else "❌ 缺少"))
     depth = pc.list_models("depth")
-    parts.append("depth ControlNet: " + (", ".join(depth) if depth else "❌ none in models/controlnet/"))
-    return '<p style="color:#9399b2;font-size:12px;">' + html.escape(" · ".join(parts)) + "</p>"
+    en.append("depth ControlNet: " + (", ".join(depth) if depth else "❌ none in models/controlnet/"))
+    zh.append("深度 ControlNet：" + (", ".join(depth) if depth else "❌ models/controlnet/ 里没有"))
+    return '<p style="color:#9399b2;font-size:12px;">' + L(html.escape(" · ".join(en)), html.escape(" · ".join(zh))) + "</p>"
 
 
 DEPTH_ESTIMATOR_CHOICE = f"Depth estimator (Depth-Anything-V2-Small, {comp.ESTIMATORS[comp.ESTIMATOR_FILE]['mb']} MB, {comp.ESTIMATORS[comp.ESTIMATOR_FILE]['license']})"

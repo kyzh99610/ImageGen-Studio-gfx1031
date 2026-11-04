@@ -5092,15 +5092,15 @@ def _build_watermark_tab():
     )
 
     _ocr_note = (
-        "✅ EasyOCR installed — text detection enabled."
+        L("✅ EasyOCR installed — text detection enabled.", "✅ EasyOCR 已安装——可以检测文字。")
         if is_ocr_available() else
-        "⚠ EasyOCR not installed. Install with:  <code>pip install easyocr</code>  "
-        "Corner-watermark heuristic is still available."
+        L("⚠ EasyOCR not installed. Install with:  <code>pip install easyocr</code>  Corner-watermark heuristic is still available.",
+          "⚠ 没有安装 EasyOCR。安装命令：<code>pip install easyocr</code>　角落水印的检测仍然可用。")
     )
     _lama_note = (
-        "✅ LaMa ONNX available (auto-downloads ~100 MB on first use)."
+        L("✅ LaMa ONNX available (auto-downloads ~100 MB on first use).", "✅ LaMa ONNX 可用（第一次用时自动下载约 100 MB）。")
         if is_lama_available() else
-        "⚠ onnxruntime not found — LaMa unavailable."
+        L("⚠ onnxruntime not found — LaMa unavailable.", "⚠ 找不到 onnxruntime——LaMa 用不了。")
     )
 
     with gr.Tab("🗑️ Watermark Remover"):

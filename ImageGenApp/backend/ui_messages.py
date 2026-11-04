@@ -324,6 +324,160 @@ EXACT.update({
     "Drop Image Here": "把图片拖到这里", "- or -": "- 或 -", "Click to Upload": "点击上传", "Drop File Here": "把文件拖到这里",
     "Drop Video Here": "把视频拖到这里", "Drop Audio Here": "把音频拖到这里", "Upload": "上传", "Clear": "清除", "Undo": "撤销", "Redo": "重做",
     "Brush": "画笔", "Eraser": "橡皮擦", "Layers": "图层", "Crop": "裁剪", "Download": "下载", "Share": "分享", "Copy": "复制", "Copied!": "已复制",
+    "Upload an image": "上传一张图片", "select the draw tool to start": "选择画笔工具开始画", "or": "或",
+    "Built with Gradio": "由 Gradio 构建", "Clear canvas": "清空画布", "Upload button": "上传", "Paste button": "粘贴", "Image button": "图片", "Draw button": "画笔", "Erase button": "橡皮擦",
+})
+
+# static texts that stayed English in 中文 mode (the leftover check of 2026-11-03): headings, radio choices, guide fragments, Help cells.
+# Technical names stay as they are (samplers, model families, file names, the tags you type, hardware names).
+EXACT.update({
+    # Generate: the tag panels, the pose box, the settings guide, the editor
+    "✨ Quality": "✨ 质量", "👁 Fix Details": "👁 修细节", "💡 Lighting": "💡 光线", "🎨 Style Boost": "🎨 风格增强", "📐 Composition": "📐 构图",
+    "🧹 Clean Up": "🧹 清理", "🔞 Enhance (R18)": "🔞 增强（R18）", "🎨 Style": "🎨 画风", "👤 Subject": "👤 主体", "🔞 NSFW Basics": "🔞 成人：基础",
+    "💦 NSFW Acts": "💦 成人：动作", "🧬 Body": "🧬 身体", "🎭 Expression / Pose": "🎭 表情 / 姿势", "🎀 Outfit / Fetish": "🎀 服装 / 癖好",
+    "🚫 Negative tags": "🚫 反向标签", "➕ Positive": "➕ 正向", "➖ Negative": "➖ 反向",
+    "auto": "自动", "anime": "动漫", "photo": "照片", "Pose (skeleton)": "姿势（骨架）", "Composition (depth)": "构图（深度）",
+    "Est. VRAM": "预估显存", "Setting": "设置项", "Recommended": "推荐值", "Notes": "说明", "Sampler": "采样器",
+    # Bridge, Watermark, PNG Info, Civitai
+    "Denoise 0.30–0.40": "重绘幅度 0.30–0.40", "Stage 2 — SDXL Refinement": "第 2 步 — SDXL 细化", "🗑️ Removal Settings": "🗑️ 去除设置",
+    "Generate": "生成", "img2img": "图生图", ", or": "，或", "Upscale": "放大",
+    "Drop or upload an image to inspect its metadata.": "拖入或上传一张图片，查看它带的生成参数。", "Click": "点击",
+    # Train
+    "🛏️ Body pillows & extreme aspect ratios:": "🛏️ 抱枕图和极端长宽比：", "Images are": "图片", "not": "不会",
+    "forced to a square crop! This tool uses": "被强制裁成正方形！这个工具用", "aspect-ratio bucketing": "长宽比分桶",
+    "— each image is assigned to a resolution bucket that matches its shape (e.g., a 16:5 body pillow → 960×320 bucket for SD 1.5, 1920×640 for SDXL). Only a tiny center crop happens if the exact ratio doesn't exist.":
+        "——每张图会分到和它形状相符的分辨率桶里（例如 16:5 的抱枕图 → SD 1.5 用 960×320，SDXL 用 1920×640）。只有找不到完全相同的比例时，才会在中间裁掉一点点。",
+    "Your wide/tall images are preserved.": "宽图和长图都会保留原样。", ") or": "），或",
+    "How auto-captioning works:": "自动标注是怎么做的：",
+    "BLIP (a vision-language model, ~1 GB) generates a natural-language description for each image. The trigger word is auto-prepended. You can then edit individual captions below. After captioning, click":
+        "BLIP（一个看图说话的模型，约 1 GB）会给每张图写一句自然语言描述，并自动在最前面加上触发词。之后可以在下面逐条修改。标注完以后，点",
+    "Free BLIP RAM": "释放 BLIP 内存", "to reclaim memory before training.": "，在训练前把内存腾出来。", "overfitting": "过拟合",
+    "These defaults work well for most LoRAs. Only change them if you know what you're doing or want to experiment.":
+        "这些默认值适合大多数 LoRA。除非你清楚自己在做什么，或者想做实验，否则不用改。",
+    "Prepare": "准备",
+    # Studio Loop
+    "Render your": "把你的", "saved settings": "已保存的设置",
+    "round after round without you at the computer (overnight), score every picture and sort it into best / ok / review / reject under":
+        "一轮接一轮地出图，不用你守在电脑前（比如整夜），给每张图打分，并分进 best / ok / review / reject，位置在",
+    ". Settings that keep failing are parked, settings whose pictures you ⭐ (here or in History) get more. Stops at the stop time, the hour budget, or ⏹ Stop.":
+        "。一直失败的设置会被搁置，你加过 ⭐ 的（在这里或历史记录里）会多画。到停止时间、用完小时数，或按 ⏹ 停止时结束。",
+    "Evening:": "晚上：", "pick a plan (or pick saved settings / ➕ a whole folder and 💾 save it) →": "选一个计划（或者选几个已保存的设置 / ➕ 整个文件夹，再 💾 保存）→",
+    "(what is missing, time per round, how many rounds fit) →": "（缺什么、每轮多久、能跑几轮）→", "Morning:": "早上：",
+    "🔄 Status → browse best / ok / review / reject → ⭐ the pictures you like →": "🔄 状态 → 浏览 best / ok / review / reject → 给喜欢的图加 ⭐ →",
+    "in the run folder lists what each setting got wrong.": "（在这次运行的文件夹里）列出每个设置哪里出了问题。",
+    "saved setting": "已保存的设置", "per round": "每轮", "per picture": "每张", "checkpoint": "模型", "(off)": "（关闭）",
+    "best": "best 最好", "ok": "ok 还行", "review": "review 待看", "reject": "reject 淘汰",
+    # Settings
+    "⚖️ Prompt weights": "⚖️ 提示词权重", "A1111 (default)": "A1111（默认）", "Compel (stronger)": "Compel（更强）", "👁 Eye style": "👁 眼睛样式",
+    "Round pupils (default)": "圆瞳孔（默认）", "🧹 Negative hygiene": "🧹 反向提示词清理", "🌡 Power profile": "🌡 功耗档位",
+    "Full power (Turbo, unlimited CPU): cool 1.5 + pause above 88 °C": "满功率（Turbo，CPU 不限功率）：降温 1.5 + 超过 88 °C 暂停",
+    "Power-limited (USB-C charger, or Manual with a CPU limit): cool 0 + pause above 88 °C": "限功率（USB-C 充电器，或手动模式限制了 CPU 功率）：降温 0 + 超过 88 °C 暂停",
+    "Custom (the two sliders below)": "自定义（下面两个滑块）", "🌡 Cool mode": "🌡 降温模式", "🖥 GPU": "🖥 显卡",
+    "RDNA 4 — runs best on native ROCm (install_rocm.bat): about twice ZLUDA's speed on the RX 9070 XT.": "RDNA 4——用原生 ROCm 最好（install_rocm.bat）：在 RX 9070 XT 上大约是 ZLUDA 的两倍速度。",
+    "Vega iGPU — limited compute; CPU fallback may be faster for large models.": "Vega 核显——算力有限；大模型用 CPU 可能更快。",
+    "📂 Output folder": "📂 输出文件夹", "🔑 Hugging Face token (optional)": "🔑 Hugging Face 令牌（可选）", "📁 Installed models": "📁 已安装的模型",
+    "🔗 Links": "🔗 链接", "🔀 SmartSplit — Multi-Unit Pipeline": "🔀 多设备分流（SmartSplit）", "SmartSplit capable:": "可以用多设备分流：",
+    # Help: quick start and troubleshooting
+    "1. Pick a checkpoint": "1. 选一个模型", "2. Write a prompt": "2. 写提示词", "3. Generate": "3. 出图", "4. Add LoRAs": "4. 加 LoRA",
+    "5. Keep what you like": "5. 留下喜欢的", "6. Refine": "6. 精修", "Info line shows": "信息行显示", "⚠ VRAM over-committed": "⚠ VRAM over-committed（显存超量）",
+    "Images are black or noisy": "图片全黑或满是噪点", "You restart the app": "重启 app 之后", "A model / LoRA says": "模型 / LoRA 提示",
+    "incomplete": "incomplete（不完整）", "isn't a valid .safetensors file": "isn't a valid .safetensors file（不是有效的 .safetensors 文件）",
+    "A Civitai download says": "Civitai 下载提示", "interrupted": "interrupted（中断）", "You pasted a prompt with": "粘贴的提示词里有",
+    "tags": "标签", "You launch the app a second time": "再启动一次 app",
+    # Help: prompt syntax, parameters, models
+    "📏 token counter": "📏 词元计数", "⚠ warnings": "⚠ 警告", "🧹 Tidy prompts": "🧹 整理提示词", "Presets & tag chips": "预设和标签按钮",
+    "SDXL / Illustrious / Pony: 5 – 7 (6 = the measured recipe)": "SDXL / Illustrious / Pony：5 – 7（6 = 实测配方）", "-1 (random)": "-1（随机）",
+    "Width / Height": "宽 / 高", "🔍 Hires fix": "🔍 高清修复", "🔀 Variations": "🔀 变体", "✂️ CLIP skip": "✂️ CLIP 跳层", "✨ Face detail": "✨ 修脸",
+    "✋ Hand detail": "✋ 修手", "👁 Eye detail": "👁 修眼睛", "🌡 Cool mode / pause while hot (Settings)": "🌡 降温模式 / 过热暂停（设置）",
+    "✨ Polish (Generate tab)": "✨ 精修 Polish（生成页）", "⚖️ Prompt weights & colour bleeding": "⚖️ 提示词权重与串色", "🎲 Samplers on SDXL": "🎲 SDXL 上的采样器",
+    "🔁 Studio Loop (unattended rounds)": "🔁 工作室循环（无人值守，一轮轮出图）",
+    "🧭 Before you press Start: what a setting / a plan will do": "🧭 按开始之前：一个设置 / 计划会做什么",
+    "📇 Pictures from another run: drag one in, get its recipe back": "📇 别处出的图：拖进来，拿回它的配方",
+    "🔓 Where content is filtered, and who controls it": "🔓 内容在哪里过滤，由谁决定", "🎴 Every outfit of a card": "🎴 角色卡的每套服装",
+    "✨ SD detail pass (Upscale tab)": "✨ SD 细节重画（放大页）", "⚡ Use the measured recipe": "⚡ 使用实测配方",
+    "🧍 Pose control (Generate tab, under Colour strength)": "🧍 姿势控制（生成页，色彩强度下面）", "🔬 Sharpen eyes (Upscale tab)": "🔬 锐化眼睛（放大页）",
+    "🎚 PAG / FreeU / CFG rescale": "🎚 PAG / FreeU / CFG 重缩放", "🔤 Danbooru tags": "🔤 Danbooru 标签", "🎲 Wildcards": "🎲 通配符",
+    "🎴 Character cards": "🎴 角色卡", "🗑 Watermark remover": "🗑 去水印", "🏷 Interrogate (WD14)": "🏷 反推标签（WD14）", "📊 X/Y grid": "📊 X/Y 对比网格",
+    "(not supported here)": "（这里不支持）",
+    # Help: LoRA training
+    "16 (standard)": "16（标准）", "8 (lightweight)": "8（轻量）", "32+ (complex styles)": "32+（复杂画风）", "= rank (e.g. 16)": "= rank（例如 16）",
+    "Judge by": "看", "steps": "步数", "= images × epochs: 300–800 for a 16-image character": "= 图片数 × 轮数：16 张图的角色约 300–800 步",
+    "(20–50 epochs)": "（20–50 轮）", "✅ ON for characters": "✅ 角色：开", "❌ OFF for styles": "❌ 画风：关",
+    "automatic: base model in fp16, LoRA in fp32": "自动：基础模型用 fp16，LoRA 用 fp32", "attn (fast)": "attn（快）", "full (thorough)": "full（全面）", "✅ ON": "✅ 开",
+    "Forgot trigger word, weight too low, or base model mismatch.": "忘了写触发词、权重太低，或者基础模型不匹配。",
+    "Overfitting — too many epochs or LR too high.": "过拟合——轮数太多或学习率太高。", "LR too high or bad training data.": "学习率太高，或训练数据不好。",
+    "Alpha too low relative to rank.": "Alpha 相对 rank 太低。", "Weight space drift between model versions.": "不同版本的模型之间权重空间有偏移。",
+    "Aspect-ratio bucketing assigns each image to a resolution \"bucket\" that matches its shape. Only a tiny center crop (if any) is applied — your wide or tall images are preserved.":
+        "长宽比分桶会把每张图分到和它形状相符的分辨率“桶”里。最多只在中间裁掉一点点——宽图和长图都会保留。",
+    # Help: quality / negative / style / camera tag notes (the tag itself stays: it is what you type)
+    "Top-tier overall quality signal.": "最高档的整体质量信号。", "Paired with masterpiece for strongest effect.": "和 masterpiece 一起用效果最强。",
+    "Forces high detail rendering.": "强制画出高细节。", "Upscale-quality signal, more detail.": "高清质量信号，细节更多。",
+    "Reduces blurriness. Good for portraits.": "减少模糊，适合人像。", "Richer contrast and color range.": "对比度和色彩范围更丰富。",
+    "Adds cinematic texture.": "加上电影感的颗粒质感。", "Background blur effect.": "背景虚化效果。", "Dramatic professional lighting.": "有戏剧感的专业打光。",
+    "Forces photorealistic output.": "强制写实照片效果。", "Realistic camera photo feel.": "真实相机拍照的感觉。", "General quality booster.": "通用的质量增强。",
+    "More rendering detail everywhere.": "到处都画出更多细节。", "Forces micro-detail rendering.": "强制画出微小细节。",
+    "Strongly discourages low-quality outputs.": "强力避免低质量的图。", "Discourages blurry/flat results.": "避免模糊 / 平淡的结果。",
+    "Blocks mediocre mid-tier results.": "挡掉平庸的中等结果。", "Prevents compression artifacts.": "避免压缩瑕疵。", "Forces sharper output.": "让画面更清晰。",
+    "Prevents soft/unfocused rendering.": "避免发虚 / 失焦。", "Common defect — extra fingers on hands.": "常见毛病——手指多了。",
+    "Prevents finger count errors.": "避免手指数量出错。", "Prevents merged/webbed fingers.": "避免手指粘连 / 长蹼。", "Variant of the finger defect.": "手指毛病的另一种写法。",
+    "Broad hand deformity prevention.": "大范围避免手部变形。", "Improves overall hand quality.": "整体改善手的质量。", "Improves face rendering quality.": "改善脸的画质。",
+    "General anatomy errors.": "一般的人体结构错误。", "Prevents extra arms/legs.": "避免多出胳膊 / 腿。", "Prevents missing arms/legs.": "避免缺胳膊 / 少腿。",
+    "Weighted deformity prevention.": "加权避免变形。", "Severe deformity prevention.": "避免严重变形。", "Prevents watermark text in image.": "避免图里出现水印文字。",
+    "Prevents artist signature.": "避免画师签名。", "Prevents random text in image.": "避免图里出现乱七八糟的文字。", "Prevents cut-off compositions.": "避免构图被裁掉。",
+    "Keeps subject within frame.": "让主体留在画面里。", "Japanese animation style.": "日本动画风格。", "Black and white comic style.": "黑白漫画风格。",
+    "Photo-like realism.": "照片般的写实。", "CGI rendered look.": "CG 渲染的效果。", "Digital art illustration style.": "数字插画风格。",
+    "Traditional oil painting texture.": "传统油画质感。", "Soft watercolor art style.": "柔和的水彩画风。", "Flat cartoon shading like anime game.": "像动漫游戏那样的平涂卡通上色。",
+    "Professional design/fantasy art feel.": "专业设定稿 / 奇幻美术的感觉。", "Retro pixelated style.": "复古像素风。", "Tight crop on face/detail.": "紧贴脸部 / 细节的特写。",
+    "Head and shoulders framing.": "头和肩膀的取景。", "Full body shot.": "全身照。", "Chest and above.": "胸部以上。", "Bird's-eye / top-down angle.": "鸟瞰 / 从上往下的角度。",
+    "Upward angle, exaggerates legs/height.": "仰视角度，显得腿长、个子高。", "View from behind the character.": "从角色背后看。", "Tilted/dramatic camera angle.": "倾斜 / 有戏剧感的镜头角度。",
+    "Environmental/landscape framing.": "带环境 / 风景的取景。", "Point-of-view shot.": "第一人称视角。", "Character makes eye contact with camera.": "角色看着镜头。",
+    "Flushed cheeks.": "脸颊泛红。", "Hearts in eyes, love/ecstasy expression.": "眼里有爱心，表示喜爱 / 陶醉的表情。", "More specific heart pupil tag.": "更具体的爱心瞳孔标签。",
+    # Help: hardware
+    "Go to": "进入", "tab → check": "标签页 → 勾选", "CLIP-L and OpenCLIP-G are exported to ONNX once per model (cached in": "CLIP-L 和 OpenCLIP-G 每个模型导出一次 ONNX（缓存在",
+    "Subsequent runs use the integrated GPU via DirectML (the app finds it by name — DML device order differs per PC). On a 780M: ~115ms total vs ~6.4s CPU =":
+        "之后通过 DirectML 用核显运行（app 按名字找它——每台电脑的 DML 设备顺序不一样）。在 780M 上：共约 115 毫秒，CPU 约 6.4 秒 =",
+    "56× speedup": "快 56 倍", "Quality is identical: cosine similarity >0.9998 vs CPU baseline.": "质量完全一样：和 CPU 结果的余弦相似度 >0.9998。",
+    "Supports long prompts (>77 tokens): 75-token chunks cut at tag boundaries; BREAK starts a new one.": "支持长提示词（>77 个词元）：在标签边界切成 75 个词元一段；BREAK 另起一段。",
+    "On a GPU backend (ZLUDA or native ROCm) it stays off and says why: the text encoders already run on the card (~0.5 s for a new prompt, a repeated one is cached), and the iGPU would save under 0.3 s while its export and sessions hold ~6 GB of memory. It is for the DirectML backend.":
+        "在显卡后端（ZLUDA 或原生 ROCm）上它保持关闭并说明原因：文本编码本来就在显卡上跑（新提示词约 0.5 秒，重复的会缓存），核显只能省不到 0.3 秒，"
+        "导出和会话却要占约 6 GB 内存。它是给 DirectML 后端用的。",
+    "Black/noisy images or NaN errors after a driver, ROCm or ZLUDA update? Run": "驱动、ROCm 或 ZLUDA 更新后出现黑图、噪点或 NaN 错误？运行",
+    "on native ROCm) in the": "用于原生 ROCm），位置在", "folder.": "文件夹。",
+    "It compares GPU results for matrix multiply, convolution, attention and GroupNorm against the CPU and fails loudly if the GPU backend returns wrong numbers.":
+        "它把显卡算出的矩阵乘法、卷积、注意力和 GroupNorm 结果和 CPU 对比，显卡后端算错时会明确报错。",
+    "If generation suddenly becomes very slow, check the info line for": "如果出图突然变得很慢，看看信息行里有没有",
+    "— Windows spills to system RAM instead of reporting out-of-memory. Lower the resolution or batch size.": "——Windows 显存不够时不会报错，而是溢出到系统内存。请降低分辨率或批量。",
+    "Launch via": "用", "(ZLUDA or native ROCm must be active for dGPU detection).": "启动（要检测到独显，必须启用 ZLUDA 或原生 ROCm）。", "tab →": "标签页 →",
+    "section.": "那一节。", "If it shows as": "如果显示", "capable": "可用", ", check": "，勾选", "Enable SmartSplit": "启用多设备分流",
+    "Choose Text Encoder device (CPU / iGPU — or NPU when one is detected) and VAE device (CPU / iGPU).": "选择文本编码器设备（CPU / 核显——检测到 NPU 时也可以选 NPU）和 VAE 设备（CPU / 核显）。",
+    "Apply SmartSplit Config": "应用分流配置", "Load any": "加载任意一个", "model — the SmartSplit pipe auto-builds.": "模型——多设备分流管线会自动建好。",
+    "⚠️ SmartSplit is": "⚠️ 多设备分流", "not used for SDXL": "不用于 SDXL", "— SDXL uses the accelerated text encoding above instead.": "——SDXL 改用上面的加速文本编码。",
+    "⚠️ Nothing is offloaded to a": "⚠️ 不会把任何阶段分给", "Vega-class iGPU": "Vega 级核显",
+    "(Ryzen 2000–5000 and 7030-series APUs and the older A-series ones, e.g. an RX 6800M laptop's): its SD 1.5 VAE decode took 8 s against the RX 6800M's 0.5 s and then hung it (a driver reset of the GPU that drives the screen). SmartSplit and the accelerated text encoding say so and stay off there.":
+        "（锐龙 2000–5000 和 7030 系列 APU，以及更早的 A 系列，例如 RX 6800M 笔记本里的那块）：它的 SD 1.5 VAE 解码要 8 秒，RX 6800M 只要 0.5 秒，"
+        "之后还卡死了它（负责显示的那块显卡触发了驱动重置）。多设备分流和加速文本编码会说明原因并保持关闭。",
+    # Help: glossary definitions (the 中文 column is the term's name)
+    "The main model file (.safetensors / .ckpt). Everything else builds on top.": "主模型文件（.safetensors / .ckpt），其它一切都建立在它上面。",
+    "Small add-on weight file that tweaks style/subject/behavior.": "小的附加权重文件，用来调整画风 / 主体 / 行为。",
+    "Advanced LoRA variants with broader network coverage.": "覆盖网络更广的高级 LoRA 变体。", "Decoder that converts latents to pixels. Affects color.": "把潜空间数据解码成像素的解码器，会影响颜色。",
+    "Latent space": "潜空间", "Compressed mathematical representation of images the model works in.": "模型工作时所用的、压缩过的图像数学表示。",
+    "Denoising": "去噪", "The core SD process: iteratively remove noise to form an image.": "SD 的核心过程：一步步去掉噪声，形成图像。",
+    "How strictly the model follows your prompt vs its own creativity.": "模型在多大程度上照你的提示词画，而不是自由发挥。",
+    "Algorithm controlling how denoising steps proceed.": "决定去噪步骤怎么进行的算法。", "Number that initializes noise. Same seed + same settings = same image.": "用来生成初始噪声的数字。相同种子 + 相同设置 = 相同的图。",
+    "Another type of fine-tuning stored as small vector files.": "另一种微调方式，保存成很小的向量文件。", "Safer model file format (.safetensors) replacing .ckpt/.pt.": "更安全的模型文件格式（.safetensors），取代 .ckpt / .pt。",
+    "Stable Diffusion XL — higher resolution, two-stage model.": "Stable Diffusion XL——分辨率更高的两段式模型。",
+    "Generate a new image using an existing image as starting point.": "以一张现有的图为起点生成新图。", "Generate an image from text prompts alone.": "只用文字提示词生成图片。",
+    "Inpainting": "局部重绘", "Fill/edit masked regions of an existing image.": "填充 / 修改现有图片里被蒙版盖住的区域。",
+    "Adds structural control (pose, depth, edges) to generation.": "给出图加上结构控制（姿势、深度、边缘）。", "Trigger word": "触发词",
+    "Keyword required to activate a LoRA's trained content.": "激活 LoRA 所学内容需要的关键词。", "Parameter-Efficient Fine-Tuning — the library powering multi-LoRA.": "参数高效微调——支撑多 LoRA 的库。",
+    "AMD GPU CUDA emulation layer — makes AMD GPUs work with CUDA code.": "AMD 显卡的 CUDA 模拟层——让 AMD 显卡能跑 CUDA 代码。",
+    "Microsoft's vendor-neutral GPU API for any DX12 capable GPU.": "微软的通用显卡接口，支持所有能跑 DX12 的显卡。",
+    "Portable model format used for NPU/iGPU inference in SmartSplit.": "可移植的模型格式，多设备分流用它在 NPU / 核显上推理。",
+    "Core denoising network. The largest, most compute-intensive component.": "核心的去噪网络，最大、最耗算力的部分。",
+    "Text encoder that converts your prompt into vectors the model understands.": "文本编码器，把提示词变成模型能理解的向量。",
+    "SD1.5, 512×512, no LoRA": "SD1.5，512×512，不带 LoRA", "SD1.5, 768×768, + LoRA": "SD1.5，768×768，+ LoRA",
+    "SDXL, 1024×1024, no LoRA": "SDXL，1024×1024，不带 LoRA", "SDXL, 1024×1024, + LoRA": "SDXL，1024×1024，+ LoRA",
+    "SDXL, 1024×1024, 3× LoRA": "SDXL，1024×1024，3 个 LoRA", "✨ Polish": "✨ 精修", "Cowboy shot — hires": "Cowboy shot — hires（半身 + 高清修复）",
 })
 
 TEMPLATES += [
@@ -363,6 +517,11 @@ TEMPLATES += [
     ("✅ Prompt weights: {}", "✅ 提示词权重：{}"), ("✅ Saved plan “{}”", "✅ 已保存计划“{}”"), ("✅ Tagged {} images (trigger word first, then Danbooru tags){}", "✅ 已给 {} 张图打标签（先写触发词，再写 Danbooru 标签）{}"),
     ("✅ {} folder(s), {} pictures listed in their manifests", "✅ {} 个文件夹，清单里列了 {} 张图"), ("✅ {} images scanned ·", "✅ 扫描了 {} 张图 ·"), ("✅ {}: pause {}× the step time, {}", "✅ {}：每步后暂停该步时间的 {} 倍，{}"),
     ("❌ Training failed: {}", "❌ 训练失败：{}"),
+    ("🧹 Merged: {}", "🧹 已合并：{}"), ("{} min", "{} 分钟"), ("{} min ~", "{} 分钟 ~"), ("{} round(s)", "{} 轮"),
+    ("Shared RAM iGPU (~{} GB usable for ML).", "共享内存的核显（约 {} GB 可用于 AI）。"),
+    ("Shared RAM iGPU (~{} GB usable for ML). Vega iGPU — limited compute; CPU fallback may be faster for large models.",
+     "共享内存的核显（约 {} GB 可用于 AI）。Vega 核显——算力有限；大模型用 CPU 可能更快。"),
+    ("NPU: {} (via bridge → Ryzen AI environment)", "NPU：{}（经桥接 → Ryzen AI 环境）"),
     (", ~{} pictures. ‘~’ = a rough estimate with the heat pause (no loop run has timed that setting yet); settings that keep failing get parked and starred ones get more, so later rounds differ.",
      "，约 {} 张图。“~” = 包含过热暂停的粗略估计（还没有循环给这个设置计过时）；一直失败的设置会被搁置，加星的会多画，所以后面的轮次会不一样。"),
 ]

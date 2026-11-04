@@ -20,6 +20,8 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from backend.i18n import L
+
 # Caption tags that say nothing about what a LoRA learned (quality/meta/rating tags)
 _META = {
     "highres", "absurdres", "lowres", "commentary", "commentary request", "english commentary",
@@ -189,7 +191,8 @@ def chips_for(slots: list[tuple[str, str]]) -> tuple[list[list[str]], list[list]
         if not kw.triggers and not kw.tags:
             if label == "Model":          # most checkpoints carry no keyword data — not worth a note
                 continue
-            notes.append(f"{label} <b>{_esc(kw.name)}</b>: no keyword data (try 🔍 Fetch trigger words from Civitai)")
+            notes.append(f"{label} <b>{_esc(kw.name)}</b>" + L(": no keyword data (try 🔍 Fetch trigger words from Civitai)",
+                                                                 "：没有关键词数据（可以试试 🔍 从 Civitai 获取触发词）"))
             continue
         for i, ph in enumerate(kw.phrases):
             n = len(ph.split(","))
@@ -212,19 +215,26 @@ def chips_for(slots: list[tuple[str, str]]) -> tuple[list[list[str]], list[list]
             seen.add(_key(t))
             samples.append([f"{label} {t} · {c:.0%}"])
             tags.append([t, False])
-        src = ("Civitai trigger words" + (f" + {len(kw.phrases)} ready-made prompt(s) 📋" if kw.phrases else "")
-               if kw.source == "civitai" else
-               "likely triggers (in ≥90 % of its training images)" if kw.inferred else kw.source)
+        if kw.source == "civitai":
+            src = "Civitai trigger words" + (f" + {len(kw.phrases)} ready-made prompt(s) 📋" if kw.phrases else "")
+            src_zh = "Civitai 上的触发词" + (f" + {len(kw.phrases)} 条现成提示词 📋" if kw.phrases else "")
+        elif kw.inferred:
+            src, src_zh = "likely triggers (in ≥90 % of its training images)", "可能的触发词（出现在 ≥90 % 的训练图里）"
+        else:
+            src, src_zh = kw.source, {"training tags": "训练标签"}.get(kw.source, kw.source)
         if kw.n_images:
             src += f", tags from {kw.n_images} training images"
-        notes.append(f"{label} <b>{_esc(kw.name)}</b>: {src}")
+            src_zh += f"，标签来自 {kw.n_images} 张训练图"
+        notes.append(f"{label} <b>{_esc(kw.name)}</b>" + L(f": {src}", f"：{src_zh}"))
     note = ""
     if notes:
-        note = ('<p style="font-size:13px;color:#a6adc8;margin:2px 0;">🏷️ Click a keyword to add it to the '
-                'prompt (duplicates are merged, the stronger weight wins). 🔑 = trigger word, 🗝 = likely trigger, '
-                '📋 = the creator’s full prompt (e.g. an outfit), '
-                '% = share of the training images that had the tag — higher means the LoRA ties it to its '
-                'subject more strongly.<br>' + "<br>".join(notes) + "</p>")
+        note = ('<p style="font-size:13px;color:#a6adc8;margin:2px 0;">🏷️ '
+                + L("Click a keyword to add it to the prompt (duplicates are merged, the stronger weight wins). 🔑 = trigger word, "
+                    "🗝 = likely trigger, 📋 = the creator’s full prompt (e.g. an outfit), % = share of the training images that had the "
+                    "tag — higher means the LoRA ties it to its subject more strongly.",
+                    "点一下关键词就会加进提示词（重复的会合并，取较强的权重）。🔑 = 触发词，🗝 = 可能的触发词，"
+                    "📋 = 作者给的完整提示词（例如一套服装），% = 带这个标签的训练图占比——越高说明这个 LoRA 越把它和主体绑在一起。")
+                + '<br>' + "<br>".join(notes) + "</p>")
     return samples, tags, note
 
 

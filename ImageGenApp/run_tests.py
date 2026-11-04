@@ -9021,6 +9021,32 @@ def _():
             assert r.returncode == 0, (js[:120], r.stderr[-400:])
     acc = [c["props"].get("label") for c in comps if c["type"] == "accordion"]
     assert "🪄 Start here" in acc and tab["🪄 Start here"] == "🪄 新手指南"
+    # nothing static stays English in 中文 mode (the leftover check of 2026-11-03 found ~500 such texts): every Help section, every
+    # Markdown heading and every radio choice, apart from technical names (samplers, model families, file / hardware names, values)
+    def technical(t):
+        words = [w for w in _re.findall(r"[^\s,;:()\[\]·→—–=+|]+", t) if not _re.search(r"[\d_/.×@#<>{}\\]", w)]
+        plain = [w for w in words if _re.fullmatch(r"[a-z][a-z'\-]{2,}", w)]           # lowercase words; Capitalised / CamelCase / CAPS = names
+        return len(plain) < 2
+    help_texts = []
+    for name in sorted(n for n in dir(H) if n.endswith("_html") and not n.startswith("_")):
+        help_texts += I.text_nodes(getattr(H, name)())
+    left = sorted({t for t in I.english_left(help_texts) if not technical(t)})
+    assert not left, left[:20]                                                  # a new Help text needs its <span class="cn"> or an EXACT entry
+    heads = [c["props"]["value"].strip().lstrip("#").strip() for c in comps if c["type"] == "markdown"
+             and isinstance(c["props"].get("value"), str) and c["props"]["value"].strip().startswith("#") and "\n" not in c["props"]["value"].strip()]
+    left = [t for t in I.english_left(heads) if not technical(t)]
+    assert heads and not left, left
+    radios = [ch[0] if isinstance(ch, (list, tuple)) else str(ch) for c in comps if c["type"] == "radio" for ch in c["props"].get("choices") or []]
+    left = [t for t in I.english_left(radios, prose=False) if not technical(t)]
+    assert not left, left
+    for t in ("Drop or upload an image to inspect its metadata.", "How auto-captioning works:", "✨ Quality", "Est. VRAM", "Render your", "Evening:"):
+        assert not I.english_left([t]), t                                        # guide blocks on the tabs
+    assert I.text_nodes('<p>a b<code>x y</code><span class="ig-en">c d</span><li>e f</p>') == ["a b", "e f"]
+    # the token counter under the prompt and the keyword note carry both languages
+    from backend.prompt_tools import token_report_html
+    tr = token_report_html("1girl, golden hour, night city", "")
+    assert "个词元" in tr and "tokens" not in tr.split('class="ig-zh"')[1].split("</span>")[0] and "光线标签互相矛盾" in tr and "lighting tags disagree" in tr
+    assert "class=\"ig-en\"" in token_report_html("", "") and "正向：空" in token_report_html("", "")
 
 
 @test("🪄 Quick picture plan: a saved setting runs as saved (adult ones too), a chosen framing replaces the prompt's framing tags and runs that recipe, Fast / Standard / Best map onto the measured Polish recipes (Auto — best per picture), a card picks its profile and a random outfit per picture, a plain prompt gets its family's measured recipe, Chinese words become tags")
@@ -9064,6 +9090,34 @@ def _():
     assert (a["width"], a["height"], a["cs"]) == (1024, 1024, 0.75)
     a = plan(source="setting", setting="everyday/walk", model="sd15.safetensors", shape="square", colour="vivid")["args"]
     assert (a["model_path"], a["width"], a["cs"]) == ("/m/sd15.safetensors", 512, 1.0)
+    # 'as saved' on a chosen model of the other size class: the size is re-fitted, same shape (an SDXL size on SD 1.5 draws doubled figures)
+    p = plan(source="setting", setting="everyday/walk", model="sd15.safetensors")
+    assert (p["args"]["width"], p["args"]["height"]) == (512, 768) and any("832×1216" in en for en, _ in p["notes"])
+    assert (plan(source="setting", setting="everyday/walk", model="hassaku.safetensors")["args"]["width"], 1216) == (832, 1216)
+    settings["everyday/wide"] = dict(settings["everyday/walk"], width=1216, height=832)
+    a = plan(source="setting", setting="everyday/wide", model="sd15.safetensors")["args"]
+    assert (a["width"], a["height"]) == (768, 512)
+    env.load_card = lambda n: dict(card, width=832, height=1216)
+    p = plan(source="card", card="Her", model="sd15.safetensors")              # no profile for it: the card's LoRAs may not fit, the size re-fitted
+    assert (p["args"]["width"], p["args"]["height"]) == (512, 768) and any("another family than the card" in en for en, _ in p["notes"])
+    p = plan(source="card", card="Her", model="hassaku.safetensors")           # its profile: no family note
+    assert not any("another family" in en for en, _ in p["notes"]) and (p["args"]["width"], p["args"]["height"]) == (832, 1216)
+    env.load_card = lambda n: dict(card) if n == "Her" else None
+    assert plan(source="prompt", what="scenery, lake")["args"]["prompt"] == "scenery, lake"          # no '1girl, solo' added to a scenery prompt
+    # a LoRA made for the other size class is left out with a note (Generate would refuse the whole run: 'is an SDXL LoRA, but …')
+    env.lora_arch = lambda p: "sdxl" if "her" in str(p) else None
+    p = plan(source="setting", setting="everyday/walk", model="sd15.safetensors")
+    assert p["args"]["lora1"] == "none" and any("Left out: LoRA her" in en for en, _ in p["notes"]) and not p["info"]["loras"]
+    assert not any("may not fit" in en for en, _ in p["notes"])                # no LoRA left: the vaguer note goes
+    assert plan(source="setting", setting="everyday/walk")["args"]["lora1"] == "/l/her.safetensors"     # the right class keeps it
+    del env.lora_arch
+    # a Pony checkpoint: Generate skips the eye pass there, so the plan box doesn't promise it
+    fam0, env.family = env.family, (lambda p: "pony")
+    p = plan(source="prompt", what="1girl, smile", detail="fast")
+    assert p["info"]["eyes"] is False and any("Pony checkpoints skip the eye pass" in en for en, _ in p["notes"])
+    assert "eyes" not in SM.steps_text(p["info"]["picks"], False, p["info"]["passes"], False) and SM.recipe_words({"fast": 1.0}, False, False) == "the plain picture"
+    env.family = fam0
+    assert plan(source="prompt", what="1girl", detail="fast")["info"]["eyes"] is True
     # an adult saved setting is planned like any other (the app filters nothing)
     p = plan(source="setting", setting="explicit/one")
     assert not p["errors"] and p["args"]["prompt"] == "1girl, nsfw" and p["args"]["polish"] == "Auto"

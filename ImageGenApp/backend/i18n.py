@@ -99,6 +99,56 @@ def missing(blocks) -> list[str]:
     return sorted(set(miss))
 
 
+def text_nodes(html: str) -> list[str]:
+    """The text pieces of an HTML block as the page's script sees them (each one is swapped as a whole): text in textarea / input /
+    select / code / pre / script / style / svg and in .ig-en / .ig-notr is left out, and so are .hg-code spans (a tag in the Help,
+    which stays what you type)."""
+    from html.parser import HTMLParser
+    skip_tags = {"textarea", "input", "select", "code", "pre", "script", "style", "svg"}
+    skip_cls = {"ig-en", "ig-notr", "hg-code"}
+    void = {"br", "img", "hr", "input", "meta", "link", "wbr", "col", "source"}
+
+    class _P(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.stack, self.out = [], []
+
+        def handle_starttag(self, tag, attrs):
+            if tag not in void:
+                cls = set((dict(attrs).get("class") or "").split())
+                self.stack.append((tag, tag in skip_tags or bool(cls & skip_cls)))
+
+        def handle_endtag(self, tag):
+            if tag in void or not any(t == tag for t, _ in self.stack):
+                return
+            while self.stack and self.stack.pop()[0] != tag:     # an unclosed <p> / <li> is closed with its parent
+                pass
+
+        def handle_data(self, data):
+            t = re.sub(r"\s+", " ", data).strip()
+            if t and not any(s for _, s in self.stack):
+                self.out.append(t)
+    p = _P()
+    p.feed(html or "")
+    return p.out
+
+
+def english_left(texts, prose: bool = True) -> list[str]:
+    """The texts (text_nodes, labels) that the switch would leave English in 中文 mode: no entry, no template (templates apply in
+    HTML / Markdown blocks only: prose=False for other places), no Chinese of their own."""
+    from backend import ui_messages as M
+    tab, ex = table(), M.exact()
+    out = []
+    for t in texts:
+        n = M._norm(t)
+        if not n or has_zh(n) or not re.search(r"[A-Za-z]{2}", n) or n in tab or n in ex:
+            continue
+        if prose and M.translate(n) is not None:
+            continue
+        out.append(n)
+    return out
+
+
 CSS = """
 html:not([data-ig-lang="en"]) .ig-en { display: none !important; }
 html[data-ig-lang="en"] .ig-zh { display: none !important; }
