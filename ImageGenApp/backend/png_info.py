@@ -195,6 +195,8 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
         result["face_detail"] = {"denoise": float(m.group(1)), "detector": m.group(2), "prompt": ""}
     if re.search(r"\bEmphasis: Compel\b", param_text):
         result["emphasis"] = "compel"
+    elif re.search(r"\bEmphasis: Norm-keep\b", param_text):
+        result["emphasis"] = "a1111_normkeep"
     m = re.search(r"\bHand detail: denoise ([0-9.]+)", param_text)
     if m:
         result["hand_detail"] = {"denoise": float(m.group(1))}
@@ -214,9 +216,9 @@ def read_image_metadata(image_or_path: Image.Image | str | Path) -> dict[str, An
         result["composition_control"] = {"model": m.group(1).strip(), "strength": float(m.group(2))}
     if re.search(r"\bMax detail: 2× Real-ESRGAN\b", param_text):
         result["max_detail"] = {"scale": 2, "method": "Real-ESRGAN (ONNX)"}
-    m = re.search(r"\bPolish: ([^,]+?) \(auto\)", param_text)                       # round 50: only Auto names the recipe that ran
+    m = re.search(r"\bPolish: ([^,]+?) \(auto( — best)?\)", param_text)                 # round 50: only Auto names the recipe that ran (2026-11-03: "— best" = Auto — best)
     if m:
-        result["polish"] = {"recipe": m.group(1).strip(), "auto": True}
+        result["polish"] = {"recipe": m.group(1).strip(), "auto": True, **({"best": True} if m.group(2) else {})}
 
     # ImageGen Studio's own record: exact model / VAE / LoRA files and weights
     rec = _parse_json(info.get("imagegen")) if "imagegen" in info else None

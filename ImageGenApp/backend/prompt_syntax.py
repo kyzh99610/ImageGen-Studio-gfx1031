@@ -97,17 +97,56 @@ _patch_compel_fragment()
 
 
 # How "(tag:1.3)" weights act on the text embedding.
-#   "a1111"  — A1111's default ("Original" emphasis): each token's embedding × its weight, then the chunk is rescaled
-#              so its mean is what it was unweighted. Civitai prompts are written for this.
+#   "a1111_normkeep" — Norm-keep, the default since 2026-11-03: each token's embedding × its weight, then the chunk is
+#              rescaled so its tokens keep their mean LENGTH (L2 norm). A weight lifts a tag over its neighbours and the
+#              chunk keeps its strength on both of SDXL's encoders.
+#   "a1111"  — A1111's "Original" emphasis: the same multiply, then the chunk is rescaled to its unweighted MEAN VALUE.
+#              On SDXL's CLIP-L that mean sits near zero, so the factor swings with the content (measured on the
+#              laptop, on a lab preset: ×0.57 for the weighted tokens of one chunk and ×0.38 for the plain ones beside them, ×1.55–1.76 for
+#              a whole other chunk), and a chunk of five body-surface phrases at 1.5 drew blobs on both cheeks in 7 of 8
+#              pictures (Norm-keep 1 of 8; laptop RX 6800M, 4 seeds, rated blind). A1111 rescales each encoder alone
+#              too, so this is A1111's own behaviour, kept for pictures made with it.
 #   "compel" — Compel's own: empty + (z − empty) × w, no renormalisation, and weights < 1 blend toward the prompt
 #              without that tag. Measured (SD 1.5, 5 coloured scenes, scene tags at 1.3): background colour in the
 #              character's hair +15 over unweighted with Compel — far stronger than the same prompt in A1111.
-EMPHASIS = {"mode": "a1111"}
+DEFAULT_MODE = "a1111_normkeep"
+MODES = ("a1111_normkeep", "a1111", "compel")
+MODE_LABELS = {"a1111_normkeep": "Norm-keep", "a1111": "A1111 (old)", "compel": "Compel"}
+EMPHASIS = {"mode": DEFAULT_MODE}
+
+
+def emphasis_mode(mode) -> str:
+    """A mode name, a Settings label or a saved pref → one of MODES ("A1111 (old)" / "a1111" → a1111; unknown → the default)."""
+    s = str(mode or "").strip().lower()
+    if s.startswith("compel"):
+        return "compel"
+    if "norm" in s:
+        return "a1111_normkeep"
+    if s.startswith("a1111"):
+        return "a1111"
+    return DEFAULT_MODE
 
 
 def set_emphasis(mode: str) -> str:
-    EMPHASIS["mode"] = "compel" if str(mode).lower().startswith("compel") else "a1111"
+    EMPHASIS["mode"] = emphasis_mode(mode)
     return EMPHASIS["mode"]
+
+
+def rescale_chunk(z, cw, mode: str):
+    """One encoder's 77-token chunk `z` [1, n, dim] with its per-token weights `cw` [n], weighted the A1111 way:
+    multiply each token, then rescale the chunk — Norm-keep keeps the tokens' mean L2 norm, "a1111" the chunk's mean value."""
+    w = cw.reshape(1, -1, 1).to(z)
+    if mode == "a1111":
+        before = z.float().mean()
+        z = z * w
+        after = z.float().mean()
+    else:
+        before = z.float().norm(dim=-1).mean()
+        z = z * w
+        after = z.float().norm(dim=-1).mean()
+    if abs(float(after)) < 1e-12:                    # every weight 0: nothing to rescale against
+        return z
+    return z * (before / after).to(z)
 
 
 def _patch_compel_emphasis() -> None:
@@ -121,7 +160,8 @@ def _patch_compel_emphasis() -> None:
 
     def get_embeddings_for_weighted_prompt_fragments(self, text_batch, fragment_weights_batch,
                                                      should_return_tokens=False, device="cpu"):
-        if EMPHASIS["mode"] != "a1111" or all(all(w == 1 for w in ws) for ws in fragment_weights_batch):
+        mode = EMPHASIS["mode"]
+        if mode == "compel" or all(all(w == 1 for w in ws) for ws in fragment_weights_batch):
             return orig(self, text_batch, fragment_weights_batch, should_return_tokens=should_return_tokens,
                         device=device)
         import torch
@@ -136,9 +176,7 @@ def _patch_compel_emphasis() -> None:
                 z = self._encode_token_ids_to_embeddings(ids, m)
                 cw = w[s:s + n]
                 if bool((cw != 1).any()):
-                    before = z.float().mean()
-                    z = z * cw.reshape(1, -1, 1).to(z)
-                    z = z * (before / z.float().mean()).to(z)
+                    z = rescale_chunk(z, cw, mode)
                 zs.append(z)
             z = torch.cat(zs, dim=1)                         # [1, tokens, dim], as Compel's own method
             batch_z = z if batch_z is None else torch.cat([batch_z, z], dim=1)

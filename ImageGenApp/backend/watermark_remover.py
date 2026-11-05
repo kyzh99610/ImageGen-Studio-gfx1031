@@ -61,6 +61,7 @@ _ocr_langs: list[str] | None = None
 def _get_ocr_reader(langs: list[str]):
     global _ocr_reader, _ocr_langs
     if _ocr_reader is None or _ocr_langs != langs:
+        _memory.make_room(OCR_COMMIT_GB)
         import easyocr
         try:
             import torch
@@ -68,16 +69,53 @@ def _get_ocr_reader(langs: list[str]):
             # EasyOCR's cuDNN RNN is broken under ZLUDA (MIOpen). config.py
             # disables cuDNN on AMD, and then PyTorch's native LSTM works:
             # same text, ~4× faster than CPU on the RX 6800M.
-            # Only fall back to CPU if MIOpen was re-enabled (IMAGEGEN_CUDNN=1).
-            if use_gpu and torch.backends.cudnn.enabled:
-                name = torch.cuda.get_device_name(0)
+            # Only fall back to CPU if MIOpen was re-enabled (IMAGEGEN_CUDNN=1). Native ROCm keeps MIOpen on for the main passes
+            # and runs OCR on the GPU with it off (_readtext): 0.12-0.15 s a picture against 1.3-1.7 s on that torch's CPU.
+            import config as _c
+            if use_gpu and torch.backends.cudnn.enabled and not getattr(_c, "NATIVE_ROCM", False):
+                name = torch.cuda.get_device_name(torch.cuda.current_device())
                 if "ZLUDA" in name or "AMD" in name or "Radeon" in name:
                     use_gpu = False
         except Exception:
             use_gpu = False
-        _ocr_reader = easyocr.Reader(langs, gpu=use_gpu)
+        device = False
+        if use_gpu:
+            from config import DEVICE
+            device = DEVICE if str(DEVICE).startswith("cuda") else True
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r"[\s\S]*imbalance between your GPUs")
+            _ocr_reader = easyocr.Reader(langs, gpu=device)
+        _unwrap_data_parallel(_ocr_reader)
         _ocr_langs  = list(langs)
     return _ocr_reader
+
+
+def _readtext(reader, img_np):
+    """reader.readtext, with MIOpen off on native ROCm: EasyOCR's VGG has batch norm, whose MIOpen kernel is built at run time and
+    fails with that wheel ('type_traits' file not found -> miopenStatusUnknownError), and its input size changes with every picture,
+    so MIOpen would tune each one. torch's own GPU kernels read the same text."""
+    import config as _c
+    if not getattr(_c, "NATIVE_ROCM", False):
+        return reader.readtext(img_np)
+    import torch
+    was = torch.backends.cudnn.enabled
+    torch.backends.cudnn.enabled = False
+    try:
+        return reader.readtext(img_np)
+    finally:
+        torch.backends.cudnn.enabled = was
+
+
+def _unwrap_data_parallel(reader) -> None:
+    """EasyOCR wraps its detector and recognizer in torch.nn.DataParallel over every visible GPU, whose forward wants the model on
+    cuda:0. Under ZLUDA both GPUs are visible, so OCR ran on GPU 0 whatever GPU the app was on (it asked for plain 'cuda'), and on
+    the app's own cuda:1 DataParallel would have refused to run. The plain modules run where Reader put them."""
+    import torch
+    for name in ("detector", "recognizer"):
+        m = getattr(reader, name, None)
+        if isinstance(m, torch.nn.DataParallel):
+            setattr(reader, name, m.module)
 
 
 def _get_lama_session():
@@ -93,6 +131,26 @@ def _get_lama_session():
             providers=["CPUExecutionProvider"],   # DML crashes on this model
         )
     return _lama_session
+
+
+def _release_ocr() -> bool:
+    global _ocr_reader, _ocr_langs
+    was = _ocr_reader is not None
+    _ocr_reader, _ocr_langs = None, None
+    return was
+
+
+def _release_lama() -> bool:
+    global _lama_session
+    was = _lama_session is not None
+    _lama_session = None
+    return was
+
+
+from backend import memory_guard as _memory      # noqa: E402
+_memory.register("EasyOCR", _release_ocr)
+_memory.register("LaMa", _release_lama)
+OCR_COMMIT_GB = 4.5     # EasyOCR on the GPU took ~3 GB of free commit (ZLUDA, RX 9070 XT)
 
 
 # ── Detection ──────────────────────────────────────────────────────────────────
@@ -115,7 +173,7 @@ def detect_text_regions(
     reader = _get_ocr_reader(langs)
     img_np = np.array(image.convert("RGB"))
 
-    raw = reader.readtext(img_np)
+    raw = _readtext(reader, img_np)
     regions = []
     for (bbox_pts, text, conf) in raw:
         if conf < min_confidence:
@@ -578,7 +636,7 @@ def inpaint_lama(
 
 
 SD_INPAINT_PROMPT = "seamless background, clean"       # never name text here: "no text, no watermark" in the prompt drew new letters where the mark was
-SD_INPAINT_STRENGTH = 0.6       # over an OpenCV fill: at 1.0 the model redrew the band from noise and invented clothes, a face or letters
+SD_INPAINT_STRENGTH = 0.6       # over a fill: at 1.0 the model redrew the band from noise and invented clothes, a face or letters
 
 
 def inpaint_sd(
@@ -632,7 +690,13 @@ def inpaint_sd(
         cy = (y1 + y2) // 2
         y1 = max(0, min(H - min_side, cy - min_side // 2)); y2 = y1 + min_side
     box = (int(x1), int(y1), int(x2), int(y2))
-    crop, crop_mask = inpaint_opencv(image, mask).crop(box), mask.convert("L").crop(box)
+    # the fill it refines: LaMa's (mean difference to the clean picture in a mark's band 18-21, over TELEA 26, LaMa alone 17 but smudged)
+    try:
+        filled = inpaint_lama(image, mask)
+    except Exception as e:
+        print(f"[Watermark] LaMa fill failed ({e}); refining an OpenCV fill instead")
+        filled = inpaint_opencv(image, mask)
+    crop, crop_mask = filled.crop(box), mask.convert("L").crop(box)
 
     # Scale the crop so its long side is the model's native size (multiple of 8)
     cw, ch = crop.size
@@ -653,7 +717,8 @@ def inpaint_sd(
 
     if progress_callback:
         progress_callback(0.1, f"Inpainting a {cw}×{ch} region at {rw}×{rh}…")
-    with torch.inference_mode():
+    from backend.sampling import grad_off
+    with grad_off(getattr(sd_pipeline, "device", "")):
         out = inp_pipe(
             prompt=prompt or SD_INPAINT_PROMPT,
             negative_prompt="text, watermark, logo, letters, signature",

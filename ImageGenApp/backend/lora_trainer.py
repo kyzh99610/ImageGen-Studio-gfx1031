@@ -159,7 +159,8 @@ def _get_device(cfg: TrainingConfig) -> torch.device:
     if cfg.device == "directml":
         if _check_dml_backward():
             import torch_directml
-            dev = torch_directml.device()
+            from backend.sd_pipeline import _dml_index
+            dev = torch_directml.device(_dml_index(_cfg.DEVICE))
             print(f"[Train] Using DirectML device: {dev}")
             print("[Train] ⚠ DirectML training is experimental — may crash on full UNet backward")
             return dev
@@ -212,7 +213,8 @@ def _check_dml_backward() -> bool:
     Note: This may pass but full UNet backward can still fail on DML."""
     try:
         import torch_directml
-        dev = torch_directml.device()
+        from backend.sd_pipeline import _dml_index
+        dev = torch_directml.device(_dml_index(_cfg.DEVICE))           # the adapter the training will use
         model = torch.nn.Sequential(
             torch.nn.Conv2d(4, 32, 3, padding=1),
             torch.nn.GroupNorm(8, 32),
@@ -295,7 +297,7 @@ def _unique_path(path: Path) -> Path:
 
 
 def safe_output_name(name: str) -> str:
-    """File-system-safe LoRA name (Windows forbids <>:"/\|?* and trailing dots/spaces)."""
+    r"""File-system-safe LoRA name (Windows forbids <>:"/\|?* and trailing dots/spaces)."""
     import re
     n = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", (name or "").strip()).strip(". ")
     if n.split(".")[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
@@ -968,8 +970,9 @@ class LoRATrainer:
                              f"💾 Saved checkpoint {ep_path.name} — the Generate tab's 🔄 Refresh lists it now")
 
         # ── Cleanup ────────────────────────────────────────────────────────
-        # save_lora takes each LoRA tensor to the CPU itself. A whole-model .cpu() holds a second copy next to the GPU's: on native ROCm an SDXL run's free commit fell to 0.7 GB here.
-        if not _cfg.NATIVE_ROCM:
+        # save_lora takes each LoRA tensor to the CPU itself. A whole-model .cpu() holds a second copy next to the GPU's, and GPU memory is commit too: an SDXL run's
+        # free commit fell to 0.7 GB here on native ROCm, from 7.1 to under 1.4 GB under ZLUDA (RX 9070 XT, 32 GB RAM). The model is released after the training anyway.
+        if device.type != "cuda":
             self.unet.cpu()
             for te in self._trained_te_list:
                 te.cpu()
@@ -1054,9 +1057,14 @@ class LoRATrainer:
 
         # The trainer's own fp32 load used to bypass the commit preflight of the pipelines: an SDXL Prepare took the free commit from 19 to 3.7 GB (round 20),
         # the crash zone of round 3. Refuse a load that cannot fit, with the pipelines' message (the fp32 copy needs ~1.5x the pipelines' share).
-        from backend.model_manager import commit_problem
+        # On a GPU (native ROCm or ZLUDA) the file comes in over a read-only mapping, as in the pipelines: the base model waits on the CPU through Prepare, and the
+        # copy-on-write load charged the whole file to commit until the training ended (an SDXL Prepare after a caption run was refused: 16 GB asked, 13.9 free).
+        # Nothing writes to those weights: PEFT adds its own layers, the dtype casts and .to() put new tensors in place.
+        from backend.model_manager import commit_problem, read_only_checkpoints
         self._fp16 = use_fp16_base(cfg)
-        why = commit_problem(path, scale=1.0 if self._fp16 else _TRAIN_LOAD_SCALE, mapped=False)
+        on_gpu = "cuda" if cfg.device in ("auto", "cuda") and torch.cuda.is_available() else "cpu"
+        mapped = bool(getattr(_cfg, "NATIVE_ROCM", False)) and on_gpu == "cuda"        # the lower preflight factors: native only (see model_manager)
+        why = commit_problem(path, scale=1.0 if self._fp16 else _TRAIN_LOAD_SCALE, mapped=mapped)
         if why:
             raise RuntimeError(why)
 
@@ -1069,7 +1077,8 @@ class LoRATrainer:
 
         load_kw: dict[str, Any] = {"torch_dtype": torch.float16 if self._fp16 else torch.float32}
         if path.is_file():
-            self.pipe = PipeCls.from_single_file(str(path), **load_kw)
+            with read_only_checkpoints(on_gpu):
+                self.pipe = PipeCls.from_single_file(str(path), **load_kw)
         else:
             self.pipe = PipeCls.from_pretrained(str(path), **load_kw)
 

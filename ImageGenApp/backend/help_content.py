@@ -27,14 +27,66 @@ _CSS = """
 </style>
 """
 
+# ── one language at a time (the 中文 / English switch, backend/i18n.py) ──────────────────────────────────────
+# The sections were written side by side: English text with its Chinese in <span class="cn">. They are split here, so the page shows the
+# chosen language only: a heading / paragraph / note / table cell becomes L(English part, Chinese part); a table's all-Chinese column is
+# hidden in English, and the English explanation column right before it is hidden in Chinese.
+import re as _re
+
+_CN_SPAN = _re.compile(r'<span class="cn">(.*?)</span>', _re.S)
+_HAS_CJK = _re.compile(r"[一-鿿]")
+
+
+def _split_cn(s: str) -> str:
+    """'English <span class="cn">中文</span>' -> L('English', '中文'); text without a Chinese span is returned as it is."""
+    from backend.i18n import L
+    parts = _CN_SPAN.findall(s)
+    if not parts:
+        return s
+    en = _CN_SPAN.sub("", s)
+    en = _re.sub(r"(\s|&nbsp;|/|<br>)+$", "", en.strip())
+    en = _re.sub(r"^(\s|&nbsp;|/|<br>)+", "", en)
+    zh = " ".join(p.strip() for p in parts)
+    if not _re.search(r"[A-Za-z]{2}", _re.sub(r"<[^>]+>", "", en)):
+        return s                                        # nothing English to swap
+    return L(en, zh)
+
+
+def _split_slash(h: str) -> str:
+    """A header 'Step / 步骤' -> L('Step', '步骤')."""
+    from backend.i18n import L
+    if _CN_SPAN.search(h):
+        return _split_cn(h)
+    if " / " in h:
+        en, zh = h.rsplit(" / ", 1)
+        if _HAS_CJK.search(zh) and not _HAS_CJK.search(en):
+            return L(en, zh)
+    return h
+
+
 def _wrap(html: str) -> str:
+    # headings, paragraphs and list items written side by side: one language at a time
+    html = _re.sub(r'(<div class="hg-h[23]">)(.*?)(</div>)', lambda m: m.group(1) + _split_cn(m.group(2)) + m.group(3), html, flags=_re.S)
+    html = _re.sub(r'(<(p|li)(?:\s[^>]*)?>)(.*?)(</\2>)', lambda m: m.group(1) + _split_cn(m.group(3)) + m.group(4), html, flags=_re.S)
     return _CSS + f'<div class="hg-wrap">{html}</div>'
 
+
+def _is_cn_cell(c: str) -> bool:
+    c = str(c).strip()
+    return not c or (c.startswith('<span class="cn">') and c.endswith("</span>") and c.count('<span class="cn">') == 1)
+
+
 def _table(headers: list[str], rows: list[list[str]]) -> str:
-    ths = "".join(f"<th>{h}</th>" for h in headers)
+    n = len(headers)
+    zh_cols = {i for i in range(n) if all(_is_cn_cell(r[i]) for r in rows if i < len(r)) and (_CN_SPAN.search(headers[i]) or "中文" in headers[i])}
+    # the English explanation that the Chinese column translates is the column right before it (never the first, the row's name);
+    # a Chinese column right after the name (the glossary's 中文 = the term's Chinese name) leaves the English explanation shown in both
+    en_cols = {i - 1 for i in zh_cols if i - 1 > 0 and i - 1 not in zh_cols}
+    cls = lambda i: ' class="ig-zh"' if i in zh_cols else (' class="ig-en"' if i in en_cols else "")
+    ths = "".join(f"<th{cls(i)}>{_split_slash(h)}</th>" for i, h in enumerate(headers))
     trs = ""
     for row in rows:
-        tds = "".join(f"<td>{c}</td>" for c in row)
+        tds = "".join(f"<td{cls(i)}>{c if i in zh_cols or i in en_cols else _split_cn(c)}</td>" for i, c in enumerate(row))
         trs += f"<tr>{tds}</tr>"
     return f'<table class="hg-table"><thead><tr>{ths}</tr></thead><tbody>{trs}</tbody></table>'
 
@@ -45,10 +97,79 @@ def _cn(s: str) -> str:
     return f'<span class="cn">{s}</span>'
 
 def _note(s: str) -> str:
-    return f'<div class="hg-note">{s}</div>'
+    return f'<div class="hg-note">{_split_cn(s)}</div>'
 
 def _tip(s: str) -> str:
-    return f'<div class="hg-tip">💡 {s}</div>'
+    return f'<div class="hg-tip">💡 {_split_cn(s)}</div>'
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 0 — Start here (plain words, one language at a time)
+# ═════════════════════════════════════════════════════════════════════════════
+def start_here_html() -> str:
+    from backend.i18n import L
+    rows = [
+        ("<b>1. Start from</b>", "<b>1. 从哪开始</b>",
+         "A <b>saved setting</b> runs exactly as you saved it (every folder is listed, adult ones too). A <b>character card</b> brings its model, LoRAs and look. "
+         "<b>Just a prompt</b> uses the model you pick with its measured recipe.",
+         "<b>已保存的设置</b>：完全按你保存的样子出图（每个文件夹都列出来，包括成人设置）。<b>角色卡</b>：带上它的模型、LoRA 和长相。"
+         "<b>只写一句话</b>：用你选的模型和它实测过的配方。"),
+        ("<b>2. What to draw</b>", "<b>2. 想画什么</b>",
+         "Optional. A few words or tags, added to the setting's or card's prompt. Everyday Chinese words (海边, 微笑, 红色连衣裙 …) are turned into tags; "
+         "words the models don't know are listed, never guessed. <b>Add variety</b> picks a different line of one of your wildcard files for every picture.",
+         "可以不填。写几个词或标签，会加在设置或角色卡的提示词后面。常用中文词（海边、微笑、红色连衣裙……）会自动换成标签；模型不认识的词会列出来，不会乱猜。"
+         "<b>加点变化</b>：每张图从你的一个通配符文件里随机取一行。"),
+        ("<b>3. Framing</b>", "<b>3. 取景</b>",
+         "Auto lets each picture's own prompt decide. Portrait / cowboy shot / full body / wide shot put that framing into the prompt and run its recipe "
+         "(the detail passes measured for that face size).",
+         "自动：按每张图自己的提示词决定。头像 / 半身 / 全身 / 远景：把这种取景写进提示词，并用它的配方（按脸的大小实测过的细化步骤）。"),
+        ("<b>4. Detail</b>", "<b>4. 精细程度</b>",
+         "<b>As saved</b>: a saved setting's own passes. <b>Fast</b>: the picture plus the eye pass. <b>Standard</b>: the measured recipe for the framing "
+         "(a cowboy shot gets hires, a wide shot hires + face). <b>Best</b>: also the 2× detail stage where it measured better; 3–4× slower.",
+         "<b>按设置</b>：用设置里自己的步骤。<b>快</b>：出图 + 修眼睛。<b>标准</b>：这种取景实测过的配方（半身加高清修复，远景加高清修复和修脸）。"
+         "<b>精细</b>：在实测更好的地方再加 2 倍细节；慢 3–4 倍。"),
+        ("<b>5. Drawing style</b>", "<b>5. 画风</b>",
+         "<b>As saved</b>: the setting's or card's own sampler (the measured 12-step recipe with PAG 2: thick outlines, hard light). "
+         "<b>Softer lines</b>: 28 steps, CFG 5, no PAG: thinner outlines and gentler shading, the character as recognisable as before, no slower. "
+         "<b>Painterly</b>: Euler a, 28 steps: the softest, a little less like the character in the test. On Illustrious / NoobAI models only. "
+         "More steps were measured too: past these the picture changes small details but does not look better, and takes longer.",
+         "<b>按设置</b>：用设置或角色卡自己的采样（实测的 12 步 + PAG 2 配方：描边粗、明暗硬）。"
+         "<b>线条柔和</b>：28 步、CFG 5、不开 PAG，描边更细、明暗更柔，角色和原来一样好认，也不更慢。"
+         "<b>手绘感</b>：Euler a 28 步，最柔，测试里稍微没那么像角色。只对 Illustrious / NoobAI 模型生效。"
+         "更多步数也测过：再往上加，画面只是细节在变，不会更好看，还更慢。"),
+        ("<b>6. Shape, colour, how many</b>", "<b>6. 形状、色彩、张数</b>",
+         "Tall / square / wide use the model family's own sizes. Soft colour = paler pictures, same drawing. Seed -1 = new pictures every time.",
+         "竖图 / 方图 / 横图用这类模型自己的尺寸。柔和 = 颜色淡一些，画的内容不变。种子 -1 = 每次都是新图。"),
+        ("<b>7. Press ✨ Make the pictures</b>", "<b>7. 按 ✨ 生成</b>",
+         "The box above the pictures says what will happen before you press it, and how long it took here last time. Afterwards every picture is checked "
+         "(stars, faces, hands, and whether the face looks like the character: a saved setting is compared with the card that uses the same LoRAs) "
+         "and the next steps are suggested. A picture the tagger reads as a child is always named in red, check box or not.",
+         "按之前，图片上方的框会写出将要做什么、上次在这台电脑上用了多久。出图后会检查每张图（打星、数脸、看手，以及脸像不像这个角色："
+         "已保存的设置会和用同样 LoRA 的角色卡比较），并建议下一步。标签模型认为画的是儿童的图，无论勾没勾检查，都会用红字标出来。"),
+    ]
+    h = '<div class="hg-h2">🪄 Start here &nbsp;<span class="cn">新手指南</span></div>'
+    h += _tip("The app has two ways to work. <b>🪄 Quick picture</b> (the first tab): a few plain choices and one button; the app fills in everything else with "
+              "measured settings. <b>🎨 Generate</b>: every control, for when you want to change one. Quick picture's 🔧 <b>Open in Generate</b> copies a run there."
+              + _cn("app 有两种用法。<b>🪄 一键出图</b>（第一个标签页）：几个简单选项加一个按钮，其余参数 app 用实测过的设置填好。"
+                    "<b>🎨 生成</b>：所有参数都在，想改哪个就改哪个。一键出图里的 🔧 <b>在高级页打开</b> 会把这次的参数复制过去。"))
+    h += _table(["Step / 步骤", "What it does", _cn("说明")], [[L(a, b), c, _cn(d)] for a, b, c, d in rows])
+    h += '<div class="hg-h3">After the pictures &nbsp;<span class="cn">出图之后</span></div>'
+    h += _table(["Button / 按钮", "What it does", _cn("说明")], [
+        [L("🔀 More like the picked one", "🔀 再来几张类似的"), "Same seed, small variations (pose and details shift, the character stays).", _cn("同一个种子，做小变化（姿势和细节会变，角色不变）。")],
+        [L("⬆ Redo the picked one in more detail", "⬆ 更精细地重画这张"), "The same picture again with Best detail.", _cn("用“精细”再画一遍同一张。")],
+        [L("🎲 New pictures", "🎲 换一批"), "The same choices with new seeds.", _cn("同样的选项，换新种子。")],
+        [L("⭐ Favourite the picked one", "⭐ 收藏这张"), "Stars it in 🗂 History (and the Studio Loop gives its setting more pictures).", _cn("在 🗂 历史记录里加星（工作室循环也会给它的设置多画几张）。")],
+        [L("🔧 Open in Generate", "🔧 在高级页打开"), "Fills the 🎨 Generate tab with this run (the picked picture's seed), to change any control.", _cn("把这次的参数（用选中那张的种子）填进 🎨 生成页，想改哪个参数都可以。")],
+    ])
+    h += '<div class="hg-h3">Good to know &nbsp;<span class="cn">小贴士</span></div>'
+    h += _table(["If… / 如果…", "Then", _cn("那么")], [
+        [L("you want the other language", "想换语言"), "Press the button at the top right (中文 / English). Your choice is remembered.", _cn("按右上角的按钮（中文 / English）。会记住你的选择。")],
+        [L("the first picture is slow", "第一张图很慢"), "The model loads and the graphics card prepares its kernels once; the next pictures take seconds.", _cn("要先加载模型，显卡也要准备一次内核；之后每张只要几秒。")],
+        [L("a hand or face looks broken", "手或脸画坏了"), "Click the picture, then ⬆ Redo it in more detail; for a hand: 🔧 Open in Generate → 🖌 Inpaint → 🖐 Re-draw hand.", _cn("点那张图，再按 ⬆ 更精细地重画这张；手的话：🔧 在高级页打开 → 🖌 局部重绘 → 🖐 重画手。")],
+        [L("you wonder what is filtered", "想知道哪些内容被过滤"), "Nothing in the app refuses a prompt. What a picture shows is decided by the prompt, the negative prompt and your saved settings.", _cn("app 不拒绝任何提示词。画面里有什么，由提示词、反向提示词和你保存的设置决定。")],
+        [L("you want to keep a recipe", "想保存一套配方"), "🔧 Open in Generate, then ⚙️ Save / Load Settings. It appears in Quick picture's list.", _cn("🔧 在高级页打开，再用 ⚙️ 保存 / 读取设置保存。它会出现在一键出图的列表里。")],
+    ])
+    return _wrap(h)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -424,26 +545,37 @@ def parameters_html() -> str:
              "\"very long hair\", \"hair ornament\" against \"butterfly hair ornament\". A qualified tag stays: \"exposed …\" when the prompt says "
              "\"covered …\", \"black hair\" against \"black hair streak\". A few aliases count too: \"blurry\" against \"depth of field\" / \"bokeh\", "
              "\"see-through\" against \"sheer\"; add your own in settings/neg_conflicts.json as {\"negative tag\": [\"prompt tag\", …]}. "
-             "A tag written twice is kept once at its strongest weight, inside weighted groups too. Prompt tags that negate (\"no gloves\") and long "
-             "prose phrases never drop anything; LoRA tags, BREAK and embeddings are left alone. The result line lists what was dropped; the picture's "
-             "record holds the negative that ran. Why: long negatives gather tags from presets, cards and pasted prompts, and a tag that names what the "
+             "A tag written twice is kept once at its strongest weight, inside weighted groups too. The prompt's own repeats run once as well, where the "
+             "tag first appears and at its strongest weight (the box keeps what you typed): a repeat is not emphasis, write one weight such as (tag:1.2). "
+             "Prompt tags that negate anywhere (\"no gloves\", \"nylon not rubber\") and long "
+             "prose phrases never drop anything; LoRA tags, BREAK and embeddings are left alone. The result line lists what was dropped and merged; the picture's "
+             "record holds the prompt and negative that ran. Why: long negatives gather tags from presets, cards and pasted prompts, and a tag that names what the "
              "prompt asks for works against it — on 60 long community prompts \"blurry\" fought the prompt's own depth of field in 38. "
              "Merging repeats alone already changes the details of a picture (same pose and outfit): a picture saved before this, or with hygiene "
-             "off, whose negative had repeats or a conflicting tag regenerates differently with it on — turn it off to repeat such a picture exactly.",
+             "off, whose prompt or negative had repeats or a conflicting tag regenerates differently with it on — turn it off to repeat such a picture exactly "
+             "(Send to Generate says so for a repeated prompt tag).",
              _cn("设置 → Negative hygiene（默认开启）会在每张图之前、通配符展开之后，按正向提示清理负面提示："
                  "负面标签的所有词都包含在某个正向标签里、且包含该标签的中心词时会被去掉——例如正向写 \"very long hair\" 时去掉负面的 \"long hair\"，"
                  "正向写 \"butterfly hair ornament\" 时去掉 \"hair ornament\"。带限定词的会保留：正向写 \"covered …\" 时保留负面的 \"exposed …\"，"
                  "\"black hair streak\" 不会去掉 \"black hair\"。少量同义项也算冲突：\"blurry\" 对 \"depth of field\" / \"bokeh\"，\"see-through\" 对 \"sheer\"；"
                  "可在 settings/neg_conflicts.json 里自行添加 {\"负面标签\": [\"正向标签\", …]}。重复的负面标签只保留权重最强的一个（权重分组内也一样）。"
-                 "否定形式的正向标签（\"no gloves\"）和较长的描述句不会去掉任何东西；LoRA 标签、BREAK 和嵌入不受影响。结果行会列出去掉了什么，"
-                 "图片记录里保存实际使用的负面提示。仅合并重复标签就会改变画面细节（姿势和服装不变）：之前保存、或在关闭时生成、且负面提示含重复或冲突标签的图片，"
-                 "开启后重新生成会不同——要完全复现这类图片请先关闭此项。")],
+                 "正向提示词里重复的标签也只用一次：放在它第一次出现的位置，取最强的权重（输入框里保持你写的样子）。重复写不等于加强，要加强就写一个权重，例如 (tag:1.2)。"
+                 "带否定词的正向标签（无论否定词在哪：\"no gloves\"、\"nylon not rubber\"）和较长的描述句不会去掉任何东西；LoRA 标签、BREAK 和嵌入不受影响。结果行会列出去掉和合并了什么，"
+                 "图片记录里保存实际使用的正向和负面提示。仅合并重复标签就会改变画面细节（姿势和服装不变）：之前保存、或在关闭时生成、且提示词含重复或冲突标签的图片，"
+                 "开启后重新生成会不同——要完全复现这类图片请先关闭此项（提示词里有重复标签时，“发送到生成”会提醒）。")],
             ["⚖️ Prompt weights & colour bleeding",
-             "(tag:1.3) works like A1111 now (Settings → Prompt weights): the app used to apply weights 2–5× harder, so "
-             "weighted background / lighting / colour tags flooded their colour onto the character. If a scene colour "
-             "still bleeds, lower that tag's weight.",
-             _cn("权重 (tag:1.3) 现与 A1111 相同（设置 → Prompt weights）；之前权重过强，背景/光照颜色会染到角色身上。"
-                 "仍有串色时降低场景标签的权重。")],
+             "Settings → Prompt weights decides how (tag:1.3) acts. Norm-keep (the default since 2026-11-03) multiplies the tag and keeps the "
+             "rest of its 75-token chunk at its strength, on both of SDXL's text encoders. A1111 (old) is A1111 / Forge's own maths: on SDXL's "
+             "first encoder it can weaken a chunk full of weighted tags or inflate it 1.5–1.8×, and five skin / hair phrases at 1.5 drew blobs on "
+             "the cheeks in 7 of 8 pictures (Norm-keep 1 of 8). Compel applies weights 2–5× harder, so weighted background / lighting / colour tags "
+             "flood their colour onto the character. Keep weights at 1.25 or below on a few tags: when most tags of a chunk are weighted, none "
+             "stands out. Saved settings tuned under A1111 render a little differently now; a picture records its mode, and Send to Generate says "
+             "when it differs.",
+             _cn("设置 → Prompt weights 决定 (tag:1.3) 怎么起作用。Norm-keep（2026-11-03 起默认）放大这个标签，同一段 75 个词元里其余部分的强度不变，"
+                 "SDXL 的两个文本编码器都是这样。A1111 (old) 是 A1111 / Forge 原本的算法：在 SDXL 的第一个编码器上，一段里加权的标签多了，整段可能被削弱，"
+                 "也可能被放大 1.5–1.8 倍；五个皮肤 / 头发描述用 1.5 时，8 张里有 7 张脸颊长出色块（Norm-keep 8 张里 1 张）。Compel 的权重强 2–5 倍，"
+                 "加权的背景/光照/颜色标签会染到角色身上。权重最好不超过 1.25，只给少数几个标签：一段里大部分标签都加权时，哪个都不突出。"
+                 "按 A1111 调好的已保存设置现在出图会有些不同；每张图都记录了它的算法，“发送到生成”时算法不同会提醒。")],
             ["🎲 Samplers on SDXL",
              "LMS and PNDM used to fill SDXL pictures with colour noise (4th-order multistep methods are unstable on "
              "SDXL); on SDXL-family models (SDXL, Pony, Illustrious, NoobAI) they now run as 2nd-order methods and are "
@@ -457,7 +589,7 @@ def parameters_html() -> str:
              "for example overnight — exactly as 💾 Load + ✨ Generate would, so Polish, the detail passes, colour strength and pose control all apply. "
              "Every picture is scored on the CPU (one face, hands that look off, the card's hair / eye colours and identity when the plan names a card, "
              "WD14 tags) and filed under outputs\\loop\\<run>\\ in best / ok / review / reject; a picture with an exposure tag or an artifact "
-             "(text, watermark, border, several views, a second girl) is rejected. Between rounds a setting that kept nothing for two rounds is parked "
+             "(text, watermark, border, several views, a second girl) is rejected; something in her hands that the prompt never asks for (WD14 sees pens and cards, not glowing orbs) keeps a picture out of best. Between rounds a setting that kept nothing for two rounds is parked "
              "(the report lists it under “needs a prompt fix”) and one whose pictures you ⭐ in the History tab gets more pictures. "
              "A plan is a JSON file in settings\\loop\\ (copy loop_example.json next to the app): the saved settings, pictures per round, a stop "
              "time (HH:MM) or an hour budget, an optional character card, and the tags that reject a picture. The loop starts its own app (close "
@@ -467,7 +599,7 @@ def parameters_html() -> str:
              _cn("在 🔁 Studio Loop 标签页里可以新建/选择计划，▶ 开始在当前程序上运行（你自己的生成会在它的两张图之间排队），⏹ 在当前设置完成后停止，🔄 状态显示日志、报告和最佳图片。"
                  "该标签页（或 studio_loop.bat <计划>）会在无人值守时（例如整夜）一轮又一轮地渲染你的已保存设置（💾 已保存设置列表），效果与 💾 加载 + ✨ 生成完全相同，"
                  "Polish、细节重绘、颜色强度、姿势控制都会生效。每张图都在 CPU 上评分（单张脸、看起来不对的手、计划指定角色卡时的发色/瞳色与身份、WD14 标签），"
-                 "并按 best / ok / review / reject 存入 outputs\\loop\\<运行>\\；带有暴露标签或瑕疵（文字、水印、边框、多视图、第二个女孩）的图会被拒绝。"
+                 "并按 best / ok / review / reject 存入 outputs\\loop\\<运行>\\；带有暴露标签或瑕疵（文字、水印、边框、多视图、第二个女孩）的图会被拒绝；手里拿着提示词没要求的东西（WD14 认得出笔和牌，认不出发光的球）的图不会进 best。"
                  "每轮之间，连续两轮没有留下好图的设置会被暂停（报告里列在“需要修改提示词”下），你在历史标签页加 ⭐ 的设置会多出图。"
                  "计划是 settings\\loop\\ 里的 JSON 文件（复制程序旁的 loop_example.json）：已保存设置、每轮张数、停止时间（HH:MM）或小时数、可选的角色卡、"
                  "以及会拒绝图片的标签。循环会自己启动程序（请先关掉你的：同一张显卡上开两个程序会爆显存），或用 --attach URL 连接已运行的程序；"
@@ -536,7 +668,7 @@ def parameters_html() -> str:
              "Character cards → “🎴▶ Generate every outfit”: each outfit × N seeds (the same seeds for every outfit) "
              "with the current settings, then a labelled contact sheet. Pairs already made with the same settings "
              "are skipped, so a stopped run resumes. Every picture gets a ⭐ rating (n/5) on the sheet from CPU checks "
-             "whose models are already cached: one face / at most two hands, the card's hair and eye colours and its "
+             "whose models are already cached: one face / at most two hands (a box the hand detector's second look doesn't confirm, such as a turret or a leaf, doesn't count), the card's hair and eye colours and its "
              "hair pin on the head crop — with the reasons for anything below 5. After “🧬 Learn her look” (3 or more "
              "pictures of her with a face ≥ 100 px — pose and lighting don't matter, but hair and headwear do: include the hats, ponytails and buns of the "
              "outfits you will judge; the first use downloads the 150 MB CCIP anime-character model) it also flags a face that is further from her than her own pictures are. Measured on 247 existing "
@@ -547,7 +679,7 @@ def parameters_html() -> str:
              "fell under the old margin, 13 % under the new one; another girl is still flagged every time). The colour-specks check is only a note since round 14 (📝 \"colour specks — lace, fur or noise? look\", no star taken): white lace and fur set it off "
              "on good pictures (20 of 21 such flags in a 130-picture check) and it sees only 4 of 10 truly garbled pictures, so look at the picture. A second note, 📝 \"a hand may be broken\" (round 48, no star), comes from the hand detector's score on each hand's crop: below 0.7 it is right about 9 times in 10 on SDXL pictures (false alarms 3-10 %) but sees only about half of the broken hands.",
              _cn("角色卡 →“生成所有服装”：每套服装 × N 个种子（种子相同便于对比），最后生成对比图；已生成的会跳过，可断点续跑。"
-                 "对比图上每张图有 ⭐ 评分（n/5）：一张脸/至多两只手、角色卡的发色瞳色与发饰（仅用已缓存的模型在 CPU 上检查；彩色斑点只作备注，不扣星）。"
+                 "对比图上每张图有 ⭐ 评分（n/5）：一张脸/至多两只手（只数经二次确认的手，炮塔、落叶之类不算）、角色卡的发色瞳色与发饰（仅用已缓存的模型在 CPU 上检查；彩色斑点只作备注，不扣星）。"
                  "用“🧬 Learn her look”（3 张以上她的图，脸宽 ≥ 100 像素，姿势/光线不限，但发型和头饰有影响：请包含要检查的服装里的帽子、马尾、丸子头；首次使用会下载 150 MB 的 CCIP 动漫角色识别模型）学习后还会标出比她本人图更不像她的脸（247 张现有图实测：她自己的图误报约 3%，同标签无 LoRA 的相似脸最多约 1/5，同标签的其他角色最多约 1/3（参考图越相近检出越多），其他女孩 100%；小于 100 像素的脸不判断）。仅作提示，不是定论。参考图只有普通日光照时，v3 角色卡 33 套服装里有 15 套被标记（其实每张都是她）：帽子、马尾、丸子头会改变 CCIP 指纹；参考图包含这类服装后误报降到 11%，提示会写“请肉眼检查”。带帽子或特殊发型的服装现在只有在脸明显不像时才会标记（偏离参考图 5 个标准差，而不是 2 个：这类服装里她自己的图有 46% 低于旧阈值，13% 低于新阈值；其他女孩仍然每次都会标出）。彩色斑点检查现在只是备注，不再扣星（📝“colour specks”）：白色蕾丝和毛皮会让好图误报（130 张图的检查里 20/21 个标记是误报），而且 10 张真正花掉的图只能发现 4 张，请亲眼确认。另有一条备注 📝“a hand may be broken”（不扣星）：用手部检测器对每只手截图的打分判断，低于 0.7 时在 SDXL 图上约 9/10 正确（误报 3-10 %），但只能发现约一半的坏手。")],
             ["🗂 History",
              "Search everything in outputs/ by prompt words, model, LoRA or seed; ⭐ favourites; open an image in PNG "
@@ -562,7 +694,7 @@ def parameters_html() -> str:
              "(the loaded one when none is selected). Only Illustrious / NoobAI has one so far: DPM++ 2M AYS, 12 steps, CFG 6, PAG 2 — measured on five Illustrious / NoobAI checkpoints with one "
              "character LoRA: the recipe sits on a plateau (CFG 5, a stronger LoRA, Euler a at 20 steps, a bigger size, CFG rescale, PAG 3 were each no better), while 10-step bases, no PAG and Compel prompt weights cost something. "
              "For any other family (Pony, SDXL base, SD 1.5) it says there is no measured recipe yet and changes nothing. It never touches the prompt, size, LoRAs, seed or any default — a fresh install still starts at "
-             "Steps 20 / CFG 7.5 / DPM++ 2M Karras until you press it. The recipe was measured with A1111 prompt weights (Settings → Prompt weights, the default); the note warns when it is set to Compel.",
+             "Steps 20 / CFG 7.5 / DPM++ 2M Karras until you press it. The recipe was measured with A1111 prompt weights (Settings → Prompt weights); the note warns when it is set to Compel.",
              _cn("“Steps / CFG”下方的按钮，按 Generate 页所选底模的系列填入采样器、步数、CFG 和 PAG（未选择时用已加载的模型）。目前只有 Illustrious / NoobAI 有实测方案：DPM++ 2M AYS、12 步、CFG 6、PAG 2——"
                  "在五个 Illustrious / NoobAI 模型上配合一个角色 LoRA 测得：该方案处在平台期（CFG 5、更强的 LoRA、Euler a 20 步、更大尺寸、CFG rescale、PAG 3 都没有更好），"
                  "而 10 步底图、关闭 PAG、Compel 提示词权重都会有代价。其他系列（Pony、SDXL 基础版、SD 1.5）会提示“暂无实测方案”并保持不变。它不会改动提示词、尺寸、LoRA、种子或任何默认值——"
@@ -693,9 +825,12 @@ def parameters_html() -> str:
              _cn("WD14 反推图片的 Danbooru 标签；训练页可批量打标。")],
             ["📊 X/Y grid",
              "Same seed, every combination of two settings (CFG, steps, sampler, seed, LoRA 1 weight, CLIP skip, "
-             "hires / face / hand / eye denoise, PAG scale, CFG rescale, 🎨 colour strength, checkpoint, or Prompt S/R word swaps) in one labelled grid image. "
-             "A denoise axis switches its pass on with the cell's value.",
-             _cn("同一种子下对比两组参数的所有组合，生成带标签的网格图。可选轴：CFG、步数、采样器、种子、LoRA 1 权重、CLIP skip、高清修复/脸/手/眼降噪、PAG、CFG rescale、颜色强度、模型、提示词替换（Prompt S/R）；降噪轴会按单元格的值开启对应步骤。")],
+             "hires / face / hand / eye denoise, PAG scale, CFG rescale, 🎨 colour strength, checkpoint, or Prompt S/R / Negative S/R word swaps) in one labelled grid image. "
+             "A denoise axis switches its pass on with the cell's value. An S/R value in quotes keeps its commas, and an empty value \"\" removes the words: "
+             "<code>\"pink eyes, magenta eyes\", \"\"</code> on Negative S/R shows the picture with and without those two negative tags.",
+             _cn("同一种子下对比两组参数的所有组合，生成带标签的网格图。可选轴：CFG、步数、采样器、种子、LoRA 1 权重、CLIP skip、高清修复/脸/手/眼降噪、PAG、CFG rescale、颜色强度、模型、"
+                 "提示词替换（Prompt S/R）、反向提示词替换（Negative S/R）；降噪轴会按单元格的值开启对应步骤。替换的值带逗号时用引号括起来，空值 \"\" 表示删掉这些词："
+                 "在 Negative S/R 里填 <code>\"pink eyes, magenta eyes\", \"\"</code>，就能并排看到反向提示词里有和没有这两个标签的图。")],
         ]
     )
     h += _tip("All of these are saved in the image and come back when you drop it into Image-to-Image. "
@@ -1171,11 +1306,11 @@ def hardware_html() -> str:
     On a 780M: ~115ms total vs ~6.4s CPU = <b>56× speedup</b>.</li>
 <li>Quality is identical: cosine similarity >0.9998 vs CPU baseline.</li>
 <li>Supports long prompts (>77 tokens): 75-token chunks cut at tag boundaries; BREAK starts a new one.</li>
-<li>Under ZLUDA this is rarely needed — the text encoders already run on the dGPU.</li>
+<li>On a GPU backend (ZLUDA or native ROCm) it stays off and says why: the text encoders already run on the card (~0.5 s for a new prompt, a repeated one is cached), and the iGPU would save under 0.3 s while its export and sessions hold ~6 GB of memory. It is for the DirectML backend.</li>
 </ol>
 <div class="hg-note">""" + _cn(
         "启用步骤：进入设置标签页 → 勾选⚡加速SDXL文本编码 → 首次使用时自动导出ONNX（每模型一次）→ "
-        "后续运行使用集显（780M上比CPU快56倍）。输出质量不变。ZLUDA下文本编码已在独显运行，通常无需开启。"
+        "后续运行使用集显（780M上比CPU快56倍）。输出质量不变。ZLUDA / 原生 ROCm 下文本编码本来就在独显上运行，此项会保持关闭并说明原因（集显只能每个提示词省不到 0.3 秒，却要占约 6 GB 内存）；它是给 DirectML 后端用的。"
     ) + "</div>"
 
     h += '<div class="hg-h3">GPU Self-Test &nbsp;<span class="cn">GPU自检</span></div>'
@@ -1202,10 +1337,12 @@ def hardware_html() -> str:
 <li>Click <b>Apply SmartSplit Config</b>.</li>
 <li>Load any <b>SD 1.5</b> model — the SmartSplit pipe auto-builds.</li>
 <li>⚠️ SmartSplit is <b>not used for SDXL</b> — SDXL uses the accelerated text encoding above instead.</li>
+<li>⚠️ Nothing is offloaded to a <b>Vega-class iGPU</b> (Ryzen 2000–5000 and 7030-series APUs and the older A-series ones, e.g. an RX 6800M laptop's): its SD 1.5 VAE decode took 8 s against the RX 6800M's 0.5 s and then hung it (a driver reset of the GPU that drives the screen). SmartSplit and the accelerated text encoding say so and stay off there.</li>
 </ol>
 <div class="hg-note">""" + _cn(
         "SmartSplit仅适用于SD 1.5模型，将文本编码器和VAE分流到CPU/集显，释放独显显存。"
         "SDXL模型使用上面的加速文本编码方案。"
+        "Vega 级集显（锐龙 2000–5000 及 7030 系列 APU、更早的 A 系列 APU，例如 RX 6800M 笔记本的集显）不会分到任何阶段：它的 SD 1.5 VAE 解码要 8 秒（RX 6800M 0.5 秒），随后卡死并触发驱动重置。"
     ) + "</div>"
 
     h += '<div class="hg-h3">VRAM Requirements &nbsp;<span class="cn">显存需求参考</span></div>'
@@ -1266,42 +1403,54 @@ def build_help_tab():
     """Build the full ❓ Help 帮助 tab. Call inside a gr.Blocks context."""
     import gradio as gr
 
-    with gr.Tab("❓ Help 帮助"):
+    from backend.i18n import L, T
+    titles = [("🪄 Start here", "🪄 新手指南"), ("🚀 Quick Start", "🚀 快速上手"), ("📝 Prompt Syntax", "📝 提示词语法"),
+              ("⚙️ Generation Parameters", "⚙️ 生成参数"), ("🧩 Model Architecture", "🧩 模型架构"), ("🔗 LoRA & VAE", "🔗 LoRA 与 VAE"),
+              ("🎓 LoRA Training Guide", "🎓 LoRA 训练指南"), ("✨ Quality Tag Cheatsheet", "✨ 质量标签速查表"),
+              ("🎨 Style & Camera Tags", "🎨 风格与镜头标签"), ("🔀 SmartSplit & Hardware", "🔀 多设备分流与硬件"), ("📖 Glossary", "📖 术语表"),
+              ("❓ Help", "❓ 帮助")]
+    for en, zh in titles:
+        T(en, zh)
+
+    with gr.Tab("❓ Help"):
         gr.HTML(
             '<div style="background:#313244;padding:10px 16px;border-radius:8px;margin-bottom:8px;">'
-            '<span style="color:#cba6f7;font-size:15px;font-weight:700;">📚 ImageGen Studio — '
-            'Full Reference Guide &nbsp; <span style="color:#89dceb;">完整使用指南</span></span><br>'
+            '<span style="color:#cba6f7;font-size:15px;font-weight:700;">'
+            + L("📚 ImageGen Studio — how it works", "📚 ImageGen Studio 使用说明") + '</span><br>'
             '<span style="color:#a6adc8;font-size:13px;">'
-            'All syntax, parameters, and concepts explained in English and Chinese. '
-            '<span style="color:#89dceb;">所有语法、参数和概念的中英双语说明。</span></span></div>'
+            + L("New here? Open 🪄 Start here. The other sections explain every control in detail. The button at the top right switches the language.",
+                "第一次用？先看 🪄 新手指南。后面各部分详细解释每个控件。右上角的按钮可以切换语言。") + '</span></div>'
         )
 
-        with gr.Accordion("🚀 Quick Start / 快速上手", open=True):
+        with gr.Accordion("🪄 Start here", open=True):
+            gr.HTML(start_here_html())
+
+        with gr.Accordion("🚀 Quick Start", open=False):
             gr.HTML(quickstart_html())
 
-        with gr.Accordion("📝 Prompt Syntax / 提示词语法", open=False):
+        with gr.Accordion("📝 Prompt Syntax", open=False):
             gr.HTML(prompt_syntax_html())
 
-        with gr.Accordion("⚙️ Generation Parameters / 生成参数", open=False):
+        with gr.Accordion("⚙️ Generation Parameters", open=False):
             gr.HTML(parameters_html())
 
-        with gr.Accordion("🧩 Model Architecture / 模型架构", open=False):
+        with gr.Accordion("🧩 Model Architecture", open=False):
             gr.HTML(models_html())
 
         with gr.Accordion("🔗 LoRA & VAE", open=False):
             gr.HTML(lora_vae_html())
 
-        with gr.Accordion("🎓 LoRA Training Guide / LoRA训练指南", open=False):
+        with gr.Accordion("🎓 LoRA Training Guide", open=False):
             gr.HTML(lora_training_html())
 
-        with gr.Accordion("✨ Quality Tag Cheatsheet / 质量标签速查表", open=False):
+        with gr.Accordion("✨ Quality Tag Cheatsheet", open=False):
             gr.HTML(quality_tags_html())
 
-        with gr.Accordion("🎨 Style & Camera Tags / 风格与镜头标签", open=False):
+        with gr.Accordion("🎨 Style & Camera Tags", open=False):
             gr.HTML(style_tags_html())
 
-        with gr.Accordion("🔀 SmartSplit & Hardware / 多设备分流与硬件", open=False):
+        with gr.Accordion("🔀 SmartSplit & Hardware", open=False):
             gr.HTML(hardware_html())
 
-        with gr.Accordion("📖 Glossary / 术语表", open=False):
+        with gr.Accordion("📖 Glossary", open=False):
             gr.HTML(glossary_html())

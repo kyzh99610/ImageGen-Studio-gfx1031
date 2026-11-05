@@ -326,56 +326,85 @@ def lighting_conflict(prompt: str) -> tuple[list[str], list[str]]:
     return (day, night) if day and night else ([], [])
 
 
-def prompt_warnings(prompt: str, negative: str = "", important=(), tokenizer=None) -> list[str]:
-    """Things that quietly weaken a prompt: a LoRA trigger word pushed out of the first
-    chunk (it steers far less there), a tag in both prompts (they cancel out), and lighting tags
-    that disagree (golden hour / sunset / daytime together with night / neon / moonlight)."""
+def _warnings(prompt: str, negative: str = "", important=(), tokenizer=None) -> list[tuple[str, str]]:
+    """prompt_warnings() as (English, 中文) pairs."""
     warn = []
+    b = lambda ts: ", ".join(f"<b>{_esc(t)}</b>" for t in ts)
     chunks = chunk_prompt(prompt, tokenizer)
     if len(chunks) > 1 and important:
         later = {parse_tag(t)[0] for c in chunks[1:] for t in c}
         first = {parse_tag(t)[0] for t in chunks[0]}
         moved = [t for t in important if parse_tag(t)[0] in later and parse_tag(t)[0] not in first]
         if moved:
-            warn.append("trigger word(s) " + ", ".join(f"<b>{_esc(t)}</b>" for t in moved[:4])
-                        + " are past the first 75 tokens — move them to the front (or click the chip) "
-                          "for a stronger effect")
+            warn.append(("trigger word(s) " + b(moved[:4]) + " are past the first 75 tokens — move them to the front (or click the chip) "
+                         "for a stronger effect",
+                         "触发词 " + b(moved[:4]) + " 在前 75 个词元之后——移到最前面（或点一下它的标签按钮）效果更强"))
     pos = {parse_tag(t)[0]: t for t in split_tags(prompt) if t != "BREAK"}
     both = [pos[k] for k in (parse_tag(t)[0] for t in split_tags(negative) if t != "BREAK") if k in pos]
     if both:
-        warn.append("in both prompts (they cancel out): " + ", ".join(f"<b>{_esc(t)}</b>" for t in both[:6]))
+        warn.append(("in both prompts (they cancel out): " + b(both[:6]), "正向和反向提示词里都有（会互相抵消）：" + b(both[:6])))
+    reps: dict[str, int] = {}
+    for t in split_tags(prompt):
+        if t != "BREAK" and not _DYNAMIC.search(t) and parse_tag(t)[0]:
+            reps[parse_tag(t)[0]] = reps.get(parse_tag(t)[0], 0) + 1
+    reps = {k: n for k, n in reps.items() if n > 1}
+    if reps:
+        from backend import neg_hygiene as _nh
+        shown = ", ".join(f"<b>{_esc(k)}</b> ×{n}" for k, n in list(reps.items())[:4])
+        if _nh.CONFIG["on"]:
+            warn.append(("repeated: " + shown + " — each runs once, at its strongest weight (🧹 Negative hygiene); a repeat is not emphasis: "
+                         "write one weight such as (tag:1.2)",
+                         "重复的标签：" + shown + "——每个只用一次，取最强的权重（🧹 反向提示词清理）；重复写不等于加强：要加强就写一个权重，例如 (tag:1.2)"))
+        else:
+            warn.append(("repeated: " + shown + " — with 🧹 Negative hygiene off each copy runs; for emphasis write one weight such as (tag:1.2)",
+                         "重复的标签：" + shown + "——🧹 反向提示词清理关着，每一份都会生效；要加强就写一个权重，例如 (tag:1.2)"))
     day, night = lighting_conflict(prompt)
     if day:
-        warn.append("lighting tags disagree: " + ", ".join(f"<b>{_esc(t)}</b>" for t in day[:3]) + " (daylight) and "
-                    + ", ".join(f"<b>{_esc(t)}</b>" for t in night[:3]) + " (night) — the picture follows one of them, "
-                    "usually not the one you meant (a golden-hour tag turned a night-city prompt into a sunset); keep one")
+        warn.append(("lighting tags disagree: " + b(day[:3]) + " (daylight) and " + b(night[:3]) + " (night) — the picture follows one of them, "
+                     "usually not the one you meant (a golden-hour tag turned a night-city prompt into a sunset); keep one",
+                     "光线标签互相矛盾：" + b(day[:3]) + "（白天）和 " + b(night[:3]) + "（夜晚）——画面只会照其中一个画，往往不是你想要的那个"
+                     "（golden hour 标签曾把夜晚的城市画成了日落）；只留一个"))
     return warn
 
 
+def prompt_warnings(prompt: str, negative: str = "", important=(), tokenizer=None) -> list[str]:
+    """Things that quietly weaken a prompt: a LoRA trigger word pushed out of the first
+    chunk (it steers far less there), a tag in both prompts (they cancel out), a repeated tag (run once by 🧹; a repeat is
+    not emphasis), and lighting tags that disagree (golden hour / sunset / daytime together with night / neon / moonlight)."""
+    return [en for en, _zh in _warnings(prompt, negative, important, tokenizer)]
+
+
 def token_report_html(prompt: str, negative: str = "", tokenizer=None, important=()) -> str:
-    """One-line summary under the prompt boxes (+ warnings)."""
-    def one(label, text):
+    """One-line summary under the prompt boxes (+ warnings), in both languages (backend/i18n.L: the page shows the chosen one)."""
+    from backend.i18n import L
+
+    def one(label, label_zh, text):
         r = token_report(text, tokenizer)
         if not r["tokens"]:
-            return f"{label}: empty"
+            return f"{label}: empty", f"{label_zh}：空"
         approx = "" if r["exact"] else "≈"
         if r["chunks"] <= 1:
-            return f"{label}: {approx}{r['tokens']}/75 token{'s' if r['tokens'] != 1 else ''}"
-        s = f"{label}: {approx}{r['tokens']} tokens"
-        if r["chunks"] > 1:
-            parts = " | ".join(f"{n}" for n in r["sizes"])
-            starts = " · ".join(f"#{i + 2} starts at <i>{_esc(t[:28])}</i>" for i, t in enumerate(r["starts"][1:]))
-            s += f" → {r['chunks']} chunks [{parts}] ({starts})"
-        return s
-    note = ('<span style="color:#9399b2;"> · every 75 tokens is a separate CLIP chunk; nothing is '
-            'cut off, but tags in the first chunk steer the image most. BREAK starts a new chunk.</span>')
-    warn = "".join(f'<br><span style="color:#f9e2af;">⚠ {w}</span>'
-                   for w in prompt_warnings(prompt, negative, important, tokenizer))
+            return (f"{label}: {approx}{r['tokens']}/75 token{'s' if r['tokens'] != 1 else ''}",
+                    f"{label_zh}：{approx}{r['tokens']}/75 个词元")
+        parts = " | ".join(f"{n}" for n in r["sizes"])
+        starts = [_esc(t[:28]) for t in r["starts"][1:]]
+        en = (f"{label}: {approx}{r['tokens']} tokens → {r['chunks']} chunks [{parts}] ("
+              + " · ".join(f"#{i + 2} starts at <i>{t}</i>" for i, t in enumerate(starts)) + ")")
+        zh = (f"{label_zh}：{approx}{r['tokens']} 个词元 → {r['chunks']} 段 [{parts}]（"
+              + " · ".join(f"第 {i + 2} 段从 <i>{t}</i> 开始" for i, t in enumerate(starts)) + "）")
+        return en, zh
+    (p_en, p_zh), (n_en, n_zh) = one("Prompt", "正向", prompt), one("Negative", "反向", negative)
+    note = L('<span style="color:#9399b2;"> · every 75 tokens is a separate CLIP chunk; nothing is '
+             'cut off, but tags in the first chunk steer the image most. BREAK starts a new chunk.</span>',
+             '<span style="color:#9399b2;"> · 每 75 个词元是一个单独的 CLIP 段；不会被截掉，但第一段里的标签对画面影响最大。BREAK 会另起一段。</span>')
+    warn = "".join(f'<br><span style="color:#f9e2af;">⚠ {L(en, zh)}</span>'
+                   for en, zh in _warnings(prompt, negative, important, tokenizer))
     fixes = danbooru_hints(prompt) + danbooru_hints(negative)
-    hint = ('<br><span style="color:#89dceb;">💡 Danbooru spelling (anime models learned these exact tags): '
-            + ", ".join(f"<i>{_esc(a)}</i> → <b>{_esc(b)}</b>" for a, b in fixes) + "</span>") if fixes else ""
-    return (f'<p style="font-size:13px;color:#bac2de;margin:2px 0;">📏 {one("Prompt", prompt)} · '
-            f'{one("Negative", negative)}{note}{warn}{hint}</p>')
+    pairs = ", ".join(f"<i>{_esc(a)}</i> → <b>{_esc(b)}</b>" for a, b in fixes)
+    hint = ('<br><span style="color:#89dceb;">💡 ' + L("Danbooru spelling (anime models learned these exact tags): ",
+                                                       "Danbooru 拼写（动漫模型学的是这些准确的标签）：") + pairs + "</span>") if fixes else ""
+    return (f'<p style="font-size:13px;color:#bac2de;margin:2px 0;">📏 {L(p_en, p_zh)} · '
+            f'{L(n_en, n_zh)}{note}{warn}{hint}</p>')
 
 
 def danbooru_hints(prompt: str, limit: int = 6) -> list[tuple[str, str]]:
@@ -434,6 +463,34 @@ def release_parser_cache():
         pass
 
 
+class fast_parsing:
+    """pyparsing's packrat memo around one Compel parse: the same parse trees ~3x faster (99 -> 35 ms a 75-token chunk of a heavy
+    preset, 70 chunks compared, 2026-11-04; without it Compel's grammar backtracks ~80,000 times a chunk). Switched on only for
+    the parse and off again unless something else in the process had it on; the cache is emptied afterwards either way (it can
+    hold frames -> the text encoders, see release_parser_cache)."""
+
+    def __enter__(self):
+        self.was_on = True
+        try:
+            from pyparsing import ParserElement
+            self.was_on = bool(getattr(ParserElement, "_packratEnabled", False))
+            if not self.was_on:
+                ParserElement.enable_packrat()
+        except Exception:
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            from pyparsing import ParserElement
+            ParserElement.reset_cache()
+            if not self.was_on and hasattr(ParserElement, "disable_memoization"):
+                ParserElement.disable_memoization()
+        except Exception:
+            pass
+        return False
+
+
 def encode_chunked(compel, prompt: str, tokenizer=None, sdxl: bool = False):
     """Encode each tag-aligned chunk with Compel and concatenate: [1, 77·k, dim]
     (+ the first chunk's pooled embedding for SDXL, as A1111 does)."""
@@ -445,12 +502,19 @@ def encode_chunked(compel, prompt: str, tokenizer=None, sdxl: bool = False):
         chunks = chunk_prompt(prompt, tokenizer)
         embs, pooled = [], None
         for tags in chunks:
-            out = compel(a1111_to_compel(", ".join(tags)))
+            # Compel's __call__ for one text, without its padding step: that built (parsed + encoded) the empty prompt for
+            # every chunk although one text never needs padding — the same tensors, half the parsing (2026-11-04)
+            text = a1111_to_compel(", ".join(tags))
+            build = getattr(compel, "build_conditioning_tensor", None)
+            with fast_parsing(), torch.no_grad():
+                out = build(text) if build is not None else compel(text)
             if sdxl:
                 e, p = out
                 pooled = p if pooled is None else pooled
             else:
                 e = out
+            if e.dim() == 2:                        # unbatched [tokens, dim]: __call__'s padding step added the batch axis
+                e = e.unsqueeze(0)
             embs.append(e)
         emb = torch.cat(embs, dim=1) if len(embs) > 1 else embs[0]
         return (emb, pooled) if sdxl else emb

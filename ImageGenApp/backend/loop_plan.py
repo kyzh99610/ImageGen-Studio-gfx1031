@@ -97,7 +97,12 @@ def clean_plan(d: dict) -> dict:
             raise ValueError(f"stop_at must look like 07:00 (got {stop!r})")
     out["stop_at"] = stop
     out["card"] = str(d.get("card") or "")
-    out["polish"] = str(d.get("polish") or "")
+    pol = str(d.get("polish") or "").strip()
+    if pol:
+        from backend.polish import CHOICES
+        if pol not in CHOICES:      # Gradio passes any value through and the app's clean_choice makes it (off): Polish would silently not run
+            raise ValueError(f"polish must be one of {', '.join(CHOICES)} (got {pol!r})")
+    out["polish"] = pol
     g = dict(DEFAULTS["gate"])
     gin = d.get("gate") if isinstance(d.get("gate"), dict) else {}
     for k in ("block_tags", "artifact_tags"):
@@ -125,7 +130,27 @@ def load_plan(path) -> dict:
     return clean_plan(json.loads(Path(path).read_text(encoding="utf-8-sig")))
 
 
-def verdict(score: dict, tags: dict, faces: int | None, gate: dict, hands_off: int = 0) -> tuple[str, list[str]]:
+# WD14 'holding*' on the whole picture. Measured on 144 pictures of a same-seed A/B (2026-11-03): a thing in her hands that the prompt never asked
+# for (a pen, a card, a key, a glowing orb) was there in 16 by eye (labelled blind). holding* >= 0.35 found 5 of them; >= 0.2 finds 8 (the pen,
+# all the cards, a glowing star) and still flags none of the other 128, whose highest holding* is 0.15. A playboy-bunny tray on the laptop scored
+# holding_tray 0.27 (tray 0.47) and went unseen at 0.35. An object tag alone ("tray", "card") is no sign: the casino scene's table cards scored
+# card 0.3-0.84 in clean pictures. So it is a reason that keeps a picture out of 'best', never a reject.
+HOLD_THRESHOLD = 0.2
+
+
+def stray_hold(tags: dict, prompt: str) -> str | None:
+    """A reason when WD14 sees her holding something and the prompt asks her to hold nothing; None otherwise."""
+    if "holding" in str(prompt or "").lower():
+        return None
+    held = [(str(k).lower().replace("_", " "), float(v)) for k, v in (tags or {}).items()
+            if str(k).lower().replace("_", " ").startswith("holding") and float(v) >= HOLD_THRESHOLD]
+    if not held:
+        return None
+    name, v = max([h for h in held if h[0] != "holding"] or held, key=lambda h: h[1])
+    return f"holds something the prompt does not ask for ({name} {v:.2f})"
+
+
+def verdict(score: dict, tags: dict, faces: int | None, gate: dict, hands_off: int = 0, prompt: str = "") -> tuple[str, list[str]]:
     """best / ok / review / reject for one picture, with the reasons.
     score = image_score's {'stars', 'flags'}; tags = WD14 {tag: probability} of the whole picture; faces = faces found;
     hands_off = hands the hand judge says look off."""
@@ -149,11 +174,14 @@ def verdict(score: dict, tags: dict, faces: int | None, gate: dict, hands_off: i
     if hands_off:
         why.append(f"{hands_off} hand(s) look off")
     why += flags
+    hold = stray_hold(tags, prompt) if prompt else None          # without the prompt there is no telling what she was asked to hold
+    if hold:
+        why.append(hold)
     if stars < gate.get("min_stars_ok", 4):
         return "review", why or [f"{stars} stars"]
     if hands_off:
         return "review", why
-    if stars >= 5 and not flags:
+    if stars >= 5 and not flags and not hold:
         return "best", why
     return "ok", why
 
@@ -218,9 +246,11 @@ def next_counts(plan: dict, stats: dict) -> dict:
 EXPLORE_STRENGTH = 0.1     # variation strength of an 'explore' picture: a close relative of the keeper (the 🔀 More like this value)
 
 
-def explore_split(n: int, explore: float) -> tuple[int, int]:
-    """(new pictures, variations of the best one) for a setting's count this round."""
-    k = int(round(n * max(0.0, min(1.0, explore))))
+def explore_split(n: int, explore: float, rnd: int = 2) -> tuple[int, int]:
+    """(new pictures, variations of the best one) for a setting's count in round `rnd` (from 2 on). The share is spread over the rounds, so it
+    averages out to `explore` even for a count of 1 (0.5 = every other round); a plain round() gave a count-1 setting none at 0.5 (round(0.5) == 0)."""
+    e = max(0.0, min(1.0, explore))
+    k = int(n * e * (rnd - 1) + 1e-9) - int(n * e * (rnd - 2) + 1e-9)
     return n - k, k
 
 

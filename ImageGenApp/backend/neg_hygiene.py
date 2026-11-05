@@ -77,7 +77,9 @@ def _positive_index(prompt: str):
     sets, keys = [], set()
     for key, _w, _raw in _flat(prompt):
         ws = _WORDS.findall(key.lower())
-        if not ws or ws[0] in _NEGATING or len(ws) > MAX_TAG_WORDS:   # prose ("red iris visible under the bangs") has no head word
+        # a negation anywhere ("no gloves", "nylon not rubber") asks for the thing to be absent: it never drops the negative
+        # tag that keeps it out (before 2026-11-03 only a leading one counted, and 7 presets' negatives lost "rubber")
+        if not ws or any(w in _NEGATING for w in ws) or len(ws) > MAX_TAG_WORDS:   # prose ("red iris visible under the bangs") has no head word
             continue
         sets.append((frozenset(ws), ws[-1]))      # the tag's words and its head word (the last one: 'covered NAVEL')
         keys.add(key)
@@ -151,14 +153,42 @@ def prune_negative(prompt: str, negative: str, aliases=None) -> tuple[str, list[
     return join_tags(cleaned), list(dict.fromkeys(dropped)), merged[0]
 
 
-def note_html(dropped: list[str], merged: int) -> str:
-    if not dropped and not merged:
+def dedupe_prompt(prompt: str) -> tuple[str, int]:
+    """(the prompt with each repeated tag once, how many repeats were merged). A repeat runs where the tag first appears, at its
+    strongest weight (`prompt_tools.merge_prompts`: a wildcard group written twice stays two picks, BREAK and LoRA tags are kept);
+    weighted groups "(a, b:1.2)" count as one item. The text is returned unchanged when nothing repeats.
+    Why: the auto-quality tags already merged the prompt this way when they were added, so a prompt that wrote its own quality
+    tags kept its repeats and one that didn't lost them; and a repeat is not emphasis — write one weight instead."""
+    from backend.prompt_tools import merge_prompts, _DYNAMIC
+    seen, n = set(), 0
+    for raw in split_tags(prompt or ""):
+        if raw == "BREAK" or _DYNAMIC.search(raw):
+            continue
+        k = parse_tag(raw)[0]
+        if k:
+            n += k in seen
+            seen.add(k)
+    return (merge_prompts(prompt), n) if n else (prompt or "", 0)
+
+
+def note_html(dropped: list[str], merged: int, prompt_merged: int = 0) -> str:
+    """The result line's 🧹 note, in both languages (backend/i18n.L: the page shows the chosen one)."""
+    if not dropped and not merged and not prompt_merged:
         return ""
     import html
-    parts = []
+    from backend.i18n import L
+    out = []
+    if prompt_merged:
+        out.append(L(f"🧹 Prompt: {prompt_merged} repeated tag(s) ran once, at their strongest weight",
+                     f"🧹 正向提示词：{prompt_merged} 个重复的标签只用了一次（取最强的权重）"))
+    parts_en, parts_zh = [], []
     if dropped:
-        shown = ", ".join(dropped[:8]) + (f" … (+{len(dropped) - 8})" if len(dropped) > 8 else "")
-        parts.append(f"dropped {len(dropped)} tag(s) the prompt asks for: <code>{html.escape(shown)}</code>")
+        shown = html.escape(", ".join(dropped[:8]) + (f" … (+{len(dropped) - 8})" if len(dropped) > 8 else ""))
+        parts_en.append(f"dropped {len(dropped)} tag(s) the prompt asks for: <code>{shown}</code>")
+        parts_zh.append(f"去掉了 {len(dropped)} 个正向提示词要画的标签：<code>{shown}</code>")
     if merged:
-        parts.append(f"merged {merged} repeated tag(s)")
-    return f'<br><span style="color:#9399b2;">🧹 Negative: {" · ".join(parts)}</span>'
+        parts_en.append(f"merged {merged} repeated tag(s)")
+        parts_zh.append(f"合并了 {merged} 个重复的标签")
+    if parts_en:
+        out.append(L(f"🧹 Negative: {' · '.join(parts_en)}", f"🧹 反向提示词：{' · '.join(parts_zh)}"))
+    return "".join(f'<br><span style="color:#9399b2;">{o}</span>' for o in out)

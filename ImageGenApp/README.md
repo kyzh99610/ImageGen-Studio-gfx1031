@@ -39,6 +39,43 @@ On an RX 9070 XT: SDXL 1024×1024 at 20 steps 3.7 s against ZLUDA's 6.9 s, SD 1.
 
 ## Tabs
 
+### 🪄 Quick picture (一键出图)
+
+The first tab: a few plain choices and one button, for good pictures without knowing the controls behind them.
+
+- **Start from** a saved setting (it runs exactly as saved; every folder is listed), a character card (its model, LoRAs and its
+  settings for the chosen model) or just a prompt (the model's measured recipe: AYS 12 steps, CFG 6, PAG 2 on Illustrious / NoobAI).
+- **What to draw**: a few words added to the setting's or card's prompt. Everyday Chinese words (海边, 微笑, 红色连衣裙 …) are turned into
+  tags; words the models don't know are listed, never guessed. **Add variety** takes a different line of one of your wildcard files per picture.
+- **Framing** (Auto / portrait / cowboy shot / full body / wide shot) and **Detail** (As saved / Fast / Standard / Best) map onto ✨ Polish's
+  measured recipes; Best is the new Polish entry **Auto — best** (the slower recipe measured better for each framing: hires on a cowboy shot,
+  the 2× detail stage on a full body or wide shot).
+- **Drawing style**: As saved (the setting's or card's own sampler; for a prompt the measured AYS 12 / CFG 6 / PAG 2), **Softer lines**
+  (DPM++ 2M Karras 28 steps, CFG 5, no PAG: thinner outlines and gentler shading; the default for a new user) or **Painterly** (Euler a 28 steps,
+  CFG 5, no PAG: the softest). Measured on an Illustrious checkpoint with a character LoRA setup, 3 saved settings × 3 seeds, the same detail
+  passes: PAG 2 + CFG 6 draw the thick outlines and hard light, 24 steps alone changed little; Softer lines kept the character as recognisable
+  (CCIP 0.927 against 0.930) at no extra time (PAG runs the model twice a step), Painterly a little less (0.915). Illustrious / NoobAI only:
+  other families keep their own sampler and the plan says so. More steps (6 pictures per count, the same chain): AYS + PAG 2 at 20 / 30 steps
+  and Karras at 40 / 60 changed small details but did not look better (Karras at 12 was rougher); Euler a at 40 was a little sharper than
+  at 28 for +18 % time. On a family without a measured recipe, "just a prompt" uses the app's defaults (DPM++ 2M Karras, 20 steps,
+  CFG 7.5), not the last run's sampler.
+- **Shape**, **colour** (vivid / natural / soft = colour strength 1 / 0.85 / 0.75), **how many** and the **seed**.
+- A box says what will happen before you press the button (model, recipe, size, the time it took here last time). Afterwards every picture
+  is checked with the models already on the PC (stars, faces, hands, and the face against the character's: a saved setting borrows the
+  learned face of the card that shares its LoRAs; a hat, a bun, a ponytail or glasses in the picture's own prompt widens the margin, as in the
+  outfit batch; the colour-specks note is left out, it fired on 93 of 162 good pictures). The Studio Loop's age guard runs on every picture,
+  check box or not, and names a picture WD14 reads as a child in red. Then the next steps are suggested: 🔀 More like the picked one,
+  ⬆ Redo it in more detail, 🎲 New pictures, ⭐ Favourite, 🔧 Open in Generate (the Generate tab takes the run, with the picked seed).
+- It runs the Generate tab's own pipeline, so records, restore, History and ⭐ work as for any picture. HTTP API: `/do_simple_generate`
+  (source, setting, card, outfit, model, what, variety, framing, detail, shape, colour, look, count, seed, check, lang; look = follow / soft /
+  painterly).
+
+### 中文 / English
+
+The button at the top right switches the whole page between 中文 and English (remembered in the browser; 中文 by default). Labels stay
+English on the server, because they are the names the HTTP API and the Studio Loop use; the page swaps the text it shows. Hints,
+messages and the Help tab come in both languages (`backend/i18n.py`, `backend/ui_zh.py`, `backend/ui_messages.py`).
+
 ### 🎨 Generate
 
 Generate images from text prompts using Stable Diffusion checkpoints. The output gallery sits right next to the prompt, so you never scroll to see results.
@@ -112,12 +149,12 @@ Also:
 - **img2img:** Batch Size N = N variations (seed, seed + 1, …), 🔬 Max detail works on img2img results, strength down to 0.05; a skipped hires fix is reported.
 - **Studio Loop exploration:** a plan's "Explore around the keepers" share re-renders each setting's best picture with a small variation in later rounds; `report.md` lists the prompt tags that go with keepers and with failures.
 - **🔓 Content controls are yours:** the app refuses no prompt — your prompts and negatives decide. Keep a long shared negative in one wildcard file (`__mylist__` works in a negative; edit `models\wildcards\mylist.txt` to change every preset that uses it). Each Studio Loop plan has a switch “Reject pictures with exposure tags” (on by default); the loop's age guard (pictures WD14 reads as a child) is always on and no plan can switch it off.
-- **🔁 Studio Loop** (the 🔁 Studio Loop tab, or `studio_loop.bat <plan>`): the tab makes / picks a plan, ▶ starts the loop on the running app, ⏹ stops it after the current setting and 🔄 shows the log, the report and the best pictures; it renders your **saved settings** round after round, unattended (overnight), scores every picture on the CPU (faces, hands, the card's colours and identity, WD14 tags for exposure and artifacts) and files it under `outputs\loop\<run>\{best, ok, review, reject}`. Between rounds a setting that kept nothing for two rounds is parked and one whose pictures you ⭐ in the History tab gets more. A plan is a small JSON file in `settings\loop\` (copy `loop_example.json`): the saved settings, pictures per round, a stop time / hour budget, an optional character card, the tags that reject a picture. `report.html` / `report.md` in the run folder say what to keep and which settings need a prompt fix. It starts its own app (close yours first) or uses a running one (`--attach`); the app's heat protection applies; a file named `STOP` in the run folder ends it after the current picture.
+- **🔁 Studio Loop** (the 🔁 Studio Loop tab, or `studio_loop.bat <plan>`): the tab makes / picks a plan, ▶ starts the loop on the running app, ⏹ stops it after the current setting and 🔄 shows the log, the report and the best pictures; it renders your **saved settings** round after round, unattended (overnight), scores every picture on the CPU (faces, hands, the card's colours and identity, WD14 tags for exposure and artifacts) and files it under `outputs\loop\<run>\{best, ok, review, reject}`; something in her hands that the prompt never asks for keeps a picture out of best (WD14 sees pens and cards, not glowing orbs). Between rounds a setting that kept nothing for two rounds is parked and one whose pictures you ⭐ in the History tab gets more. A plan is a small JSON file in `settings\loop\` (copy `loop_example.json`): the saved settings, pictures per round, a stop time / hour budget, an optional character card, the tags that reject a picture. `report.html` / `report.md` in the run folder say what to keep and which settings need a prompt fix. It starts its own app (close yours first) or uses a running one (`--attach`); the app's heat protection applies; a file named `STOP` in the run folder ends it after the current picture.
 - **Auto-add quality tags** checkbox — adds the quality tags each model family was trained with, plus matching negative tags: Illustrious/NoobAI `masterpiece, best quality, amazing quality, very aesthetic, absurdres`, Pony `score_9, score_8_up, score_7_up`, SD 1.5 `masterpiece, best quality`. Only added when your prompt has none; the exact prompt used is shown and saved
 - **Prompt presets**, **My Saved Prompts**, **Save / Load Settings** (restores the checkpoint too), **Quick Tags**
 - **Compel long-prompt encoding** with weighted/blended syntax `(word:1.3)`, `(word1|word2)`
 - **📂 Show in folder** under the gallery opens Explorer with the selected image highlighted
-- **Accelerated SDXL text encoding** (optional, Settings tab): CLIP-L and OpenCLIP-G on the integrated GPU via ONNX DirectML — mainly useful for the DirectML backend (it stays off on native ROCm, which has no torch-directml to find the iGPU with)
+- **Accelerated SDXL text encoding** (optional, Settings tab): CLIP-L and OpenCLIP-G on the integrated GPU via ONNX DirectML — for the DirectML backend: on a GPU backend (native ROCm or ZLUDA) it stays off and says why — the text encoders already run on the card, and there it would save under 0.3 s per prompt and hold ~6 GB of memory
 
 Every setting has a one-line hint; the **📖 Settings Guide** accordion has the full cheat sheet.
 
@@ -137,14 +174,14 @@ Drop any image made by this app, A1111/Forge or Civitai to see its prompt and se
 
 Remove watermarks, logos, and overlaid text from images:
 
-- **Auto-Detect** — EasyOCR (on the GPU under ZLUDA) finds text regions; corner heuristic catches corner logos. Detected regions are expanded to include surrounding graphic elements (borders, icons) and merged when close together.
+- **Auto-Detect** — EasyOCR (on the GPU under ZLUDA and native ROCm) finds text regions; corner heuristic catches corner logos. Detected regions are expanded to include surrounding graphic elements (borders, icons) and merged when close together.
 - **Draw-on-image** — Paint red brush strokes directly on the image to mark additional regions for removal.
 - **OCR-off mode** — Toggle OCR detection off to use draw-only selection, keeping desired text intact (useful for emoji, manga, etc.).
 - **Auto-downscale** — Large images (>2048px) are automatically downscaled for the editor canvas. Full resolution preserved in output.
 - **Removal methods:**
   - *LaMa ONNX* (default) — the cleanest result for almost every watermark (~7 s). Auto-downloads ~100 MB model on first use. CPU only (DML crashes on this model's MatMul ops).
   - *OpenCV TELEA/NS* — instant, but only good for thin text; large areas get smeared
-  - *SD Inpainting* — fills the mask, then repaints a crop around it at strength 0.6 with the model loaded in Generate (SD 1.5 or SDXL, ~10 s) and blends it back. It no longer invents objects there, but LaMa stays cleaner on a long mark
+  - *SD Inpainting* — fills the mask with LaMa, then repaints a crop around it at strength 0.6 with the model loaded in Generate (SD 1.5 or SDXL, ~10 s) and blends it back. It no longer invents objects there, but LaMa stays cleaner on a long mark
 - **Poisson seamless blending** — Inpainted regions use `cv2.seamlessClone` for gradient-matched compositing; falls back to feathered Gaussian blend at image edges.
 - **📁 Batch** — clean a whole folder (auto-detect + the chosen method) into `outputs/cleaned_<folder>/`; images where nothing is found are copied unchanged. Handy for LoRA training sets.
 - **Saved automatically** — as `<source>_clean.png` when the image came from this app (else `dewatermark_<time>.png`); earlier results are never overwritten.
@@ -230,7 +267,7 @@ For SD 1.5 models, SmartSplit distributes components across devices to reduce dG
 - **UNet** → dGPU via ZLUDA (or DirectML)
 - **VAE Decode** → CPU (float32 for compatibility)
 
-SmartSplit is **SD 1.5 only** — SDXL uses the standard single-GPU path with optional accelerated text encoding above. The status line warns when a stage can't go where you asked, and the result line says where each stage ran. On native ROCm (RX 9070 XT + 780M): text encoder on the iGPU 0.14 s, VAE on the iGPU 1.8 s, VAE on the CPU 44 s (that torch has no MKL).
+SmartSplit is **SD 1.5 only** — SDXL uses the standard single-GPU path with optional accelerated text encoding above. The status line warns when a stage can't go where you asked, and the result line says where each stage ran. On native ROCm (RX 9070 XT + 780M): text encoder on the iGPU 0.14 s, VAE on the iGPU 1.8 s, VAE on the CPU 6.5 s (through ONNX Runtime; torch's CPU without MKL took 44 s).
 
 ### NPU Status (XDNA1, e.g. Ryzen 7 8700G)
 
@@ -311,6 +348,6 @@ the [main README](../README.md#troubleshooting).
 | Accelerated TE says no iGPU is reachable through torch-directml | Native ROCm has no torch-directml; the text encoders run on the GPU as usual |
 | Settings' GPU choice can't be clicked | Native ROCm runs one GPU per start: close the app and use `launch.bat --gpu N` (the hint under it says which number is which) |
 | Watermark remover white spots | Increase mask dilation to 30–40px; Poisson blending handles most edge artifacts |
-| EasyOCR "Using CPU" message | Only expected on DirectML/CPU, or if `IMAGEGEN_CUDNN=1` is set. Under ZLUDA OCR runs on the GPU |
+| EasyOCR "Using CPU" message | Only expected on DirectML/CPU, or if `IMAGEGEN_CUDNN=1` is set under ZLUDA. Under ZLUDA and native ROCm OCR runs on the GPU (native: with MIOpen off for it) |
 | Black images from generation | Check LoRA compatibility; mismatched base (e.g., SD1.5 LoRA on SDXL) causes this |
 | Auto-loop stop kills current batch | By design — stop button aborts immediately, not after current batch finishes |

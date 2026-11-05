@@ -72,6 +72,31 @@ def _env_gpu_index() -> int:
 
 SELECTED_GPU_INDEX: int = _env_gpu_index()
 
+
+def _gpu_chosen() -> bool:
+    """True when IMAGEGEN_GPU is a choice (--gpu N, Settings, a script's own setting), False for none or the launchers' automatic pick
+    (IMAGEGEN_GPU_AUTO=1), which is HIP's number: DirectML numbers the GPUs in an order of its own (see _dml_device_index)."""
+    return bool(str(os.environ.get("IMAGEGEN_GPU", "")).strip()) and os.environ.get("IMAGEGEN_GPU_AUTO") != "1"
+
+
+def _dml_device_index(tdml, idx: int, chosen: bool) -> int:
+    """torch-directml's number for this process. A chosen number is torch-directml's own (Settings maps a GPU to it by name); without a
+    choice the first discrete GPU by name. On the 8700G bench HIP calls the RX 9070 XT 0 and torch-directml calls the 780M 0, so
+    `launch.bat --dml` (HIP's automatic pick, 0) and every plain python-3.10 process (the CPU test suite too) ran DirectML on the 780M."""
+    count = tdml.device_count()
+    if chosen:
+        return idx if 0 <= idx < count else 0
+    try:
+        if str(APP_DIR) not in sys.path:
+            sys.path.insert(0, str(APP_DIR))
+        from backend.hardware_detector import _classify_gpu      # stdlib only at import
+        for i in range(count):
+            if not _classify_gpu(str(tdml.device_name(i)).rstrip("\x00"))[1]:
+                return i
+    except Exception:
+        pass
+    return 0
+
 # Native ROCm PyTorch (install_rocm.bat, python-rocm\): no ZLUDA layer, so the rules written for ZLUDA below stay off.
 # Flash attention and MIOpen work there: on gfx1201 an SDXL step takes 0.17 s against ZLUDA's 0.32 s, with 8.1 GB allocated against 12.45 GB.
 NATIVE_ROCM = importlib.util.find_spec("rocm_sdk") is not None
@@ -130,8 +155,7 @@ def get_device(gpu_index: int | None = None, backend: str | None = None) -> str:
     if target_backend in ("directml", "dml") or os.environ.get("FORCE_DML"):
         try:
             import torch_directml
-            dml_count = torch_directml.device_count()
-            dml_idx = idx if 0 <= idx < dml_count else 0
+            dml_idx = _dml_device_index(torch_directml, idx, chosen=gpu_index is not None or _gpu_chosen())
             return str(torch_directml.device(dml_idx))
         except ImportError:
             pass
@@ -153,6 +177,13 @@ def get_device(gpu_index: int | None = None, backend: str | None = None) -> str:
                 # MIOpen, and make GPU VAE decode usable. IMAGEGEN_CUDNN=1 reverts.
                 if os.environ.get("IMAGEGEN_CUDNN") != "1":
                     torch.backends.cudnn.enabled = False
+            # Plain "cuda", device-0 reads and the memory statistics follow the chosen GPU. Under ZLUDA HIP shows every GPU, and
+            # EasyOCR, SmartSplit's UNet, the trainer and the VRAM-spill note used GPU 0 whichever one was chosen (native ROCm
+            # shows only the chosen one, so it is always 0 there).
+            try:
+                torch.cuda.set_device(dev_idx)
+            except Exception:
+                pass
             return f"cuda:{dev_idx}"
     except ImportError:
         pass
@@ -160,8 +191,7 @@ def get_device(gpu_index: int | None = None, backend: str | None = None) -> str:
     # DirectML fallback
     try:
         import torch_directml  # type: ignore
-        dml_count = torch_directml.device_count()
-        dml_idx = idx if 0 <= idx < dml_count else 0
+        dml_idx = _dml_device_index(torch_directml, idx, chosen=gpu_index is not None or _gpu_chosen())
         return str(torch_directml.device(dml_idx))
     except ImportError:
         pass
@@ -169,7 +199,7 @@ def get_device(gpu_index: int | None = None, backend: str | None = None) -> str:
 
 
 # Resolved at startup — can be overridden at runtime via set_active_gpu()
-DEVICE: str = get_device(SELECTED_GPU_INDEX)
+DEVICE: str = get_device()          # None: SELECTED_GPU_INDEX, and for DirectML the discrete GPU unless a GPU was chosen
 
 
 def set_active_gpu(index: int, backend: str | None = None):
@@ -180,6 +210,7 @@ def set_active_gpu(index: int, backend: str | None = None):
     SELECTED_GPU_INDEX = index
     DEVICE = get_device(index, backend=backend)
     os.environ["IMAGEGEN_GPU"] = str(index)
+    os.environ.pop("IMAGEGEN_GPU_AUTO", None)       # a choice now: child processes must not take it for HIP's automatic pick
     # No HIP_VISIBLE_DEVICES here: ZLUDA v6 breaks with it (multi-GPU), and HIP has already
     # started by now, so changing it could only affect child processes.
 

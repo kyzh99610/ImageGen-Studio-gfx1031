@@ -182,11 +182,18 @@ def restore_plan(meta: dict, *, list_checkpoints, list_vaes, list_loras, schedul
     plan["mode"] = rec.get("mode") or ("img2img" if meta.get("strength") is not None else "txt2img")
     # weighted prompts look different under the other weighting mode: say so (images from before the
     # A1111 mode existed were made with Compel's)
-    from backend.prompt_syntax import EMPHASIS
+    # (A1111 text without an "Emphasis:" line = A1111's own maths: A1111 / Forge pictures and this app's before Norm-keep)
+    from backend.prompt_syntax import EMPHASIS, MODE_LABELS, emphasis_mode
     made = meta.get("emphasis") or (rec.get("emphasis") if rec else None) or ("compel" if rec else "a1111")
+    made = emphasis_mode(made)
     if made != EMPHASIS["mode"] and re.search(r"\([^()]*:\s*\d*\.?\d+\s*\)|\(\(|\[", str(meta.get("prompt") or "")):
-        plan["notes"].append(f"made with {'Compel' if made == 'compel' else 'A1111'} prompt weighting — switch "
+        plan["notes"].append(f"made with {MODE_LABELS[made]} prompt weighting — switch "
                              f"Settings → Prompt weights to reproduce it exactly")
+    # 🧹 runs a repeated prompt tag once (since 2026-11-03): a picture whose recorded prompt still repeats a tag ran it twice
+    from backend import neg_hygiene as _nh
+    if _nh.CONFIG["on"] and _nh.dedupe_prompt(str(meta.get("prompt") or ""))[1]:
+        plan["notes"].append("its prompt repeats a tag, and 🧹 Negative hygiene now runs each tag once — turn it off in "
+                             "Settings to reproduce it exactly")
     plan["exact"] = bool(rec)
     return plan
 
@@ -224,7 +231,7 @@ def plan_extra_updates(plan: dict, clean_extra, keep) -> list:
                               (str((pc or cc).get("model") or "") or keep) if (pc or cc) else keep,
                               (pc.get("legs") == "hidden") if pc else keep,
                               _pose.TYPE_COMP if cc else (_pose.TYPE_POSE if pc else keep)])(plan.get("pose_control") or {}, plan.get("composition_control") or {}),
-            "Auto" if (plan.get("polish") or {}).get("auto") else "(off)"]            # round 50: a picture made with Auto restores Auto, any other one (off): its own controls must run, not an Auto pick
+            (_polish.AUTO_BEST if (plan.get("polish") or {}).get("best") else "Auto") if (plan.get("polish") or {}).get("auto") else "(off)"]            # round 50: a picture made with Auto restores Auto, any other one (off): its own controls must run, not an Auto pick
 
 
 def gen_record(pipe, **settings) -> dict:

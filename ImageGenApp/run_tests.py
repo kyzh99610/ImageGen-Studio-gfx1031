@@ -1,4 +1,4 @@
-"""
+r"""
 ImageGen Studio test suite (CPU only — no GPU or models needed; ~1 min).
 
     python-3.10\python.exe ImageGenApp\run_tests.py
@@ -306,19 +306,30 @@ def _():
 print("\n[4/8] ONNX Session & VitisAI EP Fallback")
 # ══════════════════════════════════════════════════════════════════════════
 
-@test("_ort_session (round 26: behaviour): 'npu' asks for VitisAI, 'igpu_directml' for DirectML, 'cpu' for CPU; a provider this onnxruntime lacks falls back to CPU, an unknown device too")
+@test("_ort_session (round 26: behaviour): 'npu' asks for VitisAI, 'igpu_directml' for DirectML on the iGPU's DXGI number, 'cpu' for CPU; a provider this onnxruntime lacks falls back to CPU, an unknown device and a PC without an iGPU (or with a Vega one) too")
 def _():
     import sys
     from types import SimpleNamespace
     from unittest.mock import patch
+    from backend import dxgi       # imported before patch.dict(sys.modules), which drops whatever was first imported inside it
     from backend.smartsplit_pipeline import _ort_session
     made = []
     fake = SimpleNamespace(get_available_providers=lambda: avail[0], InferenceSession=lambda path, providers=None: made.append((path, providers)) or "session")
     avail = [["VitisAIExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"]]
-    with patch.dict(sys.modules, {"onnxruntime": fake}):
-        for ep, want in (("npu", "VitisAIExecutionProvider"), ("igpu_directml", "DmlExecutionProvider"), ("cpu", "CPUExecutionProvider"), ("something-else", "CPUExecutionProvider")):
+    laptop = [{"index": 0, "name": "AMD Radeon(TM) Graphics", "software": False}, {"index": 1, "name": "AMD Radeon RX 6800M", "software": False}]
+    with patch.dict(sys.modules, {"onnxruntime": fake}), patch.object(dxgi, "adapters", lambda: laptop):
+        for ep, want in (("npu", "VitisAIExecutionProvider"), ("igpu_directml", ("DmlExecutionProvider", {"device_id": 0})), ("cpu", "CPUExecutionProvider"), ("something-else", "CPUExecutionProvider")):
             made.clear()
             assert _ort_session(Path("m.onnx"), ep) == "session" and made == [("m.onnx", [want])], (ep, made)
+        with patch.object(dxgi, "adapters", lambda: laptop[1:]):            # no iGPU: the CPU, not ONNX Runtime's own pick (the dGPU the UNet is on)
+            made.clear()
+            _ort_session(Path("m.onnx"), "igpu_directml")
+            assert made == [("m.onnx", ["CPUExecutionProvider"])], made
+        vega = [dict(laptop[0], vendor=0x1002, device=0x1638)] + laptop[1:]  # the laptop's own iGPU (Cezanne Vega 8): it hung under this load, the CPU
+        with patch.object(dxgi, "adapters", lambda: vega):
+            made.clear()
+            _ort_session(Path("m.onnx"), "igpu_directml")
+            assert made == [("m.onnx", ["CPUExecutionProvider"])], made
         avail[0] = ["CPUExecutionProvider"]                                   # no VitisAI / DML in this onnxruntime: CPU, with the model path unchanged
         for ep in ("npu", "igpu_directml"):
             made.clear()
@@ -494,11 +505,298 @@ def _():
     assert '_smartsplit_pipe = None' in src
     assert 'SmartSplit disabled (SDXL not supported' in src
 
+@test("🗂 History's gallery clicks (never driven before): search lists newest first, a file gone since the index keeps its tile (a placeholder), so a click after it still picks the right picture; ⭐ toggles and the ⭐-only search finds it")
+def _():
+    import inspect, os, tempfile, time
+    import gradio as gr
+    from PIL import Image as _Im
+    import app as _app
+    from backend import history as H
+    tmp = Path(tempfile.mkdtemp(prefix="hist_test_"))
+    saved = (_app.OUTPUTS_DIR, H.OUTPUTS_DIR, H.THUMBS, H.INDEX_FILE, H.FAV_FILE)
+    try:
+        _app.OUTPUTS_DIR = H.OUTPUTS_DIR = tmp
+        H.THUMBS, H.INDEX_FILE, H.FAV_FILE = tmp / ".thumbs", tmp / "_index.json", tmp / "_favs.json"
+        t0 = time.time() - 100
+        for k, n in enumerate(("a.png", "b.png", "c.png")):                  # c newest
+            _Im.new("RGB", (64, 64), (40 * k, 80, 120)).save(tmp / n)
+            os.utime(tmp / n, (t0 + 10 * k, t0 + 10 * k))
+        by = {inspect.unwrap(f.fn).__name__: f.fn for f in _app.build_app().fns if f.fn is not None}
+        out = by["do_hist_search"]("", "All", "All", False)
+        items, names = out[0], out[2]
+        assert names == ["c.png", "b.png", "a.png"] and len(items) == 3, (names, len(items))
+        (tmp / "b.png").unlink()                                             # gone after the search
+        sel = gr.SelectData(None, {"index": 2, "value": None, "selected": True})
+        name, info = by["do_hist_select"](names, 0, sel)
+        assert name == "a.png" and "a.png" in info, (name, info[:80])
+        name_b, info_b = by["do_hist_select"](names, 0, gr.SelectData(None, {"index": 1, "value": None}))
+        assert name_b == "b.png" and "gone" in info_b, info_b[:80]
+        items, info, _ = by["do_hist_star"]("a.png", names, 0)
+        assert H.favourites() == {"a.png"} and info.startswith('<p') and "favourite" in info
+        assert len(items) == 3 and items[1][0].endswith("_unreadable.jpg") and items[2][1].startswith("⭐"), items   # re-rendered with b gone
+        assert by["do_hist_search"]("", "All", "All", True)[2] == ["a.png"]
+        by["do_hist_star"]("a.png", names, 0)
+        assert H.favourites() == set()
+    finally:
+        _app.OUTPUTS_DIR, H.OUTPUTS_DIR, H.THUMBS, H.INDEX_FILE, H.FAV_FILE = saved
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@test("Native ROCm's detail passes switch only MIOpen off, and back on afterwards (also after an error): torch.backends.cudnn.flags() also reset every other cuDNN flag for the pass and set a benchmark limit MIOpen warned about in every process")
+def _():
+    import torch, warnings
+    from backend import detail_tools as DT
+    import config
+    seen = []
+    @DT._no_shape_search
+    def probe(fail=False):
+        seen.append((torch.backends.cudnn.enabled, torch.backends.cudnn.deterministic))
+        if fail:
+            raise RuntimeError("boom")
+    saved = (config.NATIVE_ROCM, torch.backends.cudnn.enabled, torch.backends.cudnn.deterministic)
+    try:
+        config.NATIVE_ROCM = True
+        torch.backends.cudnn.enabled, torch.backends.cudnn.deterministic = True, True
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            probe()
+            try:
+                probe(fail=True)
+            except RuntimeError:
+                pass
+        assert seen == [(False, True), (False, True)], seen                 # off inside, the other flags as they were
+        assert torch.backends.cudnn.enabled is True and torch.backends.cudnn.deterministic is True
+        assert not [w for w in caught if "Benchmark limit" in str(w.message)], [str(w.message) for w in caught]
+        config.NATIVE_ROCM = False
+        probe()
+        assert seen[-1] == (True, True)                                      # ZLUDA / CPU: untouched
+    finally:
+        config.NATIVE_ROCM, torch.backends.cudnn.enabled, torch.backends.cudnn.deterministic = saved
+
+
+@test("The chosen GPU becomes torch's current device: under ZLUDA HIP shows every GPU, and plain 'cuda', device-0 reads and the memory statistics (EasyOCR, SmartSplit's UNet, the trainer, the Bridge's card size, the iGPU commit margin, the VRAM-spill note) used GPU 0 whichever was chosen")
+def _():
+    import torch, config
+    from backend import model_manager as MM
+    names = {0: "AMD Radeon RX 9070 XT [ZLUDA]", 1: "AMD Radeon 780M Graphics [ZLUDA]"}
+    picked = []
+    saved = (torch.cuda.is_available, torch.cuda.device_count, torch.cuda.get_device_name, torch.cuda.set_device,
+             torch.cuda.current_device, torch.backends.cudnn.enabled, torch.backends.cuda.flash_sdp_enabled(),
+             torch.backends.cuda.mem_efficient_sdp_enabled(), config.NATIVE_ROCM)
+    try:
+        torch.cuda.is_available, torch.cuda.device_count = (lambda: True), (lambda: 2)
+        torch.cuda.get_device_name = lambda i=None: names[i if i is not None else 0]
+        torch.cuda.set_device = picked.append
+        torch.cuda.current_device = lambda: picked[-1] if picked else 0
+        config.NATIVE_ROCM = False
+        assert config.get_device(1, backend="cuda") == "cuda:1" and picked[-1] == 1, picked
+        assert MM._on_integrated_gpu() is True                                  # reads GPU 1, the 780M
+        assert config.get_device(0, backend="cuda") == "cuda:0" and picked[-1] == 0
+        assert MM._on_integrated_gpu() is False
+        assert config.get_device(5, backend="cuda") == "cuda:0" and picked[-1] == 0     # out of range: GPU 0, as before
+    finally:
+        (torch.cuda.is_available, torch.cuda.device_count, torch.cuda.get_device_name, torch.cuda.set_device,
+         torch.cuda.current_device, torch.backends.cudnn.enabled, flash, mem_eff, config.NATIVE_ROCM) = saved
+        torch.backends.cuda.enable_flash_sdp(flash)
+        torch.backends.cuda.enable_mem_efficient_sdp(mem_eff)
+
+
+@test("EasyOCR follows the app's GPU: under ZLUDA it asked for plain 'cuda' (GPU 0) and wrapped its models in DataParallel over every visible GPU, which wants them on cuda:0; now it gets config.DEVICE and plain modules. ZLUDA with MIOpen re-enabled: CPU, as before; native ROCm: the GPU (it was the CPU, 11x slower) with MIOpen off for the call only (its batch-norm kernel doesn't build there)")
+def _():
+    import sys as _sys, types, torch, config
+    from backend import watermark_remover as W
+    seen = {}
+    det, rec = torch.nn.DataParallel(torch.nn.Linear(2, 2)), torch.nn.DataParallel(torch.nn.Linear(2, 2))   # built before CUDA is faked
+    class FakeReader:
+        def __init__(self, langs, gpu=True):
+            seen["gpu"] = gpu
+            self.detector, self.recognizer = det, rec
+    saved = (_sys.modules.get("easyocr"), W._ocr_reader, W._ocr_langs, W._memory.make_room, config.DEVICE,
+             torch.cuda.is_available, torch.cuda.get_device_name, torch.backends.cudnn.enabled, config.NATIVE_ROCM)
+    try:
+        _sys.modules["easyocr"] = types.SimpleNamespace(Reader=FakeReader)
+        W._ocr_reader, W._memory.make_room, config.DEVICE = None, (lambda *a, **k: None), "cuda:1"
+        torch.cuda.is_available = lambda: True
+        torch.cuda.get_device_name = lambda *a: "AMD Radeon RX 9070 XT [ZLUDA]"
+        torch.backends.cudnn.enabled, config.NATIVE_ROCM = False, False
+        r = W._get_ocr_reader(["en"])
+        assert seen["gpu"] == "cuda:1", seen
+        assert r.detector is det.module and r.recognizer is rec.module
+        W._ocr_reader, torch.backends.cudnn.enabled = None, True
+        W._get_ocr_reader(["en"])
+        assert seen["gpu"] is False, seen
+        W._ocr_reader, config.NATIVE_ROCM = None, True                      # native: MIOpen stays on for the main passes
+        W._get_ocr_reader(["en"])
+        assert seen["gpu"] == "cuda:1", seen
+
+        class Probe:
+            def readtext(self, a, fail=False):
+                seen["miopen_in_call"] = torch.backends.cudnn.enabled
+                if a == "fail":
+                    raise RuntimeError("boom")
+                return []
+        assert W._readtext(Probe(), "x") == [] and seen["miopen_in_call"] is False and torch.backends.cudnn.enabled is True
+        try:
+            W._readtext(Probe(), "fail")
+        except RuntimeError:
+            pass
+        assert torch.backends.cudnn.enabled is True
+        config.NATIVE_ROCM = False
+        W._readtext(Probe(), "x")
+        assert seen["miopen_in_call"] is True                               # ZLUDA / CPU: untouched
+    finally:
+        (mod, W._ocr_reader, W._ocr_langs, W._memory.make_room, config.DEVICE,
+         torch.cuda.is_available, torch.cuda.get_device_name, torch.backends.cudnn.enabled, config.NATIVE_ROCM) = saved
+        if mod is None:
+            _sys.modules.pop("easyocr", None)
+        else:
+            _sys.modules["easyocr"] = mod
+
+
+@test("A fresh install with no checkpoint builds every Dropdown inside its choices: the Train tab's base model left \"\" outside an empty list, which Gradio 4.19 warned about at every start; its Refresh keeps the placeholder")
+def _():
+    import inspect, warnings
+    import gradio as gr
+    import app as _app
+    old = _app._checkpoint_choices
+    _app._checkpoint_choices = lambda: []
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            demo = _app.build_app()
+        bad = [str(x.message)[:120] for x in caught if "not in the list of choices" in str(x.message)]
+        assert not bad, bad
+        dd = [b for b in demo.blocks.values() if isinstance(b, gr.Dropdown) and b.label == "🧠 Base model (checkpoint)"]
+        assert len(dd) == 1 and dd[0].value == "" and [v for _, v in dd[0].choices] == [""], (dd[0].value, dd[0].choices)
+        by = {inspect.unwrap(f.fn).__name__: f for f in demo.fns if f.fn is not None}
+        up = inspect.unwrap(by["do_refresh_models"].fn)()
+        assert [v for _, v in up["choices"]] == [""], up
+    finally:
+        _app._checkpoint_choices = old
+
+
+@test("DirectML backend (found by its first smoke run, 2026-11-03): the detail passes / SD watermark fill use no_grad there (inference_mode made CLIP raise 'Cannot set version_counter for inference tensor'), loads use the chosen adapter (torch_directml.device() alone is the default one), and pictures decode on a CPU fp32 copy of the VAE (its own decode was 13/255 off and corrupted later runs)")
+def _():
+    import torch
+    from pathlib import Path as _P
+    from backend.sampling import grad_off
+    from backend import sd_pipeline as SP
+    with grad_off("privateuseone:1"):
+        assert torch.is_grad_enabled() is False and torch.is_inference_mode_enabled() is False
+    with grad_off("cuda:0"):
+        assert torch.is_inference_mode_enabled() is True
+    assert [SP._dml_index(d) for d in ("privateuseone:1", "privateuseone:0", "privateuseone", "", None)] == [1, 0, 0, 0, 0]
+    for f in ("sd_pipeline.py", "sdxl_pipeline.py", "lora_trainer.py"):
+        src = (APP_DIR / "backend" / f).read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines() if not l.strip().startswith(("#", '"', "'")) and "torch_directml.device() on its own" not in l)
+        assert "torch_directml.device()" not in code, f
+    from diffusers import AutoencoderKL
+    vae = AutoencoderKL(block_out_channels=(8,), down_block_types=("DownEncoderBlock2D",), up_block_types=("UpDecoderBlock2D",),
+                        layers_per_block=1, latent_channels=4, norm_num_groups=4, sample_size=16).half()
+    sdp = SP.SDPipeline.__new__(SP.SDPipeline)
+    sdp.device, sdp.force_tiled_decode = "privateuseone:0", False
+    lat = torch.randn(1, 4, 8, 8, generator=torch.Generator().manual_seed(0)).half()
+    a = sdp._decode_latents(vae, lat)
+    copy1 = sdp._dml_cpu_vae[1]
+    b = sdp._decode_latents(vae, lat)
+    assert sdp._dml_cpu_vae[1] is copy1 and len(a) == 1 and a[0].size == (8, 8) and list(a[0].getdata()) == list(b[0].getdata())
+    assert next(vae.parameters()).dtype == torch.float16 and next(copy1.parameters()).dtype == torch.float32   # the original stays as it was
+    sdp._dml_cpu_vae = None                                                  # what _unload leaves
+    assert len(sdp._decode_latents(vae, lat)) == 1
+
+
+@test("DirectML on an integrated GPU warns at load (a 780M drew black / NaN pictures there now and then, the laptop's Vega hung its display driver); a dedicated card, CUDA / ZLUDA and the CPU get no note")
+def _():
+    import sys as _sys, types
+    from backend import sd_pipeline as SP
+    names = {0: "AMD Radeon 780M Graphics\x00", 1: "AMD Radeon RX 9070 XT\x00", 2: "AMD Radeon(TM) Graphics\x00"}   # as torch-directml returns them
+    saved = _sys.modules.get("torch_directml")
+    _sys.modules["torch_directml"] = types.SimpleNamespace(device_name=lambda i: names[i])
+    try:
+        assert "780M" in SP._dml_igpu_note("privateuseone:0") and "native ROCm" in SP._dml_igpu_note("privateuseone:0")
+        assert "\x00" not in SP._dml_igpu_note("privateuseone:0") and "(AMD Radeon 780M Graphics)" in SP._dml_igpu_note("privateuseone:0")
+        assert "Radeon(TM) Graphics" in SP._dml_igpu_note("privateuseone:2")
+        assert SP._dml_igpu_note("privateuseone:1") == ""
+        assert SP._dml_igpu_note("cuda:0") == "" and SP._dml_igpu_note("cpu") == ""
+        assert SP._dml_igpu_note("privateuseone:0").startswith("\n⚠")          # a line of its own under "✅ Loaded"
+    finally:
+        if saved is None:
+            _sys.modules.pop("torch_directml", None)
+        else:
+            _sys.modules["torch_directml"] = saved
+
+
+@test("smoke_gpu.py --ckpt / --xl-ckpt take a file name, a stem or a path, and stop on a name that matches nothing: a path matched nothing and the test silently ran another model")
+def _():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("smoke_gpu_test", APP_DIR / "smoke_gpu.py")
+    S = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(S)
+    items = [("a_real.safetensors", "C:/m/a_real.safetensors"), ("b_anime.safetensors", "C:/m/b_anime.safetensors")]
+    arch = lambda p: "sd1"
+    assert S.pick(items, arch, "sd1") == "C:/m/a_real.safetensors"                          # no choice: the first of the family
+    for want in ("b_anime.safetensors", "b_anime", "models/checkpoints/b_anime.safetensors", r"models\checkpoints\B_ANIME.safetensors"):
+        assert S.pick(items, arch, "sd1", want) == "C:/m/b_anime.safetensors", want
+    try:
+        S.pick(items, arch, "sd1", "models/checkpoints/missing.safetensors")
+        raise AssertionError("an unknown checkpoint must stop the run")
+    except SystemExit as e:
+        assert "missing.safetensors" in str(e)
+
+
+@test("Every .py file in the repo compiles without an invalid escape sequence: Python 3.12 (python-rocm) prints a SyntaxWarning at every start, a later Python refuses the file; run_tests.py's, lora_trainer.py's and check_nodes.py's docstrings had one")
+def _():
+    import warnings
+    root = APP_DIR.parent
+    skip = {"python-3.10", "python-rocm", "site-packages", "node_modules", ".hf_cache", "models", "_setup_check", ".git"}
+    bad = []
+    for p in sorted(root.rglob("*.py")):
+        if skip & set(p.relative_to(root).parts):
+            continue
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")                                  # 3.10 reports these as a DeprecationWarning
+            try:
+                compile(p.read_text(encoding="utf-8", errors="replace"), str(p), "exec")
+            except (SyntaxError, SyntaxWarning, DeprecationWarning) as e:
+                bad.append(f"{p.relative_to(root)}: {e}")
+    assert not bad, bad
+
+
+@test("Civitai ▶ Next stops at the last page: an API call or a quick double click went to 'Page 2 / 1' with empty cards")
+def _():
+    import app as _app
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    nxt = getattr(by["do_next_page"].fn, "__wrapped__", by["do_next_page"].fn)
+    old = (_app._search_all_results, _app._search_page)
+    try:
+        for n, last in ((0, 0), (20, 0), (21, 1), (45, 2)):
+            _app._search_all_results, _app._search_page = [None] * n, 0
+            for _ in range(5):
+                try:
+                    nxt()
+                except Exception:
+                    pass                                                 # rendering placeholder results may fail; the page number is what counts
+            assert _app._search_page == last, (n, _app._search_page, last)
+    finally:
+        _app._search_all_results, _app._search_page = old
+
+
+def _split_capable(_app):
+    """build_app() as on a PC where SmartSplit has a stage (the test machine: RX 9070 XT + a 780M under DirectML). On the laptop it
+    has nothing to offload to (a Vega iGPU gets no stage), so Settings builds no Apply button and on_apply_split isn't wired."""
+    from backend.smartsplit_pipeline import SmartSplitCapability
+    cap = SmartSplitCapability(possible=True, dgpu_available=True, dgpu_dml_idx=1, igpu_dml_idx=0, igpu_vae_available=True,
+                               igpu_te_available=True, dgpu_name="AMD Radeon RX 9070 XT", igpu_name="AMD Radeon 780M Graphics")
+    with patch.object(_app, "_get_smartsplit_cap", lambda: cap):
+        return _app.build_app()
+
+
 @test("SmartSplit rejects SDXL in on_apply_split (round 26: behaviour: the handler run with an SDXL pipeline loaded, no SmartSplit pipe is built)")
 def _():
     import app as _app
     from unittest.mock import patch
-    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _app.build_app().fns}
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _split_capable(_app).fns}
     fn = getattr(by["on_apply_split"].fn, "__wrapped__", by["on_apply_split"].fn)
     old_sd, old_pipe = _app.sd, _app._smartsplit_pipe
     try:
@@ -765,6 +1063,8 @@ print("\n[10/10] SmartSplit + NPU Integration")
 def _():
     from backend.smartsplit_pipeline import SmartSplitConfig, detect_smartsplit_capability
     cap = detect_smartsplit_capability()
+    if not cap.possible:
+        raise Skip("SmartSplit has nothing to offload to on this PC: " + cap.reason.splitlines()[0][:90])
     cfg = SmartSplitConfig.auto(cap)
     assert cfg.enabled
     if cap.dgpu_dml_idx >= 0:
@@ -1699,6 +1999,21 @@ def _():
                 assert part.moves[0] == "cpu" and part.moves[-1] == "cuda:7", (fn.__name__, part.moves)
 
 
+@test("SmartSplit names the process's own GPU: 'iGPU' when the app runs on the 780M (launch.bat --gpu 1), where it said dGPU")
+def _():
+    from unittest.mock import patch
+    import config
+    from backend import smartsplit_pipeline as SP
+    for kind in ("iGPU", "dGPU"):
+        with patch.object(SP, "_main_gpu", lambda k=kind: k):
+            assert f"CUDA ({kind})" in SP.SmartSplitConfig(enabled=True, unet_device="cuda").describe()
+            assert SP._session_device(None, "igpu_directml") == kind
+    for name, kind in (("Radeon 7", "iGPU"), ("AMD Radeon 780M Graphics", "iGPU"), ("AMD Radeon RX 9070 XT", "dGPU"), ("AMD Radeon RX 6800M [ZLUDA]", "dGPU")):
+        with patch.object(config, "DEVICE", "cuda:0"), patch("torch.cuda.get_device_name", lambda i=0, n=name: n):
+            assert SP._main_gpu() == kind, name
+    with patch.object(config, "DEVICE", "cpu"):
+        assert SP._main_gpu() == "dGPU"
+
 @test("SmartSplit says where a stage really runs; VAE → CPU decodes on the CPU in fp32 and leaves the shared VAE alone")
 def _():
     from unittest.mock import MagicMock, patch
@@ -1800,6 +2115,378 @@ def _():
     assert "get-pip" not in ps.split("# A pinned wheel")[0] and "bootstrap.pypa.io" not in ps and '$PIP_SHA256' in ps.split("$env:IMAGEGEN_PIP_WHL")[2], "pip must come from the pinned wheel"
 
 
+@test("DirectML numbers: ONNX Runtime's device_id is the DXGI number, not torch-directml's (laptop: DXGI 0 = the Vega iGPU, torch-directml 0 = the RX 6800M); the upscaler and accelerated text encoding ask DXGI; no iGPU or a Vega one (it hung) = refused before 3 GB are exported, SmartSplit says why")
+def _():
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from backend import dxgi, upscaler as UP, sdxl_pipeline as XL
+    laptop = [{"index": 0, "name": "AMD Radeon(TM) Graphics", "software": False}, {"index": 1, "name": "AMD Radeon RX 6800M", "software": False},
+              {"index": 2, "name": "Microsoft Basic Render Driver", "software": True}]
+    only_dgpu = [{"index": 0, "name": "AMD Radeon RX 6800M", "software": False}, {"index": 1, "name": "Microsoft Basic Render Driver", "software": True}]
+    tdml = SimpleNamespace(device_count=lambda: 2, device_name=lambda i: ["AMD Radeon RX 6800M", "AMD Radeon(TM) Graphics"][i])
+    ort = SimpleNamespace(get_available_providers=lambda: ["DmlExecutionProvider", "CPUExecutionProvider"])
+    with patch.dict(sys.modules, {"torch_directml": tdml, "onnxruntime": ort}):        # torch-directml's own order must not leak into ONNX Runtime's numbers
+        with patch.object(dxgi, "adapters", lambda: laptop):
+            assert (dxgi.dml_index(True), dxgi.dml_index(False)) == (0, 1)
+            assert XL._dml_igpu_id() == 0 and UP._dml_dgpu_id() == 1
+            assert UP._ort_providers() == [("DmlExecutionProvider", {"device_id": 1}), "CPUExecutionProvider"]
+        with patch.object(dxgi, "adapters", lambda: only_dgpu):
+            assert dxgi.dml_index(True) is None and dxgi.dml_index(False) == 0          # the software renderer is never picked
+        with patch.object(dxgi, "adapters", lambda: []):                                # DXGI unreachable: ONNX Runtime's own pick
+            assert UP._ort_providers()[0] == ("DmlExecutionProvider", {})
+        exported = []
+        vega = [dict(laptop[0], vendor=0x1002, device=0x1638)] + laptop[1:]
+        for adapters, why in ((only_dgpu, "no iGPU"), (vega, "Vega-class")):
+            with patch.object(dxgi, "adapters", lambda a=adapters: a), patch.object(XL, "_export_sdxl_te1_to_onnx", lambda *a: exported.append(1)), \
+                    patch.object(XL, "_cached_model_stem", None):
+                try:
+                    XL._get_ort_sessions(object(), "stem")
+                    raise AssertionError("no error without a usable iGPU")
+                except RuntimeError as e:
+                    assert why in str(e), e
+        assert not exported
+        # a Vega iGPU (named only "AMD Radeon(TM) Graphics" on the laptop: the DXGI DeviceId tells) gets no stage; a 780M does
+        with patch.object(dxgi, "adapters", lambda: vega):
+            assert dxgi.offload_igpu()[0] is None and "Vega-class" in dxgi.offload_igpu()[1] and dxgi.dml_index(True) == 0
+        with patch.object(dxgi, "adapters", lambda: [{"index": 0, "name": "AMD Radeon 780M Graphics", "software": False, "vendor": 0x1002, "device": 0x15BF}]):
+            assert dxgi.offload_igpu() == (0, "")
+        # SmartSplit under ZLUDA on the laptop: nothing to offload to, and it says why (the laptop has no NPU; on a PC with a
+        # Ryzen AI NPU SmartSplit would still have that stage, so the bridge is switched off here)
+        import torch
+        from backend import smartsplit_pipeline as SP
+        with patch.object(dxgi, "adapters", lambda: vega), patch.object(torch.cuda, "is_available", lambda: True), \
+                patch.object(torch.cuda, "get_device_name", lambda i=0: "AMD Radeon RX 6800M [ZLUDA]"), \
+                patch("backend.npu_bridge.check_npu_bridge_available", lambda: (False, "no NPU")):
+            cap = SP.detect_smartsplit_capability()
+        assert not cap.possible and not cap.igpu_vae_available and "Vega-class" in cap.reason, cap
+    # the real DXGI list of this PC (Windows): hardware adapters have a name and a LUID, the numbers count from 0
+    real = dxgi.adapters()
+    if sys.platform == "win32":
+        assert real and [a["index"] for a in real] == list(range(len(real))) and all(a["name"] and a["luid"].startswith("luid_0x") for a in real), real
+
+
+@test("DirectML's device without a chosen GPU is the discrete one by name: the launchers' automatic pick is HIP's number (8700G bench: RX 9070 XT 0) and torch-directml's order is its own (780M 0), so `launch.bat --dml` and every plain python-3.10 process (this suite too) ran DirectML on the 780M; a chosen number stays torch-directml's own, and Settings' choice counts as a choice in child processes")
+def _():
+    from types import SimpleNamespace
+    import config
+
+    def tdml(*names):
+        return SimpleNamespace(device_count=lambda: len(names), device_name=lambda i: names[i] + "\x00",       # torch-directml's names end with a NUL
+                               device=lambda i=0: f"privateuseone:{i}")
+    bench, laptop = tdml("AMD Radeon 780M Graphics", "AMD Radeon RX 9070 XT"), tdml("AMD Radeon RX 6800M", "AMD Radeon(TM) Graphics")
+    assert config._dml_device_index(bench, 0, chosen=False) == 1
+    assert config._dml_device_index(laptop, 0, chosen=False) == 0
+    assert config._dml_device_index(tdml("AMD Radeon 780M Graphics"), 0, chosen=False) == 0           # an APU on its own: its iGPU
+    assert config._dml_device_index(tdml("AMD Radeon RX 7800 XT", "AMD Radeon 610M"), 0, chosen=False) == 0
+    assert [config._dml_device_index(bench, i, chosen=True) for i in (0, 1, 5)] == [0, 1, 0]            # chosen: as given (out of range: 0, as before)
+    for env, want in (({}, False), ({"IMAGEGEN_GPU": " "}, False), ({"IMAGEGEN_GPU": "0", "IMAGEGEN_GPU_AUTO": "1"}, False),
+                      ({"IMAGEGEN_GPU": "0"}, True), ({"IMAGEGEN_GPU": "1", "IMAGEGEN_GPU_AUTO": ""}, True)):
+        with patch.dict(os.environ, env):
+            for k in ("IMAGEGEN_GPU", "IMAGEGEN_GPU_AUTO"):
+                if k not in env:
+                    os.environ.pop(k, None)
+            assert config._gpu_chosen() is want, (env, config._gpu_chosen())
+    with patch.dict(sys.modules, {"torch_directml": bench}), patch.dict(os.environ, {"IMAGEGEN_GPU": "0", "IMAGEGEN_GPU_AUTO": "1"}):
+        os.environ.pop("FORCE_CPU", None)
+        assert config.get_device(None, backend="directml") == "privateuseone:1"        # --dml with the launcher's pick: the card
+        assert config.get_device(0, backend="directml") == "privateuseone:0"           # Settings passes torch-directml's own number (by name)
+        os.environ.pop("IMAGEGEN_GPU_AUTO")
+        assert config.get_device(None, backend="directml") == "privateuseone:0"        # --dml --gpu 0: the 780M, as asked
+    with patch.dict(os.environ, {"IMAGEGEN_GPU": "0", "IMAGEGEN_GPU_AUTO": "1"}), patch.object(config, "get_device", lambda *a, **k: "cpu"), \
+            patch.object(config, "SELECTED_GPU_INDEX", config.SELECTED_GPU_INDEX), patch.object(config, "DEVICE", config.DEVICE):
+        config.set_active_gpu(1)
+        assert os.environ["IMAGEGEN_GPU"] == "1" and "IMAGEGEN_GPU_AUTO" not in os.environ, dict(os.environ)
+
+
+@test("SmartSplit on the DirectML backend: iGPU and dGPU by the detector's name rules (the keywords '780' / '760' made an RX 7800 XT the 'iGPU' and the 610M the UNet's 'dGPU'), and a Vega iGPU gets no stage there either: 'Nothing to offload to' with the reason, as under ZLUDA (its sessions ran on the CPU while the split said iGPU)")
+def _():
+    from types import SimpleNamespace
+    import torch
+    from backend import dxgi, smartsplit_pipeline as SP
+    import backend.npu_bridge as NB     # patched as this object: a test that first imported it inside patch.dict(sys.modules) leaves a stale package attribute behind
+
+    def tdml(*names):
+        return SimpleNamespace(device_count=lambda: len(names), device_name=lambda i: names[i] + "\x00")
+    rdna_igpu =[{"index": 0, "name": "AMD Radeon RX 7800 XT", "software": False, "vendor": 0x1002, "device": 0x747E},
+                 {"index": 1, "name": "AMD Radeon 610M", "software": False, "vendor": 0x1002, "device": 0x164E}]
+    vega = [{"index": 0, "name": "AMD Radeon(TM) Graphics", "software": False, "vendor": 0x1002, "device": 0x1638},
+            {"index": 1, "name": "AMD Radeon RX 6800M", "software": False, "vendor": 0x1002, "device": 0x73DF}]
+    with patch.object(torch.cuda, "is_available", lambda: False), \
+            patch.object(NB, "check_npu_bridge_available", lambda: (False, "no NPU")):
+        with patch.dict(sys.modules, {"torch_directml": tdml("AMD Radeon RX 7800 XT", "AMD Radeon 610M")}), patch.object(dxgi, "adapters", lambda: rdna_igpu):
+            cap = SP.detect_smartsplit_capability()
+        assert (cap.dgpu_dml_idx, cap.igpu_dml_idx, cap.dgpu_name) == (0, 1, "AMD Radeon RX 7800 XT"), cap
+        assert cap.possible and cap.igpu_vae_available, cap
+        with patch.dict(sys.modules, {"torch_directml": tdml("AMD Radeon RX 6800M", "AMD Radeon(TM) Graphics")}), patch.object(dxgi, "adapters", lambda: vega):
+            cap = SP.detect_smartsplit_capability()
+        assert cap.dgpu_dml_idx == 0 and cap.dgpu_name == "AMD Radeon RX 6800M", cap
+        assert not cap.possible and not cap.igpu_vae_available and not cap.igpu_te_available, cap
+        assert cap.reason.startswith("Nothing to offload to") and "Vega-class" in cap.reason, cap.reason
+
+
+@test("SmartSplit's DirectML split runs the text encoder and the VAE decode on the CPU and says so: Apply set igpu_directml for both while Settings, the banner and auto() said CPU, and the VAE decoded on DirectML in fp16 (8.99/255 off the fp32 decode, RX 9070 XT); its scheduler keeps the timesteps on the CPU (PNDM hung at step 1 with them on DirectML)")
+def _():
+    import torch
+    from types import SimpleNamespace
+    import app as _app
+    from backend import sd_pipeline as SDP, smartsplit_pipeline as SSP
+    from diffusers import PNDMScheduler
+    by = {getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "?"): f for f in _split_capable(_app).fns}
+    fn = getattr(by["on_apply_split"].fn, "__wrapped__", by["on_apply_split"].fn)
+    cap = SSP.SmartSplitCapability(possible=True, dgpu_available=True, dgpu_dml_idx=1, igpu_dml_idx=0,
+                                   dgpu_name="AMD Radeon RX 9070 XT", igpu_name="AMD Radeon 780M Graphics")
+    saved = (_app.sd, _app._smartsplit_pipe, _app._smartsplit_cfg, _app._sd15.unet_only_dml)
+    try:
+        _app.sd = object.__new__(SDP.SDPipeline)
+        _app.sd.current_model = None                                   # no reload: only the config Apply builds
+        with patch.object(_app, "_get_smartsplit_cap", lambda: cap):
+            fn(True, "igpu_directml", "igpu_directml")
+        c = _app._smartsplit_cfg
+        assert (c.text_encoder_device, c.unet_device, c.vae_device, c.dgpu_dml_idx) == ("cpu", "dgpu_directml", "cpu", 1), c
+        auto = SSP.SmartSplitConfig.auto(cap)
+        assert (auto.text_encoder_device, auto.vae_device) == (c.text_encoder_device, c.vae_device), auto
+        assert "Text Encoder → CPU" in c.describe() and "VAE Decode   → CPU" in c.describe(), c.describe()
+    finally:
+        _app.sd, _app._smartsplit_pipe, _app._smartsplit_cfg, _app._sd15.unet_only_dml = saved
+
+    class Unet(torch.nn.Module):
+        config = SimpleNamespace(in_channels=4)
+
+        def __init__(self):
+            super().__init__()
+            self.w = torch.nn.Parameter(torch.zeros(1))
+
+        def forward(self, lat, t, encoder_hidden_states=None, return_dict=False):
+            return (lat * 0.1 + encoder_hidden_states.mean() * 0,)
+    sched = PNDMScheduler(skip_prk_steps=True)
+    devices, decoded = [], []
+    real_set = sched.set_timesteps
+    sched.set_timesteps = lambda n, device=None: devices.append(str(device)) or real_set(n, device=device)
+    ss = object.__new__(SSP.SmartSplitPipeline)
+    ss.cfg = SSP.SmartSplitConfig(enabled=True, text_encoder_device="cpu", unet_device="dgpu_directml", vae_device="cpu", dgpu_dml_idx=1)
+    ss.pipe = SimpleNamespace(unet=Unet(), scheduler=sched, vae=None)
+    ss._dml_dgpu, ss._te_session, ss._vae_session = torch.device("cpu"), None, None
+    ss._decode_on_cpu = lambda lat: decoded.append(lat) or ["picture"]
+    embeds = {"prompt_embeds": torch.ones(1, 77, 8), "negative_prompt_embeds": torch.zeros(1, 77, 8)}
+    with patch.object(SDP, "_build_embeds", lambda *a, **k: embeds):
+        images, timing = ss.generate("p", "n", 64, 64, 4, 7.0, 1, None)
+    assert images == ["picture"] and len(decoded) == 1, (images, decoded)                    # the CPU fp32 decode, not DirectML's
+    assert devices == ["cpu"], devices
+
+
+@test("SmartSplit's loops seed the noise a scheduler draws in step() (Euler a, DPM++ 2M SDE), as diffusers' pipelines do: without the generator the same seed gave another picture every run (Euler a: 25-28/255 through the DirectML split, 40.8/255 on native ROCm, RX 9070 XT)")
+def _():
+    import torch
+    from types import SimpleNamespace
+    from backend import sd_pipeline as SDP, smartsplit_pipeline as SSP
+    from diffusers import EulerAncestralDiscreteScheduler, PNDMScheduler
+    g = torch.Generator("cpu")
+    assert SSP._step_kwargs(EulerAncestralDiscreteScheduler(), g) == {"generator": g}
+    assert SSP._step_kwargs(PNDMScheduler(), g) == {}
+
+    class Unet(torch.nn.Module):
+        config = SimpleNamespace(in_channels=4)
+
+        def __init__(self):
+            super().__init__()
+            self.w = torch.nn.Parameter(torch.zeros(1))
+
+        def forward(self, lat, t, encoder_hidden_states=None, return_dict=False):
+            return (lat * 0.1,)
+    embeds = {"prompt_embeds": torch.ones(1, 77, 8), "negative_prompt_embeds": torch.zeros(1, 77, 8)}
+
+    def run(unet_device, seed_steps=True):
+        ss = object.__new__(SSP.SmartSplitPipeline)
+        ss.cfg = SSP.SmartSplitConfig(enabled=True, text_encoder_device="cpu", unet_device=unet_device, vae_device="cpu", dgpu_dml_idx=1)
+        ss.pipe = SimpleNamespace(unet=Unet(), scheduler=EulerAncestralDiscreteScheduler(), vae=None)
+        ss._dml_dgpu = torch.device("cpu") if unet_device == "dgpu_directml" else None
+        ss._te_session = ss._vae_session = None
+        got = []
+        ss._decode_on_cpu = lambda lat: got.append(lat.clone()) or ["picture"]
+        ss.encode_prompt = lambda *a, **k: torch.cat([embeds["negative_prompt_embeds"], embeds["prompt_embeds"]])
+        with patch.object(SDP, "_build_embeds", lambda *a, **k: embeds), \
+                patch.object(SSP, "_step_kwargs", SSP._step_kwargs if seed_steps else (lambda s, gen: {})):
+            ss.generate("p", "n", 64, 64, 4, 7.0, 1234, None)
+        return got[0]
+    for path in ("dgpu_directml", "cuda"):                                # the DirectML split and the ZLUDA / native loop
+        assert torch.equal(run(path), run(path)), path
+        torch.manual_seed(1)
+        a = run(path, seed_steps=False)
+        torch.manual_seed(2)
+        assert not torch.equal(a, run(path, seed_steps=False)), f"{path}: the unseeded run should differ (the test must see the old bug)"
+
+
+@test("download_models: a download goes to .part, resumes there, and gets its name only with the right size and SHA-256; a half file from the old script resumes, the wrong hash is removed")
+def _():
+    import hashlib
+    import importlib.util
+    import tempfile
+    from unittest.mock import patch
+    import requests
+    spec = importlib.util.spec_from_file_location("download_models_t", str(Path(__file__).parent / "download_models.py"))
+    DM = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(DM)
+    blob = bytes(range(256)) * 40
+    good = hashlib.sha256(blob).hexdigest()
+    asked = []
+
+    class R:
+        def __init__(self, start):
+            self.status_code, self._data = (206, blob[start:]) if start else (200, blob)
+
+        def iter_content(self, chunk_size):
+            yield self._data[:1000]
+            yield self._data[1000:]
+
+    def get(url, headers=None, **kw):
+        start = int((headers or {}).get("Range", "bytes=0-")[6:-1])
+        asked.append(start)
+        return R(start)
+    d = Path(tempfile.mkdtemp())
+    dest = d / "m.safetensors"
+    with patch.object(requests, "get", get):
+        (d / "m.safetensors.part").write_bytes(blob[:3000])                # an interrupted run
+        assert DM.download("u", dest, len(blob), good) and dest.read_bytes() == blob and not (d / "m.safetensors.part").exists()
+        assert asked == [3000], asked
+        dest.unlink()
+        assert not DM.download("u", dest, len(blob), "0" * 64) and not dest.exists() and not (d / "m.safetensors.part").exists()
+        with patch.object(DM, "MODELS", [{"name": "m", "url": "u", "dest": dest, "bytes": len(blob), "sha256": good}]), \
+                patch.object(DM, "CKPT_DIR", d), patch.object(DM, "VAE_DIR", d):
+            dest.write_bytes(blob[:5000])                                    # the old script wrote straight to the name
+            asked.clear()
+            assert DM.main() == 0 and dest.read_bytes() == blob and asked == [5000], asked
+            asked.clear()
+            assert DM.main() == 0 and asked == []                           # complete: nothing fetched
+            dest.write_bytes(blob + b"x")                                    # someone else's file of that name: never touched
+            assert DM.main() == 1 and dest.read_bytes() == blob + b"x"
+    src = (Path(__file__).parent / "download_models.py").read_text(encoding="utf-8")
+    assert "/resolve/main/" not in src and src.count('"sha256":') == len(DM.MODELS) == 4
+    bat = (Path(__file__).parent / "download_models.bat").read_text(encoding="cp1252")
+    assert "python-rocm\\Scripts\\python.exe" in bat
+
+
+@test("Accelerated SDXL text encoding stays off on a GPU backend and says why (the text encoders run on the card; the iGPU's export and sessions cost ~6 GB of commit); DirectML and the CPU may use it")
+def _():
+    from unittest.mock import patch
+    import app as _app
+    from backend import sdxl_pipeline as SX
+    assert SX.accel_te_problem("cuda:0") and "DirectML" in SX.accel_te_problem("cuda")
+    assert SX.accel_te_problem("privateuseone:1") is None and SX.accel_te_problem("cpu") is None
+    fn = next(f.fn for f in _app.build_app().fns if getattr(getattr(f.fn, "__wrapped__", f.fn), "__name__", "") == "on_accel_te_toggle")
+    with patch.object(_app._sdxl, "device", "cuda:0"), patch.object(SX, "_accel_te_enabled", False):
+        out = fn(True)
+        assert out.get("value") is False and "already run on your GPU" in out.get("info", "") and SX._accel_te_enabled is False, out
+        assert "disabled" in fn(False).get("info", "")
+    with patch.object(_app._sdxl, "device", "privateuseone:1"), patch.object(SX, "_accel_te_enabled", False), patch.object(SX, "_dml_igpu_id", lambda: 0):
+        out = fn(True)
+        assert out.get("value") is not False and "enabled" in out.get("info", "") and SX._accel_te_enabled is True, out
+    from backend import dxgi
+    vega = [{"index": 0, "name": "AMD Radeon(TM) Graphics", "software": False, "vendor": 0x1002, "device": 0x1638},
+            {"index": 1, "name": "AMD Radeon RX 6800M", "software": False}]
+    with patch.object(_app._sdxl, "device", "privateuseone:1"), patch.object(SX, "_accel_te_enabled", False), patch.object(dxgi, "adapters", lambda: vega):
+        out = fn(True)
+        info = out.get("info", "")
+        assert out.get("value") is False and "⚠ Accelerated text encoding stays off" in info and "Vega-class" in info and SX._accel_te_enabled is False, out
+
+
+@test("LoRA trainer on native ROCm + GPU: the base model comes in over the read-only mapping and the preflight counts it so; on the CPU, under ZLUDA or for a non-native PC the old load and factors stay")
+def _():
+    import contextlib
+    import tempfile
+    from unittest.mock import patch
+    import torch
+    import config as C
+    from backend import lora_trainer as LT, model_manager as MM
+    d = Path(tempfile.mkdtemp())
+    ck = d / "base_xl.safetensors"
+    ck.write_bytes(b"\0" * 1024)
+    seen = {}
+
+    @contextlib.contextmanager
+    def ro(dev):
+        seen["ro"] = dev
+        yield
+
+    def problem(path, scale=1.0, mapped=True):
+        seen["mapped"] = mapped
+        return "stop here"
+    for native, device, cuda, want in ((True, "auto", True, ("cuda", True)), (True, "cpu", True, None), (False, "auto", True, None), (True, "auto", False, None)):
+        seen.clear()
+        cfg = LT.TrainingConfig(base_model=str(ck), device=device, dataset_dir=str(d))
+        tr = LT.LoRATrainer(cfg)
+        with patch.object(C, "NATIVE_ROCM", native), patch.object(torch.cuda, "is_available", lambda: cuda), patch.object(MM, "commit_problem", problem), \
+                patch.object(MM, "read_only_checkpoints", ro), patch.object(LT, "use_fp16_base", lambda c: True):
+            try:
+                tr._load_base_model(None)
+                raise AssertionError("the refusal did not stop the load")
+            except RuntimeError as e:
+                assert "stop here" in str(e)
+        assert seen["mapped"] is (want is not None), (native, device, cuda, seen)
+    src = (Path(__file__).parent / "backend" / "lora_trainer.py").read_text(encoding="utf-8")
+    assert "with read_only_checkpoints(on_gpu):" in src
+
+
+@test("commit_problem(check_only=True), the Bridge's question, releases nothing and leaves the first load to come; a real preflight releases cached models and then fits")
+def _():
+    import tempfile
+    from unittest.mock import patch
+    from backend import memory_guard as MG, model_manager as MM
+    f = Path(tempfile.mkdtemp()) / "x.safetensors"
+    f.write_bytes(b"\0" * 2**20)                       # 1 MB: the need is ~2 MB at most
+    free, calls = [0.0005], []
+
+    def rel():
+        calls.append("x")
+        free[0] = 1.0
+        return True
+    with patch.dict(MG._RELEASE, {"cache": (0, rel)}, clear=True), patch.object(MM, "avail_commit_gb", lambda: free[0]), patch.object(MM, "_first_load", [True]):
+        assert "Not enough free memory" in MM.commit_problem(str(f), check_only=True) and calls == [] and MM._first_load == [True]
+        free[0] = 1.0
+        assert MM.commit_problem(str(f), check_only=True) is None and MM._first_load == [True]
+        free[0] = 0.0005
+        assert MM.commit_problem(str(f)) is None and calls == ["x"] and MM._first_load == [False]
+    assert "check_only=True" in (Path(__file__).parent / "app.py").read_text(encoding="utf-8")
+
+
+@test("LoRA trainer: no whole-model .cpu() after training on a GPU (native ROCm or ZLUDA: its second copy ran the commit out); the CPU / DirectML paths keep it")
+def _():
+    src = (Path(__file__).parent / "backend" / "lora_trainer.py").read_text(encoding="utf-8")
+    block = src.split("# ── Cleanup ──")[1].split("elapsed = time.time() - t_start")[0]
+    assert 'if device.type != "cuda":' in block and "self.unet.cpu()" in block and "NATIVE_ROCM" not in block, block
+
+
+@test("memory_guard: short of free commit it lets cached helper models go, cheapest first and the Generate tab's model last, and stops once there is room")
+def _():
+    from unittest.mock import patch
+    from backend import memory_guard as MG, model_manager as MM
+    free = [2.0]
+    calls = []
+
+    def rel(name, gain, loaded=True):
+        def f():
+            calls.append(name)
+            free[0] += gain
+            return loaded
+        return f
+    with patch.dict(MG._RELEASE, {}, clear=True), patch.object(MM, "avail_commit_gb", lambda: free[0]):
+        MG.register("gen", rel("gen", 8), last=True)
+        MG.register("ocr", rel("ocr", 1))
+        MG.register("blip", rel("blip", 0, loaded=False))
+        MG.register("esrgan", rel("esrgan", 3))
+        assert MG.make_room(5.0) == ["ocr", "esrgan"] and calls == ["ocr", "blip", "esrgan"], calls          # enough after ESRGAN: the model stays
+        free[0], calls[:] = 2.0, []
+        assert MG.make_room(9.0, keep=("gen",)) == ["ocr", "esrgan"] and "gen" not in calls
+        free[0], calls[:] = 2.0, []
+        assert MG.make_room(20.0) == ["ocr", "esrgan", "gen"] and calls[-1] == "gen"
+        free[0], calls[:] = 30.0, []
+        assert MG.make_room(5.0) == [] and calls == []
+    import app as _app  # noqa: F401  (registers the app's own)
+    import backend.watermark_remover, backend.auto_tagger, backend.sdxl_pipeline  # noqa: F401,E401
+    assert {"Real-ESRGAN", "EasyOCR", "LaMa", "BLIP", "accelerated text encoders", "the Generate tab's model"} <= set(MG._RELEASE)
+    assert max(MG._RELEASE.items(), key=lambda kv: kv[1][0])[0] == "the Generate tab's model"
+
+
 @test("Pause while hot: a PC with no thermal zone gets a warning, not a ✅, for a limit that can never wait")
 def _():
     from unittest.mock import patch
@@ -1873,7 +2560,7 @@ def _():
                 assert "Not enough free memory" in MM.commit_problem(p)  # 1.9 x 0.00098 does not
 
 
-@test("Read-only checkpoint loads: same tensors as safetensors, every dtype and an empty tensor; only native ROCm on a GPU uses them, and the loader is put back")
+@test("Read-only checkpoint loads: same tensors as safetensors, every dtype and an empty tensor; only a GPU device (native ROCm or ZLUDA) uses them, and the loader is put back")
 def _():
     import tempfile
     from unittest import mock
@@ -1899,12 +2586,13 @@ def _():
             for device in ("cpu", "privateuseone:0"):                  # these paths fuse LoRAs in place on the CPU
                 with MM.read_only_checkpoints(device):
                     assert SFU.load_state_dict is original
-        with mock.patch("config.NATIVE_ROCM", False), MM.read_only_checkpoints("cuda:0"):
-            assert SFU.load_state_dict is original
+        with mock.patch("config.NATIVE_ROCM", False), MM.read_only_checkpoints("cuda:0"):      # ZLUDA's GPU path too
+            assert SFU.load_state_dict is not original
+        assert SFU.load_state_dict is original
         del got
 
 
-@test("A PC with only python-rocm (no python-3.10, no ZLUDA): launch.bat and launch.ps1 find it, start on native ROCm and don't warn about ZLUDA; install_rocm.bat refuses a folder too deep for the kernels' file names")
+@test("A PC with only python-rocm (no python-3.10, no ZLUDA): launch.bat and launch.ps1 find it, start on native ROCm and don't warn about ZLUDA, and mark HIP's automatic GPU pick (IMAGEGEN_GPU_AUTO=1, not with --gpu N); install_rocm.bat refuses a folder too deep for the kernels' file names")
 def _():
     import importlib.util
     import shutil
@@ -1935,18 +2623,22 @@ def _():
             "import sys\nif '--json' in sys.argv:\n    import json\n    print(json.dumps({'arch': 'gfx1201', 'gpu_index': 0, 'native_python': sys.executable, 'rocm_bin': ''}))\n"
             "else:\n    print('set \"ROCM_ARCH=gfx1201\"')\n    print('set \"ROCM_GPU_INDEX=0\"')\n    print('set \"ROCM_NATIVE_PY=' + sys.executable + '\"')\n", encoding="utf-8")
         (app_dir / "config.py").write_text("", encoding="utf-8")
-        (app_dir / "app.py").write_text("import sys\nprint('STUB APP ' + sys.prefix)\n", encoding="utf-8")
-        env = {k: v for k, v in os.environ.items() if k not in ("IMAGEGEN_GPU", "IMAGEGEN_BACKEND")}
+        (app_dir / "app.py").write_text("import os, sys\nprint('STUB APP ' + sys.prefix + ' GPU=[' + os.environ.get('IMAGEGEN_GPU', '') + '] AUTO=[' + os.environ.get('IMAGEGEN_GPU_AUTO', '') + ']')\n", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if k not in ("IMAGEGEN_GPU", "IMAGEGEN_BACKEND", "IMAGEGEN_GPU_AUTO")}
         runs = {"launch.bat": ["cmd", "/d", "/c", str(app_dir / "launch.bat"), "--port", "7999", "--no-browser", "--no-pause"]}
+        gpu_flag = {"launch.bat": ["--gpu", "1"], "launch.ps1": ["-Gpu", "1"]}
         shell = shutil.which("pwsh") or shutil.which("powershell")
         if shell:
             runs["launch.ps1"] = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(app_dir / "launch.ps1"), "-Port", "7999", "-NoBrowser", "-NoPause"]
-        for name, cmd in runs.items():
+        for (name, cmd), (extra, want) in ((nc, ew) for nc in runs.items() for ew in (([], "GPU=[0] AUTO=[1]"), (None, "GPU=[1] AUTO=[]"))):
+            # HIP's automatic pick is marked for DirectML (config.py then takes the dGPU by name there); --gpu N is a choice
+            cmd = cmd + (gpu_flag[name] if extra is None else extra)
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL, env=env, encoding="utf-8", errors="replace")
             out = r.stdout + r.stderr
             assert "native ROCm" in out and "Launching on native" in out, (name, out[-900:])
             assert "STUB APP" in out and "python-rocm" in out[out.index("STUB APP"):], (name, out[-900:])
             assert "ZLUDA not found" not in out and "Bundled Python" not in out, (name, out[-900:])
+            assert want in out, (name, want, out[-600:])
 
 
 @test("First-run kernel note: ZLUDA v6's zluda2.db (or the older zluda.db) counts as compiled, a small or missing one warns, native ROCm never warns")
@@ -4168,7 +4860,7 @@ def _():
 @test("GPU events share one queue slot (Generate during an X/Y grid crashed the process); Stop stays free")
 def _():
     import app as _app
-    b = _app.build_app()
+    b = _split_capable(_app)            # on_apply_split exists only where SmartSplit has a stage
     by = {}
     for f in b.fns:
         by.setdefault(getattr(f.fn, "__name__", "?"), []).append(f)
@@ -5160,6 +5852,36 @@ def _():
             assert len(seen) == 2 and [s[on] for s in seen] == [True, True] and [s[den] for s in seen] == [0.2, 0.4], (axis, seen)
             others = {"ed_on", "fd_on", "hd_on"} - {on}
             assert all(not s[o] for s in seen for o in others), (axis, seen)       # only the varied pass is on
+
+
+@test('X/Y grid: Prompt S/R and Negative S/R take a "quoted, value" with commas and "" (remove the words); Negative S/R changes only the negative')
+def _():
+    from PIL import Image
+    import app as _app
+    assert "Negative S/R" in _app._XY_AXES and "Prompt S/R" in _app._XY_AXES
+    sv = _app._xy_values
+    assert sv("Prompt S/R", "red hair, blue hair") == (["red hair", "blue hair"], "")
+    assert sv("Prompt S/R", '"pink eyes, magenta eyes", "", pink eyes') == (["pink eyes, magenta eyes", "", "pink eyes"], "")
+    assert sv("Negative S/R", "a, b,") == (["a", "b"], "")                    # a stray / trailing comma adds no cell
+    assert sv("Negative S/R", ' "x, y" , z')[0] == ["x, y", "z"]              # spaces around a quoted value don't count
+    assert sv("Prompt S/R", '"", x')[1] and sv("Prompt S/R", "")[1]           # the first value is what to find
+    assert _app._sr_replace("a, pink eyes, b", "pink eyes", "") == "a, b"
+    assert _app._sr_replace("pink eyes, b", "pink eyes", "") == "b" and _app._sr_replace("a, x", "x", "y") == "a, y"
+    with _BatchEnv() as E:
+        seen = []
+        cl = dict(zip(E.xy.__code__.co_freevars, E.xy.__closure__))
+        cl["do_generate"].cell_contents = lambda *a, **k: (seen.append((a[0], a[1])) or [Image.new("RGB", (a[5], a[6]))], "info", [])
+        out = E.run_xy("Negative S/R", 'bad, "", "bad, worse"')
+        assert seen == [("1girl", "bad"), ("1girl", ""), ("1girl", "bad, worse")], seen
+        assert "Grid of 3 images" in out[1], out[1]
+        seen.clear()
+        out = E.run_xy("Negative S/R", "missing, x")
+        assert not seen and "isn't in the negative prompt" in out[1], out[1]
+        out = E.run_xy("Prompt S/R", '1girl, "1girl, solo"')
+        assert [s for s in seen] == [("1girl", "bad"), ("1girl, solo", "bad")], seen
+    from backend import ui_messages as M
+    assert M.translate("❌ Negative S/R: “x” isn't in the negative prompt.") == "❌ Negative S/R：反向提示词里没有“x”。"
+    assert M.translate("An empty value") == "空值"
 
 
 @test("SD→SDXL Bridge (round 27): {a|b} / __name__ in the prompts are resolved from the seed like Generate (same picks in both stages, a seed -1 gets a real one), the records keep the template, unknown wildcards are named, a plain prompt leaves no trace")
@@ -6579,7 +7301,7 @@ def _():
     m = np.asarray(_ramp_mask(100, 80, 20, 0, 0, 10))
     assert m[:, 0].max() == 0 and m[40, 50] == 255 and m[0, 99] == 255 and m[-1, 50] == 0
 
-@test("Prompt weights: A1111 emphasis (multiply, keep the mean) is the default; Compel mode unchanged; SDXL cache keyed by mode")
+@test("Prompt weights: Norm-keep (multiply, keep the tokens' mean length) is the default; A1111 (old: keep the mean value) and Compel unchanged; names and labels map to modes; SDXL cache keyed by mode")
 def _():
     import torch, inspect
     try:
@@ -6600,19 +7322,39 @@ def _():
                returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED)
     old = PS.EMPHASIS["mode"]
     try:
-        assert old == "a1111" or True
+        assert old == PS.DEFAULT_MODE == "a1111_normkeep", old                 # the suite runs on the shipped default
+        ids = tok("a girl, sunset").input_ids
+        k = ids.index(tok.convert_tokens_to_ids("sunset</w>"))
         PS.set_emphasis("a1111")
         plain = c("a girl, sunset")
         w = c(PS.a1111_to_compel("a girl, (sunset:1.4)"))
         assert abs(w.mean().item() - plain.mean().item()) < 1e-5            # mean kept (A1111 "Original")
-        ids = tok("a girl, sunset").input_ids
-        k = ids.index(tok.convert_tokens_to_ids("sunset</w>"))
         ratio = (w[0, k] / plain[0, k]).mean().item()
         assert 1.2 < ratio < 1.6, ratio                                      # the weighted token ≈ ×1.4 (rescaled)
+        PS.set_emphasis("a1111_normkeep")
+        n = c(PS.a1111_to_compel("a girl, (sunset:1.4)"))
+        assert abs(n.norm(dim=-1).mean().item() - plain.norm(dim=-1).mean().item()) < 1e-4   # the tokens' mean length kept
+        others = [i for i in range(n.shape[1]) if i != k]
+        lift = n[0, k].norm() / plain[0, k].norm()
+        rest = (n[0, others].norm(dim=-1) / plain[0, others].norm(dim=-1)).mean()
+        assert 1.25 < (lift / rest).item() < 1.5 and 0.95 < rest.item() < 1.0, (lift.item(), rest.item())   # the tag ×1.4 over the rest
+        assert torch.equal(c("a girl, sunset"), plain)                     # unit weights: Compel's own path, whatever the mode
+        # a chunk whose mean value sits near zero (SDXL's CLIP-L): A1111's factor swings, Norm-keep's does not
+        z = torch.randn(1, 77, 32)
+        z = z - z.mean()
+        cw = torch.ones(77)
+        cw[1:40] = 1.5
+        a = PS.rescale_chunk(z, cw, "a1111")
+        nk = PS.rescale_chunk(z, cw, "a1111_normkeep")
+        assert abs(nk.norm(dim=-1).mean().item() - z.norm(dim=-1).mean().item()) < 1e-4
+        assert abs(a.norm(dim=-1).mean().item() / z.norm(dim=-1).mean().item() - 1) > abs(nk.norm(dim=-1).mean().item() / z.norm(dim=-1).mean().item() - 1)
+        assert torch.equal(PS.rescale_chunk(z, torch.zeros(77), "a1111_normkeep"), z * 0)   # all weights 0: no division by zero
         PS.set_emphasis("compel")
         wc = c(PS.a1111_to_compel("a girl, (sunset:1.4)"))
-        assert not torch.allclose(wc, w) and torch.equal(c("a girl, sunset"), plain)   # unit weights identical
-        assert PS.set_emphasis("Compel (stronger)") == "compel" and PS.set_emphasis("A1111 (default)") == "a1111"
+        assert not torch.allclose(wc, w) and not torch.allclose(wc, n)
+        for name, mode in (("Compel (stronger)", "compel"), ("A1111 (old)", "a1111"), ("a1111", "a1111"), ("A1111 (default)", "a1111"),
+                           ("Norm-keep (default)", "a1111_normkeep"), ("a1111_normkeep", "a1111_normkeep"), ("", PS.DEFAULT_MODE), ("junk", PS.DEFAULT_MODE)):
+            assert PS.set_emphasis(name) == mode, (name, mode)
     finally:
         PS.set_emphasis(old)
     # the SDXL embedding cache must not serve one weighting mode's embeddings to the other
@@ -6624,16 +7366,145 @@ def _():
         SX._SDXL_EMBED_CACHE.clear()
         SX._SDXL_EMBED_CACHE[("p", "n", "m", "a1111")] = {"prompt_embeds": torch.zeros(1)}
         SX._SDXL_EMBED_CACHE[("p", "n", "m", "compel")] = {"prompt_embeds": torch.ones(1)}
+        SX._SDXL_EMBED_CACHE[("p", "n", "m", "a1111_normkeep")] = {"prompt_embeds": torch.full((1,), 2.0)}
         try:
             PS.set_emphasis("a1111")
             assert SX._build_sdxl_embeds(fake_pipe, "p", "n")["prompt_embeds"].item() == 0.0
             PS.set_emphasis("compel")
             assert SX._build_sdxl_embeds(fake_pipe, "p", "n")["prompt_embeds"].item() == 1.0
+            PS.set_emphasis("a1111_normkeep")
+            assert SX._build_sdxl_embeds(fake_pipe, "p", "n")["prompt_embeds"].item() == 2.0
         finally:
             PS.set_emphasis(old)
     finally:
         SX._SDXL_EMBED_CACHE.clear()
         SX._SDXL_EMBED_CACHE.update(saved)
+
+
+@test("SDXL chunk cache: a new wildcard pick / a detail pass's own prompt encodes only its new 75-token chunks (the long negative comes from the cache), the result equals a fresh encode, and Clear LoRAs empties both caches")
+def _():
+    import torch
+    try:
+        from transformers import CLIPTokenizer
+        tok = CLIPTokenizer.from_pretrained("stable-diffusion-v1-5/stable-diffusion-v1-5", subfolder="tokenizer",
+                                            local_files_only=True)
+    except Exception:
+        raise Skip("SD 1.5 CLIP tokenizer not in .hf_cache")
+    from types import SimpleNamespace
+    from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTextConfig
+    from backend import sdxl_pipeline as SX
+    torch.manual_seed(0)
+    cfg = dict(vocab_size=len(tok), hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=4,
+               max_position_embeddings=77)
+    te1, te2 = CLIPTextModel(CLIPTextConfig(**cfg)), CLIPTextModelWithProjection(CLIPTextConfig(projection_dim=16, **cfg))
+    calls = []
+    for te in (te1, te2):
+        orig = te.forward
+        te.forward = (lambda o: (lambda *a, **k: (calls.append(1), o(*a, **k))[1]))(orig)
+    pipe = SimpleNamespace(_model_name_or_path="toy", tokenizer=tok, tokenizer_2=tok, text_encoder=te1, text_encoder_2=te2,
+                           unet=SimpleNamespace(dtype=torch.float32))
+    words = ["red", "blue", "green", "smile", "night", "rain", "city", "sea", "sky", "tree", "cat", "dog"]
+    long_neg = ", ".join(f"bad {w} {x}" for w in words for x in ("hands", "eyes", "text")) * 2           # several chunks
+    scene = lambda pick: "1girl, solo, (grey hair:1.2), " + ", ".join(f"{w} light" for w in words) + f", BREAK {pick}, (night:1.3)"
+    saved = (dict(SX._SDXL_EMBED_CACHE), dict(SX._SDXL_CHUNK_CACHE))
+    from pyparsing import ParserElement as _PE
+    packrat_before = bool(getattr(_PE, "_packratEnabled", False))
+    try:
+        SX._clear_embed_cache()
+        calls.clear()
+        a = SX._build_sdxl_embeds(pipe, scene("beach"), long_neg)
+        cold, n_chunks = len(calls), len(SX._SDXL_CHUNK_CACHE)
+        assert a["negative_prompt_embeds"].shape[1] >= 3 * 77 and n_chunks >= 5, (a["negative_prompt_embeds"].shape, n_chunks)
+        calls.clear()
+        b = SX._build_sdxl_embeds(pipe, scene("forest"), long_neg)                  # another wildcard pick: one chunk is new
+        one = len(calls)
+        assert 0 < one and one * 3 <= cold, (one, cold, n_chunks)                    # that chunk only (cold encoded them all)
+        calls.clear()
+        c = SX._build_sdxl_embeds(pipe, "detailed eyes, red eyes", long_neg)       # an eye pass's own prompt
+        assert 0 < len(calls) and len(calls) * 3 <= cold, (len(calls), cold)
+        assert c["negative_prompt_embeds"].shape == a["negative_prompt_embeds"].shape
+        calls.clear()
+        SX._build_sdxl_embeds(pipe, "detailed eyes, red eyes", "")                  # a new pair whose chunks are all known
+        assert not calls, len(calls)                                                # (the empty chunk came from the padding)
+        from pyparsing import ParserElement
+        assert bool(getattr(ParserElement, "_packratEnabled", False)) == packrat_before   # pyparsing as it was (fast_parsing)
+        SX._clear_embed_cache()
+        fresh = SX._build_sdxl_embeds(pipe, scene("forest"), long_neg)             # nothing cached: the same numbers
+        for k in fresh:
+            assert torch.equal(fresh[k], b[k]), k
+        assert torch.equal(a["negative_prompt_embeds"], fresh["negative_prompt_embeds"])
+        assert te1.dtype == te2.dtype == torch.float32
+        SX._SDXL_CHUNK_CACHE[("x",)] = (torch.zeros(1), torch.zeros(1))
+        SX._SDXL_EMBED_CACHE[("p",)] = {}
+        p = SX.SDXLPipeline()
+        p.pipe = SimpleNamespace()                                                   # nothing to unfuse, no snapshot
+        p.unload_loras()
+        assert not SX._SDXL_CHUNK_CACHE and not SX._SDXL_EMBED_CACHE                # a LoRA's text-encoder part leaves with it
+    finally:
+        SX._clear_embed_cache()
+        SX._SDXL_EMBED_CACHE.update(saved[0])
+        SX._SDXL_CHUNK_CACHE.update(saved[1])
+
+
+@test("fast_parsing: Compel's parse is the same with pyparsing's packrat memo, which is switched off again afterwards (left on when something else had it on), its cache emptied")
+def _():
+    from pyparsing import ParserElement
+    from compel.prompt_parser import PromptParser
+    from backend.prompt_tools import fast_parsing
+    from backend.prompt_syntax import a1111_to_compel
+    texts = ["1girl, (grey hair:1.2), [blurry], ((smile)), (school uniform, pleated skirt:1.15), night, \\(cosplay\\)",
+             "(kneeling upright on the sand facing the viewer:1.38), masterpiece, (detailed eyes:1.2), (dark crimson eyes:1.42)", ""]
+    was = bool(getattr(ParserElement, "_packratEnabled", False))
+    try:
+        if was:
+            ParserElement.disable_memoization()
+        plain = [repr(PromptParser().parse_conjunction(a1111_to_compel(t))) for t in texts]
+        for t, ref in zip(texts, plain):
+            with fast_parsing():
+                assert getattr(ParserElement, "_packratEnabled", False)
+                assert repr(PromptParser().parse_conjunction(a1111_to_compel(t))) == ref, t
+            assert not getattr(ParserElement, "_packratEnabled", False)
+        ParserElement.enable_packrat()
+        with fast_parsing():
+            pass
+        assert getattr(ParserElement, "_packratEnabled", False)                     # someone else's setting is left alone
+    finally:
+        ParserElement.reset_cache()
+        if not was and hasattr(ParserElement, "disable_memoization"):
+            ParserElement.disable_memoization()
+        elif was:
+            ParserElement.enable_packrat()
+
+
+@test("Eye / hand pass prompts (2026-11-04): eyes rolled up or crossed get no 'round pupils'; a hand action without a hand word stays in the hand prompt, a pose does not; a private word list, when present, extends both")
+def _():
+    from backend import detail_tools as DT
+    old = DT.EYE_STYLE["mode"]
+    try:
+        DT.set_eye_style("round")
+        for p, tag in (("1girl, solo, rolling eyes, blush", "rolling eyes"), ("1girl, solo, cross-eyed", "cross-eyed")):
+            e = DT.eye_prompt_from(p)
+            assert tag in e and "round pupils" not in e, e
+            assert DT.eye_negative_from(p, "bad hands") == "bad hands"                 # no "slit pupils, cat eyes" either
+        assert "round pupils" in DT.eye_prompt_from("1girl, solo, smile, red eyes")     # an ordinary prompt is unchanged
+    finally:
+        DT.set_eye_style(old)
+    h = DT.hand_prompt_from("masterpiece, 1girl, solo, grabbing own hair, touching own cheek, spread legs, lying, holding book")
+    assert all(t in h for t in ("grabbing own hair", "touching own cheek", "holding book")), h
+    assert "spread legs" not in h and "lying" not in h, h
+    try:
+        from backend import detail_words_private as X
+    except ImportError:
+        return                                                                           # public repo: no private word list
+    DT.set_eye_style("round")
+    try:
+        for words, build in ((X.EYE_KEEP_EXTRA, DT.eye_prompt_from), (X.HAND_KEEP_EXTRA, DT.hand_prompt_from)):
+            for w in words.split("|"):
+                assert w in build(f"1girl, solo, {w}, park"), w
+        for w in X.PUPIL_FREE_EXTRA.split("|"):
+            assert "round pupils" not in DT.eye_prompt_from(f"1girl, solo, {w}"), w
+    finally:
+        DT.set_eye_style(old)
 
 
 @test("VAE family from the quant_conv bias: an SD 1.5 VAE on SDXL (or back) is ignored with a warning, not decoded")
@@ -6686,17 +7557,29 @@ def _():
         rec = _app._gen_record(None, prompt="1girl, (sunset:1.3)", steps=20)
         assert rec["emphasis"] == "compel" and "Emphasis: Compel" in _app._params_text(rec)
         PS.set_emphasis("a1111")
-        assert "Emphasis" not in _app._params_text(_app._gen_record(None, prompt="x", steps=20))
+        assert "Emphasis" not in _app._params_text(_app._gen_record(None, prompt="x", steps=20))   # A1111's own maths: no line
+        PS.set_emphasis("a1111_normkeep")
+        rec = _app._gen_record(None, prompt="x", steps=20)
+        assert rec["emphasis"] == "a1111_normkeep" and "Emphasis: Norm-keep" in _app._params_text(rec)
         info = PngInfo(); info.add_text("parameters", "1girl, (sunset:1.3)\nSteps: 20, Sampler: Euler, Seed: 1, "
                                                       "Emphasis: Compel")
         with _tf.TemporaryDirectory() as d:
             f = Path(d) / "e.png"; Image.new("RGB", (8, 8)).save(f, pnginfo=info)
             meta = read_image_metadata(f)
+            for line, want in (("Emphasis: Norm-keep", "a1111_normkeep"), ("Model: x", None)):
+                i2 = PngInfo(); i2.add_text("parameters", f"1girl, (sunset:1.3)\nSteps: 20, Sampler: Euler, Seed: 1, {line}")
+                Image.new("RGB", (8, 8)).save(f, pnginfo=i2)
+                assert read_image_metadata(f).get("emphasis") == want, line
         assert meta["emphasis"] == "compel"
         plan = _app._restore_plan(meta)
         assert any("Compel prompt weighting" in n for n in plan["notes"]), plan["notes"]
         meta["prompt"] = "1girl, sunset"                                    # no weights → no note
         assert not any("weighting" in n for n in _app._restore_plan(meta)["notes"])
+        # an A1111 / Forge picture (no Emphasis line) under the Norm-keep default: the note names A1111 (old)
+        plan = _app._restore_plan({"prompt": "1girl, (sunset:1.3)", "steps": 20})
+        assert any("A1111 (old) prompt weighting" in n for n in plan["notes"]), plan["notes"]
+        PS.set_emphasis("a1111")
+        assert not any("weighting" in n for n in _app._restore_plan({"prompt": "1girl, (sunset:1.3)", "steps": 20})["notes"])
     finally:
         PS.set_emphasis(old)
 
@@ -7576,6 +8459,24 @@ def _():
     assert _app._hand_note([{"stars": 5, "flags": []}]) == ""
 
 
+@test("⭐ rating: the hand count goes over the second look's confirmed boxes — a turret / leaf box costs no star, a confirmed third hand does")
+def _():
+    from PIL import Image
+    from backend import detail_tools as D
+    from backend import image_score as S
+    im = Image.new("RGB", (400, 600), "white")
+    boxes = [(10, 10, 60, 60), (100, 100, 150, 150), (200, 200, 250, 250)]
+    old = (S.available, D.detect_hands, D.confirmed_hands)
+    try:
+        S.available = lambda: {"look": False, "faces": False, "hands": True, "identity": False}
+        D.detect_hands = lambda image, *a, **k: list(boxes)
+        for confirmed, flagged in ((boxes[:2], False), (boxes, True)):
+            D.confirmed_hands = lambda image, bx, c=confirmed: [b for b in bx if b in c]
+            r = S.score_images([im], "", speck_fn=None, judge_fn=lambda i: (0, 0))[0]
+            assert ("3 hands" in r["flags"]) == flagged and r["stars"] == (4 if flagged else 5), (confirmed, r)
+    finally:
+        S.available, D.detect_hands, D.confirmed_hands = old
+
 @test("✨ Polish remembered + Auto per picture (round 50): the dropdown is the extra key `polish` (saved settings, last session, restore), Auto picks the recipe of EACH picture's own resolved prompt inside do_generate (a pose adds '— hands'), the record / A1111 text / PNG Info name it")
 def _():
     import json as _j
@@ -7701,7 +8602,9 @@ def _():
                        "stop_at": "07:00", "max_hours": -5, "gate": {"block_tags": ["Explicit"], "faces": 1, "park_after": 2}, "junk": 1})
     assert [q["settings"] for q in p["presets"]] == ["a", "b"] and p["presets"][0]["count"] == 3 and p["presets"][1]["count"] == 8
     assert p["presets"][1]["prompt_suffix"] == "night" and p["max_hours"] == 0.05 and "junk" not in p and p["gate"]["block_tags"] == ["explicit"]
-    for bad in ({}, {"presets": []}, {"presets": ["a"], "stop_at": "7pm"}, []):
+    for ok in ("", "(off)", "Auto", "Full body — max detail"):
+        assert LP.clean_plan({"presets": ["a"], "polish": ok})["polish"] == ok
+    for bad in ({}, {"presets": []}, {"presets": ["a"], "stop_at": "7pm"}, [], {"presets": ["a"], "polish": "Full Body"}, {"presets": ["a"], "polish": "off"}):
         try:
             LP.clean_plan(bad)
             raise AssertionError(bad)
@@ -7712,6 +8615,16 @@ def _():
     assert LP.verdict({"stars": 5, "flags": []}, {"explicit": 0.8}, 1, g)[0] == "reject"
     assert LP.verdict({"stars": 5, "flags": []}, {"smile": 0.9, "explicit": 0.2}, 1, g)[0] == "best"     # under the threshold
     assert LP.verdict({"stars": 5, "flags": []}, {"text": 0.7}, 1, g) == ("reject", ["artifact: text"])
+    # something in her hands the prompt never asked for keeps a picture out of 'best' (a reason, never a reject)
+    assert LP.verdict({"stars": 5, "flags": []}, {"holding": 0.71, "holding_pen": 0.5}, 1, g, prompt="1girl, office") == \
+        ("ok", ["holds something the prompt does not ask for (holding pen 0.50)"])
+    assert LP.verdict({"stars": 5, "flags": []}, {"holding": 0.71}, 1, g, prompt="1girl, holding umbrella")[0] == "best"
+    assert LP.verdict({"stars": 5, "flags": []}, {"holding": 0.71}, 1, g)[0] == "best"                 # no prompt: not judged
+    assert LP.verdict({"stars": 5, "flags": []}, {"holding": 0.15}, 1, g, prompt="1girl")[0] == "best"   # the clean pictures' highest was 0.15
+    assert LP.verdict({"stars": 5, "flags": []}, {"holding_tray": 0.27, "tray": 0.47}, 1, g, prompt="1girl, playboy bunny") == \
+        ("ok", ["holds something the prompt does not ask for (holding tray 0.27)"])                  # the laptop's tray (unseen at 0.35)
+    assert LP.verdict({"stars": 5, "flags": []}, {"card": 0.84, "playing card": 0.68}, 1, g, prompt="1girl, casino")[0] == "best"   # cards on the table
+    assert LP.verdict({"stars": 3, "flags": ["2 faces"]}, {"holding": 0.9}, 1, g, prompt="1girl")[0] == "review"
     assert LP.verdict({"stars": 5, "flags": []}, {}, 2, g) == ("reject", ["2 faces"])
     assert LP.verdict({"stars": 5, "flags": []}, {}, 1, g) == ("best", [])
     assert LP.verdict({"stars": 4, "flags": ["no butterfly 0.3"]}, {}, 1, g)[0] == "ok"
@@ -7753,7 +8666,7 @@ def _():
 
 
 
-@test("🧹 Negative hygiene: a negative tag whose words are all in one prompt tag (or an alias) is dropped, a qualified one ('exposed …') and anything a negating prompt tag names ('no gloves') stay, repeats are kept once at their strongest weight inside and across groups, LoRA / BREAK / embeddings untouched; a real Generate run uses the cleaned negative and says so; the Settings checkbox turns it off and saves the choice")
+@test("🧹 Negative hygiene: a negative tag whose words are all in one prompt tag (or an alias) is dropped, a qualified one ('exposed …') and anything a negating prompt tag names ('no gloves', 'nylon not rubber') stay, the prompt's own repeats run once (first place, strongest weight; the record holds what ran, Send to Generate and the warnings say so), repeats are kept once at their strongest weight inside and across groups, LoRA / BREAK / embeddings untouched; a real Generate run uses the cleaned negative and says so; the Settings checkbox turns it off and saves the choice")
 def _():
     import json as _j
     from unittest.mock import patch
@@ -7776,6 +8689,20 @@ def _():
     al = NH.load_aliases(tmp)
     assert NH.prune_negative("1girl, pixel art", "lowres, text", al)[1] == ["lowres"] and "blurry" in al
     assert "dropped 2" in NH.note_html(["a", "b"], 0) and "merged 3" in NH.note_html([], 3) and NH.note_html([], 0) == ""
+    # a negation anywhere in a prompt tag asks for the thing to be absent: it never drops the negative tag that keeps it out
+    assert NH.prune_negative("1girl, nylon not rubber, pantyhose", "rubber, latex, lowres") == ("rubber, latex, lowres", [], 0)
+    assert NH.prune_negative("1girl, gloves without fingers", "gloves, text")[1] == []
+    # the prompt's own repeats: once, where first written, at the strongest weight; a wildcard group written twice = two picks
+    assert NH.dedupe_prompt("1girl, smile") == ("1girl, smile", 0) and NH.dedupe_prompt("") == ("", 0)
+    assert NH.dedupe_prompt("masterpiece, 1girl, pantyhose, masterpiece, (pantyhose:1.2), smile, Pantyhose") == \
+        ("masterpiece, 1girl, (pantyhose:1.2), smile", 3)
+    assert NH.dedupe_prompt("{red|blue} dress, {red|blue} dress, x")[1] == 0
+    assert NH.dedupe_prompt("a, b BREAK a, c, <lora:x:0.5>") == ("a, b BREAK c, <lora:x:0.5>", 1)
+    nh = NH.note_html([], 0, 2)
+    assert "🧹 Prompt: 2 repeated" in nh and "正向提示词：2 个重复" in nh and "Negative" not in nh
+    from backend import prompt_tools as _pt
+    assert any("repeated" in w and "once" in w for w in _pt.prompt_warnings("1girl, smile, 1girl"))
+    assert not any("repeated" in w for w in _pt.prompt_warnings("1girl, smile, {a|b}, {a|b}"))
     # a real Generate: the negative that reaches the pipeline (and the record) is the cleaned one
     with _BatchEnv() as E:
         cl = dict(zip(E.xy.__code__.co_freevars, E.xy.__closure__))
@@ -7783,15 +8710,20 @@ def _():
         out_dir = E._app.OUTPUTS_DIR
         old = NH.CONFIG["on"]
         try:
-            for on, want in ((True, "bad hands, text"), (False, "bad hands, long hair, text")):
+            for on, want, want_p in ((True, "bad hands, text", "1girl, very long hair"),
+                                     (False, "bad hands, long hair, text", "1girl, very long hair, 1girl")):
                 NH.set_on(on)
                 for f in out_dir.glob("*.png"):
                     f.unlink()
-                _, info, _ = dg("1girl, very long hair", "bad hands, long hair, text", "Euler a", 4, 6.0, 64, 64, 1, 5, None, 0.5, False,
+                _, info, _ = dg("1girl, very long hair, 1girl", "bad hands, long hair, text", "Euler a", 4, 6.0, 64, 64, 1, 5, None, 0.5, False,
                                 auto_quality=False, extra={}, progress=lambda *a, **k: None)
                 rec = _j.loads(Image.open(next(out_dir.glob("*.png"))).info["imagegen"])
                 assert rec["negative_prompt"] == want, (on, rec["negative_prompt"])
-                assert ("🧹 Negative" in info) == on, info
+                assert rec["prompt"] == want_p, (on, rec["prompt"])                       # the record holds the prompt that ran
+                assert ("🧹 Negative" in info) == on and ("🧹 Prompt: 1 repeated" in info) == on, info
+                # Send to Generate: a recorded prompt that still repeats a tag ran it twice; with 🧹 on that is not repeatable
+                notes = E._app._restore_plan({"prompt": "1girl, smile, 1girl", "steps": 20})["notes"]
+                assert any("repeats a tag" in x for x in notes) == on, notes
         finally:
             NH.set_on(old)
     # the Settings checkbox
@@ -7894,9 +8826,16 @@ def _():
     for n in ("a_seed1_0.png", "a_seed2_0.png"):
         _os.utime(raw / n, (old, old))
     assert [f.name for f in LP.own_files(raw, ("",), t0, attach=False)] == ["by_hand_0.png"]
-    # the run folder: under the attached app's outputs folder (--raw), else the app's own
+    # the run folder: under the attached app's outputs folder (--raw), else where the app it starts saves (outputs_root: IMAGEGEN_OUTPUTS_DIR or outputs/)
     src = Path(SL.__file__).read_text(encoding="utf-8")
-    assert "loop_root = (Path(a.raw) if (a.attach and a.raw) else APP / \"outputs\") / \"loop\"" in src
+    assert "loop_root = (Path(a.raw) if (a.attach and a.raw) else outputs_root()) / \"loop\"" in src
+    # on its own the loop looks where the app it starts saves: IMAGEGEN_OUTPUTS_DIR when set (2026-11-02: it looked in outputs/ and made its run folder there)
+    from unittest.mock import patch as _patch
+    with _patch.dict(os.environ, {"IMAGEGEN_OUTPUTS_DIR": r"X:\elsewhere"}):
+        assert SL.outputs_root() == Path(r"X:\elsewhere")
+    with _patch.dict(os.environ, {"IMAGEGEN_OUTPUTS_DIR": ""}):
+        assert SL.outputs_root() == SL.APP / "outputs"
+    assert 'APP / "outputs"' not in Path(SL.__file__).read_text(encoding="utf-8").split("def outputs_root")[1].split("\n", 4)[-1]
     # the Settings checkbox: a callable value (read again at each page load) and the pref written by the user's click, not by a page load
     import app as _app
     from backend import neg_hygiene as NH
@@ -8206,6 +9145,9 @@ def _():
     from types import SimpleNamespace
     assert LP.clean_plan({"presets": ["a"]})["explore"] == 0.0 and LP.clean_plan({"presets": ["a"], "explore": 7})["explore"] == 1.0
     assert LP.explore_split(4, 0.25) == (3, 1) and LP.explore_split(4, 0) == (4, 0) and LP.explore_split(2, 1) == (0, 2) and LP.explore_split(1, 0.25) == (1, 0)
+    assert [LP.explore_split(1, 0.5, r)[1] for r in range(2, 8)] == [0, 1, 0, 1, 0, 1]
+    assert [LP.explore_split(1, 0.25, r)[1] for r in range(2, 10)] == [0, 0, 0, 1, 0, 0, 0, 1]
+    assert sum(LP.explore_split(3, 0.4, r)[1] for r in range(2, 12)) == 12 and all(LP.explore_split(3, 0.4, r)[1] <= 3 for r in range(2, 12))
     recs = [dict(settings="s", verdict="ok", stars=4, why=["x"], seed=10), dict(settings="s", verdict="best", stars=5, why=[], seed=20),
             dict(settings="s", verdict="reject", stars=5, why=[], seed=30), dict(settings="t", verdict="best", stars=5, why=[], seed=40)]
     assert LP.best_seed(recs, "s") == 20 and LP.best_seed(recs, "u") is None and LP.best_seed(recs[2:3], "s") is None
@@ -8227,6 +9169,378 @@ def _():
     d = _j.loads((tmp / "loop" / "p.json").read_text(encoding="utf-8"))
     assert d == {"presets": ["a"], "gate": {"faces": 0}, "explore": 0.5}
     assert "50 % of each setting" in UL.check_plan(ns, UL.read_plan(ns, "p")) and "Explore: off" in UL.check_plan(ns, LP.clean_plan({"presets": ["a"]}))
+
+
+@test("中文 / English switch: every label, hint, placeholder, button, tab and accordion title on the page has its Chinese (the page swaps them; the server keeps the English labels, which are the API's names); messages translate as whole fragments or templates; tag chips keep their tag; the Help shows one language at a time")
+def _():
+    import re as _re
+    import app as _app
+    from backend import i18n as I, ui_messages as M, help_content as H
+    demo = _app.build_app()
+    assert I.missing(demo) == [], I.missing(demo)[:20]                       # a new control needs ZH (backend/ui_zh) or a T(en, zh) where it is written
+    cfg = demo.get_config_file()
+    comps = cfg["components"]
+    labels = {c["props"].get("label") for c in comps}
+    for lab in ("Prompt", "Negative Prompt", "Batch Size", "Steps", "CFG Scale", "Hires denoise", "Colour strength",
+                "✨ Polish — fill hires fix / face / hand / eye detail for this kind of picture"):
+        assert lab in labels, lab                                               # the API names are unchanged
+    texts = [c["props"].get("value") for c in comps if c["type"] == "button"]
+    gen = [t for t in texts if isinstance(t, str) and t.startswith("✨ Generate")]
+    assert gen and not any(I.has_zh(t) for t in gen)                           # no Chinese baked into the server's text any more
+    chips = [c for c in comps if c["type"] == "button" and c["props"].get("value") in ("1girl", "bokeh")]
+    assert chips and all("ig-notr" in (c["props"].get("elem_classes") or []) for c in chips)    # tag chips show the tag they insert
+    tab = I.table()
+    assert tab["Batch Size"] == "批量数" and tab["🎨 Generate"] == "🎨 生成" and tab["Next Page ▶"] == "下一页 ▶"     # the emoji / arrow stay
+    assert tab["Each picture gets its own seed."] == "每张图有自己的种子。"                                          # a hint, registered where it is written
+    assert '"Batch Size": "批量数"' in cfg["js"] and "IG_PAT" in cfg["js"] and "ig-lang-btn" in cfg["js"]
+    assert any('id="ig-lang-btn"' in str(c["props"].get("value")) for c in comps if c["type"] == "html")
+    assert ".ig-en" in cfg["css"] and ".ig-zh" in cfg["css"]
+    assert I.L("a", "乙") == '<span class="ig-en">a</span><span class="ig-zh">乙</span>' and I.both("a", "乙") == "乙 / a"
+    # messages: a fixed fragment, a template with values (the order of the values kept), the pipelines' result line
+    assert M.translate("⏹ Generation stopped.") == "⏹ 已停止生成。"
+    assert M.translate("❌ Could not load 'x' (file not found) — nothing was changed") == "❌ 读不出 'x'（file not found）— 什么都没改"
+    assert M.translate("Seed: 7 | Steps: 12 | CFG: 6.0 | Scheduler: DPM++ 2M AYS | Size: 832×1216 | Time: 3.1s | Device: cuda:0").startswith("种子：7 | 步数：12")
+    assert M.translate("🔍 Hires fix: 832×1216 → 1248×1824 · denoise 0.42 · 12 steps · Lanczos · 3.1s").endswith("3.1 秒")
+    assert M.translate("an untranslated line") is None
+    for en, zh in M.TEMPLATES:
+        slots = _re.findall(r"\{(\d*)\}", zh)
+        assert len(slots) == en.count("{}") or all(s.isdigit() for s in slots), (en, zh)      # every value lands somewhere
+        assert I.has_zh(zh), en
+    pats = M.patterns()
+    for i, (en, _zh) in enumerate(M.TEMPLATES):                                 # no template is shadowed by an earlier, broader one (the first match wins)
+        sample = M._norm(en.replace("{}", "X1"))
+        first = next(j for j, (rx, _rep) in enumerate(pats) if _re.match(rx.replace("\\/", "/"), sample))
+        assert first == i, (en, M.TEMPLATES[first][0])
+    assert M.translate("Page 2 / 5  (40 results total)") == "第 2 / 5 页（共 40 个结果）" and M.translate("Click to Upload") == "点击上传"
+    for en, zh in M.EXACT.items():                                              # Chinese, or only the entry's own technical words ("CFG（Pony / IL）")
+        assert I.has_zh(zh) or set(_re.findall(r"[A-Za-z]+", zh)) <= set(_re.findall(r"[A-Za-z]+", en)), en
+    # the Help: a table's Chinese column is hidden in English, the English explanation column in Chinese; headings and notes split
+    h = H.parameters_html()
+    assert '<th class="ig-zh">' in h and '<th class="ig-en">' in h and '<span class="ig-zh">生成参数</span>' in h
+    s = H.start_here_html()
+    assert "新手指南" in s and "Start here" in s and "🪄 Quick picture" in s
+    g = H.glossary_html()                                                      # 中文 there is the term's name, not a translation of the definition:
+    assert '<td class="ig-zh">' in g and '<td class="ig-en">' not in g and '<th class="ig-en">' not in g                     # the English definition stays visible in Chinese mode
+    assert "Object.create(null)" in cfg["js"]                                  # a text 'toString' / 'valueOf' is no key of the page's dictionary
+    # the page script and every event script must parse (a stray brace once made the Quick picture button do nothing): node --check when Node is here
+    import shutil as _sh, subprocess as _sp, tempfile as _tfn
+    node = _sh.which("node")
+    if node:
+        scripts = [cfg["js"]] + [d["js"] for d in cfg["dependencies"] if isinstance(d.get("js"), str) and d["js"].strip()]
+        for k, js in enumerate(scripts):
+            f = _tfn.mkdtemp() + f"/s{k}.js"
+            open(f, "w", encoding="utf-8").write("(" + js + ");\n")
+            r = _sp.run([node, "--check", f], capture_output=True, text=True)
+            assert r.returncode == 0, (js[:120], r.stderr[-400:])
+    acc = [c["props"].get("label") for c in comps if c["type"] == "accordion"]
+    assert "🪄 Start here" in acc and tab["🪄 Start here"] == "🪄 新手指南"
+    # nothing static stays English in 中文 mode (the leftover check of 2026-11-03 found ~500 such texts): every Help section, every
+    # Markdown heading and every radio choice, apart from technical names (samplers, model families, file / hardware names, values)
+    def technical(t):
+        words = [w for w in _re.findall(r"[^\s,;:()\[\]·→—–=+|]+", t) if not _re.search(r"[\d_/.×@#<>{}\\]", w)]
+        plain = [w for w in words if _re.fullmatch(r"[a-z][a-z'\-]{2,}", w)]           # lowercase words; Capitalised / CamelCase / CAPS = names
+        return len(plain) < 2
+    help_texts = []
+    for name in sorted(n for n in dir(H) if n.endswith("_html") and not n.startswith("_")):
+        help_texts += I.text_nodes(getattr(H, name)())
+    left = sorted({t for t in I.english_left(help_texts) if not technical(t)})
+    assert not left, left[:20]                                                  # a new Help text needs its <span class="cn"> or an EXACT entry
+    heads = [c["props"]["value"].strip().lstrip("#").strip() for c in comps if c["type"] == "markdown"
+             and isinstance(c["props"].get("value"), str) and c["props"]["value"].strip().startswith("#") and "\n" not in c["props"]["value"].strip()]
+    left = [t for t in I.english_left(heads) if not technical(t)]
+    assert heads and not left, left
+    radios = [ch[0] if isinstance(ch, (list, tuple)) else str(ch) for c in comps if c["type"] == "radio" for ch in c["props"].get("choices") or []]
+    left = [t for t in I.english_left(radios, prose=False) if not technical(t)]
+    assert not left, left
+    for t in ("Drop or upload an image to inspect its metadata.", "How auto-captioning works:", "✨ Quality", "Est. VRAM", "Render your", "Evening:"):
+        assert not I.english_left([t]), t                                        # guide blocks on the tabs
+    assert I.text_nodes('<p>a b<code>x y</code><span class="ig-en">c d</span><li>e f</p>') == ["a b", "e f"]
+    # the token counter under the prompt and the keyword note carry both languages
+    from backend.prompt_tools import token_report_html
+    tr = token_report_html("1girl, golden hour, night city", "")
+    assert "个词元" in tr and "tokens" not in tr.split('class="ig-zh"')[1].split("</span>")[0] and "光线标签互相矛盾" in tr and "lighting tags disagree" in tr
+    assert "class=\"ig-en\"" in token_report_html("", "") and "正向：空" in token_report_html("", "")
+
+
+@test("🪄 Quick picture plan: a saved setting runs as saved (adult ones too), a chosen framing replaces the prompt's framing tags and runs that recipe, Fast / Standard / Best map onto the measured Polish recipes (Auto — best per picture), a card picks its profile and a random outfit per picture, a plain prompt gets its family's measured recipe, Chinese words become tags")
+def _():
+    from types import SimpleNamespace
+    from backend import simple_mode as SM, polish as PO, recipes as RC, zh_tags as ZT, character_cards as CC
+    settings = {
+        "everyday/walk": {"model": "wai.safetensors", "lora_slots": [["her.safetensors", 0.6], ["gone.safetensors", 0.5]],
+                          "prompt": "1girl, cowboy shot, autumn", "negative_prompt": "bad", "scheduler": "DPM++ 2M AYS", "steps": 12,
+                          "cfg_scale": 6.0, "width": 832, "height": 1216,
+                          "extra": {"hires_on": True, "hires_scale": 1.5, "ed_on": True, "polish": "(off)", "cs": 0.75, "pag_scale": 2.0}},
+        "explicit/one": {"model": "wai.safetensors", "prompt": "1girl, nsfw", "negative_prompt": "", "extra": {"polish": "Auto"}},
+    }
+    card = {"name": "Her", "checkpoint": "wai.safetensors", "loras": [{"file": "her.safetensors", "weight": 0.8}], "tags": "her, red eyes",
+            "outfits": {"coat": "black coat", "dress": "white dress"}, "negative": "n",
+            "profiles": {"hassaku.safetensors": {"loras": [{"file": "her.safetensors", "weight": 0.7}], "cfg": 5.0}}}
+    env = SimpleNamespace(read_setting=settings.get, load_card=lambda n: dict(card) if n == "Her" else None,
+                          card_for_checkpoint=CC.card_for_checkpoint, card_prompt=CC.card_prompt,
+                          checkpoints=[("wai.safetensors", "/m/wai.safetensors"), ("hassaku.safetensors", "/m/hassaku.safetensors"), ("sd15.safetensors", "/m/sd15.safetensors")],
+                          loras=[("her.safetensors", "/l/her.safetensors")], vaes=[], family=lambda p: "sd15" if "sd15" in str(p) else "illustrious",
+                          recipe_for=RC.recipe_for, default_model="/m/wai.safetensors", defaults=dict(scheduler="DPM++ 2M Karras", steps=20, cfg=7.5),
+                          to_tags=ZT.to_tags)
+    plan = lambda **c: SM.plan(c, env)
+    # a saved setting, as saved: its model, LoRAs (a missing one noted), recipe and passes untouched; what to draw appended
+    p = plan(source="setting", setting="everyday/walk", what="海边，微笑", count=3, seed=42)
+    a = p["args"]
+    assert not p["errors"] and a["model_path"] == "/m/wai.safetensors" and (a["lora1"], a["w1"]) == ("/l/her.safetensors", 0.6) and a["lora2"] == "none"
+    assert any("gone" in en for en, _ in p["notes"]) and a["prompt"] == "1girl, cowboy shot, autumn, beach, smile"
+    assert a["hires_on"] is True and a["polish"] == "(off)" and a["cs"] == 0.75 and (a["batch"], a["seed"], a["width"]) == (3, 42, 832)
+    # a chosen framing: its tag replaces the prompt's, and its recipe runs
+    a = plan(source="setting", setting="everyday/walk", framing="full", detail="standard")["args"]
+    assert "full body" in a["prompt"] and "cowboy shot" not in a["prompt"] and a["polish"] == "Full body"
+    assert a["hires_on"] and a["hires_steps"] == 8 and a["hires_upscaler"] == "Lanczos" and a["ed_on"]
+    a = plan(source="setting", setting="everyday/walk", framing="wide", detail="best")["args"]
+    assert a["polish"] == "Wide shot — max detail" and a["md_on"] and a["fd_on"]
+    assert plan(source="setting", setting="everyday/walk", detail="best")["args"]["polish"] == PO.AUTO_BEST
+    p = plan(source="setting", setting="everyday/walk", detail="fast")
+    assert p["args"]["hires_on"] is False and p["args"]["ed_on"] and p["args"]["polish"] == "(off)" and p["info"]["picks"] == {"fast": 1.0}
+    # shape / colour
+    a = plan(source="setting", setting="everyday/walk", shape="square", colour="soft")["args"]
+    assert (a["width"], a["height"], a["cs"]) == (1024, 1024, 0.75)
+    a = plan(source="setting", setting="everyday/walk", model="sd15.safetensors", shape="square", colour="vivid")["args"]
+    assert (a["model_path"], a["width"], a["cs"]) == ("/m/sd15.safetensors", 512, 1.0)
+    # 'as saved' on a chosen model of the other size class: the size is re-fitted, same shape (an SDXL size on SD 1.5 draws doubled figures)
+    p = plan(source="setting", setting="everyday/walk", model="sd15.safetensors")
+    assert (p["args"]["width"], p["args"]["height"]) == (512, 768) and any("832×1216" in en for en, _ in p["notes"])
+    assert (plan(source="setting", setting="everyday/walk", model="hassaku.safetensors")["args"]["width"], 1216) == (832, 1216)
+    settings["everyday/wide"] = dict(settings["everyday/walk"], width=1216, height=832)
+    a = plan(source="setting", setting="everyday/wide", model="sd15.safetensors")["args"]
+    assert (a["width"], a["height"]) == (768, 512)
+    env.load_card = lambda n: dict(card, width=832, height=1216)
+    p = plan(source="card", card="Her", model="sd15.safetensors")              # no profile for it: the card's LoRAs may not fit, the size re-fitted
+    assert (p["args"]["width"], p["args"]["height"]) == (512, 768) and any("another family than the card" in en for en, _ in p["notes"])
+    p = plan(source="card", card="Her", model="hassaku.safetensors")           # its profile: no family note
+    assert not any("another family" in en for en, _ in p["notes"]) and (p["args"]["width"], p["args"]["height"]) == (832, 1216)
+    env.load_card = lambda n: dict(card) if n == "Her" else None
+    assert plan(source="prompt", what="scenery, lake")["args"]["prompt"] == "scenery, lake"          # no '1girl, solo' added to a scenery prompt
+    # a LoRA made for the other size class is left out with a note (Generate would refuse the whole run: 'is an SDXL LoRA, but …')
+    env.lora_arch = lambda p: "sdxl" if "her" in str(p) else None
+    p = plan(source="setting", setting="everyday/walk", model="sd15.safetensors")
+    assert p["args"]["lora1"] == "none" and any("Left out: LoRA her" in en for en, _ in p["notes"]) and not p["info"]["loras"]
+    assert not any("may not fit" in en for en, _ in p["notes"])                # no LoRA left: the vaguer note goes
+    assert any("may not look like the character" in en and "可能不像这个角色" in zh for en, zh in p["notes"])   # her face came from them
+    p = plan(source="card", card="Her", model="sd15.safetensors")
+    assert p["args"]["lora1"] == "none" and any("may not look like the character" in en for en, _ in p["notes"])
+    assert plan(source="setting", setting="everyday/walk")["args"]["lora1"] == "/l/her.safetensors"     # the right class keeps it
+    del env.lora_arch
+    # a Pony checkpoint: Generate skips the eye pass there, so the plan box doesn't promise it
+    fam0, env.family = env.family, (lambda p: "pony")
+    p = plan(source="prompt", what="1girl, smile", detail="fast")
+    assert p["info"]["eyes"] is False and any("Pony checkpoints skip the eye pass" in en for en, _ in p["notes"])
+    assert "eyes" not in SM.steps_text(p["info"]["picks"], False, p["info"]["passes"], False) and SM.recipe_words({"fast": 1.0}, False, False) == "the plain picture"
+    env.family = fam0
+    assert plan(source="prompt", what="1girl", detail="fast")["info"]["eyes"] is True
+    # an adult saved setting is planned like any other (the app filters nothing)
+    p = plan(source="setting", setting="explicit/one")
+    assert not p["errors"] and p["args"]["prompt"] == "1girl, nsfw" and p["args"]["polish"] == "Auto"
+    # a card: a random outfit per picture (a wildcard group), its profile for the chosen model
+    a = plan(source="card", card="Her", outfit=SM.RANDOM_OUTFIT, what="classroom")["args"]
+    assert "{black coat|white dress}" in a["prompt"] and a["prompt"].startswith("her, red eyes") and a["polish"] == "Auto"
+    assert a["model_path"] == "/m/wai.safetensors" and a["w1"] == 0.8 and (a["scheduler"], a["steps"], a["pag_scale"]) == ("DPM++ 2M AYS", 12, 2.0)
+    p = plan(source="card", card="Her", outfit="coat", model="hassaku.safetensors")
+    assert p["args"]["cfg"] == 5.0 and p["args"]["w1"] == 0.7 and "black coat" in p["args"]["prompt"] and any("hassaku" in en for en, _ in p["notes"])
+    # just a prompt: the family's measured recipe; Chinese words become tags, unknown ones are listed
+    p = plan(source="prompt", what="海边，微笑, 魔法")
+    assert p["args"]["prompt"] == "1girl, solo, beach, smile" and any("魔法" in zh for _, zh in p["notes"])
+    assert (p["args"]["scheduler"], p["args"]["steps"], p["args"]["cfg"], p["args"]["pag_scale"]) == ("DPM++ 2M AYS", 12, 6.0, 2.0)
+    # refusals
+    assert plan(source="setting", setting="nope/none")["errors"] and plan(source="prompt", what="")["errors"]
+    assert plan(source="setting", setting="everyday/walk", model="missing.safetensors")["errors"]
+    c = SM.clean_choices({"source": "x", "count": 99, "seed": "junk", "framing": "?", "detail": None, "look": "<x>"})
+    assert (c["source"], c["count"], c["seed"], c["framing"], c["detail"], c["look"]) == ("setting", 8, -1, "auto", "follow", "follow")
+    # the drawing style: the main pass's sampler / steps / CFG / PAG (as saved, softer lines, painterly), on Illustrious / NoobAI models only
+    look = lambda p: (p["args"]["scheduler"], p["args"]["steps"], p["args"]["cfg"], p["args"]["pag_scale"])
+    assert look(plan(source="setting", setting="everyday/walk")) == ("DPM++ 2M AYS", 12, 6.0, 2.0)                    # as saved
+    p = plan(source="setting", setting="everyday/walk", look="soft")
+    assert look(p) == ("DPM++ 2M Karras", 28, 5.0, 0.0) and p["info"]["look"] == "soft" and p["info"]["sampler"] == ("DPM++ 2M Karras", 28, 5.0, 0.0)
+    assert p["args"]["hires_on"] is True and p["args"]["cs"] == 0.75 and p["args"]["lora1"] == "/l/her.safetensors"          # nothing else changes
+    assert look(plan(source="card", card="Her", look="painterly")) == ("Euler a", 28, 5.0, 0.0)
+    assert look(plan(source="prompt", what="1girl", look="soft")) == ("DPM++ 2M Karras", 28, 5.0, 0.0)
+    p = plan(source="setting", setting="everyday/walk", model="sd15.safetensors", look="soft")            # not measured there: kept, and said
+    assert look(p) == ("DPM++ 2M AYS", 12, 6.0, 2.0) and p["info"]["look"] == "follow" and any("drawing style" in en for en, _ in p["notes"])
+    assert not any("drawing style" in en for en, _ in plan(source="setting", setting="everyday/walk", model="sd15.safetensors")["notes"])
+    from backend import ui_simple as _US
+    box = _US.plan_html(plan(source="setting", setting="everyday/walk", look="painterly"))
+    assert "手绘感" in box and "Painterly" in box and "Euler a" in box and "不开 PAG" in box and "no PAG" in box
+    # a saved setting's 2× stage (Max detail) does not ride along under another recipe; Best on a wide shot sets it itself
+    settings["everyday/md"] = dict(settings["everyday/walk"], extra=dict(settings["everyday/walk"]["extra"], md_on=True, polish="Full body — max detail"))
+    assert plan(source="setting", setting="everyday/md")["args"]["md_on"] is True                    # As saved: as saved
+    assert plan(source="setting", setting="everyday/md", framing="portrait", detail="standard")["args"]["md_on"] is False
+    assert plan(source="setting", setting="everyday/md", detail="standard")["args"]["md_on"] is False   # Auto
+    assert plan(source="setting", setting="everyday/md", detail="fast")["args"]["md_on"] is False
+    assert plan(source="setting", setting="everyday/md", framing="wide", detail="best")["args"]["md_on"] is True
+    # the random outfit: one outfit goes in as it is (a one-option {x} is not a wildcard), an outfit's own {a|b} stays a group
+    one = dict(card, outfits={"coat": "black coat, scarf"})
+    env.load_card = lambda n: dict(one)
+    a = plan(source="card", card="Her", outfit=SM.RANDOM_OUTFIT)["args"]
+    assert "black coat, scarf" in a["prompt"] and "{" not in a["prompt"]
+    env.load_card = lambda n: dict(card, outfits={"a": "{red|blue} dress", "b": "coat | scarf"})
+    a = plan(source="card", card="Her", outfit=SM.RANDOM_OUTFIT)["args"]
+    assert "{{red|blue} dress|coat ,  scarf}" in a["prompt"], a["prompt"]
+    from backend import wildcards as WC2
+    assert WC2.resolve(a["prompt"], 3) and "{" not in WC2.resolve(a["prompt"], 3)            # it resolves fully
+    env.load_card = lambda n: dict(card) if n == "Her" else None
+    # a wildcard file whose name the parser can't resolve is left out with a note
+    p_bad = plan(source="setting", setting="everyday/walk", variety="dk.v2")
+    assert "__dk.v2__" not in p_bad["args"]["prompt"] and any("dk.v2" in en for en, _ in p_bad["notes"])
+    assert "__set/name__" in plan(source="setting", setting="everyday/walk", variety="set/name")["args"]["prompt"]
+    assert SM.usable_wildcard("dk_fork_neg") and not SM.usable_wildcard("_x") and not SM.usable_wildcard("服装")
+    # the measured time: the lower middle (two runs [cold, warm] show the warm one)
+    import tempfile as _tf2
+    from pathlib import Path as _P2
+    tf = _P2(_tf2.mkdtemp()) / "t.json"
+    info = {"model": "m", "size": (1, 1), "choice": "Auto", "detail": "follow"}
+    SM.record_time(tf, info, 60.0); SM.record_time(tf, info, 20.0)
+    assert SM.read_times(tf)[SM.time_key(info)] == 20.0
+    assert SM.time_key(dict(info, look="follow")) == SM.time_key(info) != SM.time_key(dict(info, look="soft"))     # times from before keep their key
+    # the after-picture check: which card's learned face judges a saved setting (the most LoRAs in common, profiles included; a tie between
+    # two different faces judges nothing), the margin for a hat / bun / glasses, the age guard, no colour-specks note
+    her = {"name": "Her", "identity": {"centroid": "A"}, "loras": [{"file": "canon.safetensors"}, {"file": "artbot.safetensors"}],
+           "profiles": {"hassaku.safetensors": {"loras": [{"file": "her_alt.safetensors"}]}}}
+    other = {"name": "Other", "identity": {"centroid": "B"}, "loras": [{"file": "rival.safetensors"}, {"file": "style.safetensors"}]}
+    plain = {"name": "NoFace", "loras": [{"file": "canon.safetensors"}]}
+    ic_ = lambda *ls: (SM.identity_card(["/l/" + x for x in ls] + ["none"], [plain, other, her]) or {}).get("name")
+    assert ic_("canon.safetensors", "artbot.safetensors") == "Her" and ic_("her_alt.safetensors") == "Her" and ic_("rival.safetensors") == "Other"
+    assert ic_() is None and ic_("unknown.safetensors") is None
+    her2 = dict(her, loras=her["loras"] + [{"file": "style.safetensors"}])
+    assert SM.identity_card(["/l/style.safetensors"], [other, her2]) is None                       # a shared style LoRA alone: no verdict
+    from backend import identity_score as IDS, image_score as IMS
+    from PIL import Image as _Im0
+    assert IDS.z_flag_for("1girl, semi-rimless eyewear, office") == IDS.Z_FLAG_HAIR and IDS.z_flag_for("hair bun, qipao") == IDS.Z_FLAG_HAIR
+    assert IDS.z_flag_for("1girl, hair ornament, x hair ornament, cowboy shot") is None
+    ages = IMS.age_flags([_Im0.new("RGB", (8, 8))] * 2, probs_fn=lambda im: {"loli": 0.5, "female_child": 0.4, "child": 0.1, "1girl": 0.9})
+    assert ages == [["loli 0.50", "female child 0.40"]] * 2
+    assert IMS.age_flags([_Im0.new("RGB", (8, 8))], probs_fn=lambda im: {"aged_down": 0.34}) == [[]]       # below the loop's 0.35
+    from backend import ui_simple as _US0
+    html_, bad_ = _US0.check_html([{"stars": 5, "flags": [], "notes": [IMS.SPECK_NOTE]}], [])
+    assert "看起来没问题" in html_ and "斑点" not in html_ and "specks" not in html_ and bad_ == []
+    # the words table
+    assert ZT.to_tags("红色连衣裙 坐在窗边看书") == ("red dress, sitting, by window, reading, book", [])
+    for zh_in, tags_out in (("红色的裙子", "red skirt"), ("黑色长发", "black hair, long hair"), ("红色双马尾", "red hair, twintails"),
+                            ("蓝眼睛", "blue eyes"), ("猫耳", "cat ears"), ("海军服", "naval uniform"), ("白色T恤", "white t-shirt"),
+                            ("穿着红色连衣裙", "red dress"), ("__dk/outfit__, ;)", "__dk/outfit__, ;)"), ("（微笑）", "smile"),
+                            ("{微笑|大笑}", "{smile|laughing, open mouth}"), ("(微笑:1.2)", "(smile:1.2)")):
+        assert ZT.to_tags(zh_in) == (tags_out, []), (zh_in, ZT.to_tags(zh_in))
+    assert PO.AUTO_BEST in PO.CHOICES and PO.auto_pick(PO.AUTO_BEST, "1girl, full body") == "Full body — max detail"
+    assert PO.auto_pick("Auto", "1girl, full body") == "Full body" and PO.auto_pick(PO.AUTO_BEST, "1girl, upper body") == "Portrait — hires"
+    import app as _app
+    plan0 = _app._restore_plan({"prompt": "x"})
+    assert _app._plan_extra_updates(dict(plan0, polish={"recipe": "Full body — max detail", "auto": True, "best": True}))[-1] == PO.AUTO_BEST
+    assert _app._plan_extra_updates(dict(plan0, polish={"recipe": "Full body", "auto": True}))[-1] == "Auto"
+    ex, name = _app._apply_polish_auto(_app._clean_extra({"polish": PO.AUTO_BEST}), "1girl, wide shot")
+    assert name == "Wide shot — max detail" and ex["md_on"] and ex["polish"] == PO.AUTO_BEST
+    # the A1111 text names Auto — best, and PNG Info reads it back (a picture whose record is gone restores Auto — best too)
+    rec = {"prompt": "x", "steps": 12, "cfg_scale": 6, "seed": 1, "width": 64, "height": 64, "scheduler": "Euler",
+           "polish": {"recipe": "Wide shot — max detail", "auto": True, "best": True}}
+    text = _app._params_text(rec)
+    assert "Polish: Wide shot — max detail (auto — best)" in text
+    import tempfile as _tf3
+    from PIL import Image as _Im3
+    from PIL.PngImagePlugin import PngInfo as _Pi3
+    f3 = _tf3.mkdtemp() + "/p.png"
+    pi = _Pi3(); pi.add_text("parameters", text)
+    _Im3.new("RGB", (8, 8)).save(f3, pnginfo=pi)
+    from backend.png_info import read_image_metadata
+    meta = read_image_metadata(f3)
+    assert meta.get("polish") == {"recipe": "Wide shot — max detail", "auto": True, "best": True}, meta.get("polish")
+    assert _app._plan_extra_updates(_app._restore_plan(meta))[-1] == PO.AUTO_BEST
+
+
+@test("🪄 Quick picture tab: one new GPU endpoint (/do_simple_generate, 16 inputs, the language last) that runs Generate's own function; More like it / Redo in more detail / Open in Generate reuse the last run's choices and the picked seed; the choices and the measured time are remembered")
+def _():
+    import functools, inspect, json as _j, tempfile as _tf
+    from pathlib import Path as _P
+    from PIL import Image as _Im
+    import app as _app
+    from backend import ui_simple as US, simple_mode as SM
+    demo = _app.build_app()
+    cfg = demo.get_config_file()
+    deps = [d for d in cfg["dependencies"] if d.get("api_name") == "do_simple_generate"]
+    assert len(deps) == 1 and len(deps[0]["inputs"]) == 16
+    js = deps[0]["js"]
+    assert "a.slice(0, 16)" in js and "b[15]" in js and js.count("{") == js.count("}") and js.count("(") == js.count(")")   # the page must be able to parse it
+    by = {inspect.unwrap(f.fn).__name__: f for f in demo.fns if f.fn is not None}
+    for n in ("do_simple_generate", "do_simple_more", "do_simple_finer"):
+        assert by[n].concurrency_id == "gpu", n                                 # GPU jobs: one at a time with every other Generate
+    tmp = _P(_tf.mkdtemp())
+    (tmp / "t").mkdir()
+    (tmp / "t" / "one.json").write_text(_j.dumps({"model": "wai.safetensors", "prompt": "1girl, autumn", "negative_prompt": "",
+                                                  "extra": {"polish": "Auto"}}), encoding="utf-8")
+    calls = []
+    real = _app._GEN_HELPERS["generate_ui"]
+
+    @functools.wraps(real)
+    def fake(**kw):
+        calls.append(kw)
+        n = int(kw.get("batch", 1))
+        _app._SAVE_LOG.extend(_P(_app.OUTPUTS_DIR) / f"x{len(calls)}_{k}.png" for k in range(n))
+        ims = [_Im.new("RGB", (64, 96)) for _ in range(n)]
+        return ims, "<p>Seed: 1 | Steps: 12</p>", ims, "", [1234 + k for k in range(n)], ""
+    keep = (_app.SETTINGS_DIR, dict(_app._GEN_HELPERS))
+    try:
+        _app.SETTINGS_DIR = tmp
+        _app._GEN_HELPERS["generate_ui"] = fake
+        with patch("backend.model_manager.list_checkpoints", lambda: [("wai.safetensors", "/m/wai.safetensors")]), \
+             patch("backend.model_manager.list_loras", lambda: []), patch("backend.model_manager.list_vaes", lambda: []), \
+             patch("backend.sd_pipeline._model_family", lambda p: "illustrious"):
+            fn = by["do_simple_generate"].fn
+            with patch.object(_app, "_read_last_session", lambda: {"scheduler": "Euler a"}):
+                assert US._env(_app).defaults["scheduler"] == "DPM++ 2M Karras"        # a family without a recipe: not the last run's sampler
+            imgs, res, state, box = fn("setting", "t/one", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "海边", SM.NO_WILDCARD, "auto", "fast",
+                                       "follow", "follow", "soft", 2, -1, False, "zh")
+            assert len(imgs) == 2 and len(calls) == 1 and calls[0]["batch"] == 2 and calls[0]["prompt"] == "1girl, autumn, beach"
+            assert (calls[0]["scheduler"], calls[0]["steps"], calls[0]["cfg"], calls[0]["pag_scale"]) == ("DPM++ 2M Karras", 28, 5.0, 0.0)
+            assert _j.loads((tmp / US.LAST_FILE_NAME).read_text(encoding="utf-8"))["look"] == "soft"            # remembered
+            assert calls[0]["model_path"] == "/m/wai.safetensors" and calls[0]["ed_on"] and not calls[0]["hires_on"]
+            assert "完成" in res and "Done" in res and state["seeds"] == [1234, 1235] and len(state["files"]) == 2
+            assert _j.loads((tmp / US.LAST_FILE_NAME).read_text(encoding="utf-8"))["setting"] == "t/one"
+            assert list(SM.read_times(tmp / SM.TIMES_FILE_NAME).values())                    # the measured time per picture is kept
+            calls.clear()
+            # the age guard runs with the check off too, and names the picture
+            with patch("backend.image_score.age_flags", lambda ims: [["loli 0.50"]] + [[] for _ in list(ims)[1:]]):
+                res_age = fn("setting", "t/one", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "", SM.NO_WILDCARD, "auto", "fast",
+                             "follow", "follow", "follow", 2, -1, False, "zh")[1]
+            assert "第 1 张：标签模型认为画的是儿童" in res_age and "Picture 1: the tagger reads a child" in res_age and "第 2 张：标签" not in res_age
+            calls.clear()
+            assert state["variations"] == [(-1, 0.0), (-1, 0.0)]                       # plain pictures: no variation
+            _g, _r, st2 = by["do_simple_more"].fn(state, 1, False)                         # More like the picked one: its seed, small variations, one call per picture
+            assert len(calls) == 2 and {c["seed"] for c in calls} == {1235} and all(c["var_strength"] == 0.1 and c["batch"] == 1 for c in calls)
+            vs0 = calls[0]["var_seed"]
+            assert st2["seeds"] == [1234, 1234] or st2["seeds"][0] == 1234                  # (the fake's seed list)
+            assert st2["variations"] == [(vs0, 0.1), (vs0 + 1, 0.1)]                        # each picture remembers its variation
+            calls.clear()
+            by["do_simple_finer"].fn(state, 0, False)                                    # Redo in more detail: one picture, Best
+            assert len(calls) == 1 and calls[0]["seed"] == 1234 and calls[0]["batch"] == 1 and calls[0]["polish"] == "Auto — best"
+            assert calls[0]["var_strength"] == 0.0
+            calls.clear()
+            by["do_simple_finer"].fn(st2, 1, False)                                      # the picked picture is a variation: redo THAT picture
+            assert len(calls) == 1 and (calls[0]["var_seed"], calls[0]["var_strength"]) == (vs0 + 1, 0.1)
+            adv2 = by["on_to_advanced"].fn(st2, 1)
+            names = [n for n in inspect.signature(real).parameters if n != "progress"]
+            assert adv2[names.index("var_seed")] == vs0 + 1 and adv2[names.index("var_strength")] == 0.1
+            # a Stop before any picture is finished says so (not "no picture was made")
+            def stopped(**kw):
+                _app._generation_abort.set()
+                return [], '<p>⏹ Generation stopped.</p>', [], "", [], ""
+            _app._GEN_HELPERS["generate_ui"] = functools.wraps(real)(stopped)
+            try:
+                res_stop = fn("setting", "t/one", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "", SM.NO_WILDCARD, "auto", "fast", "follow", "follow", "follow", 1, -1, False, "zh")[1]
+            finally:
+                _app._generation_abort.clear()
+                _app._GEN_HELPERS["generate_ui"] = fake
+            assert "已停止" in res_stop and "Stopped before a picture was finished" in res_stop
+            refused = fn("setting", "", "", SM.RANDOM_OUTFIT, SM.FOLLOW, "", SM.NO_WILDCARD, "auto", "fast", "follow", "follow", "follow", 1, -1, False, "zh")
+            assert "请先选一个已保存的设置" in refused[1]                                  # nothing runs without a setting
+            adv = by["on_to_advanced"].fn(state, 1)
+            assert len(adv) == len(_app._GEN_HELPERS["gen_inputs"]) + 1 and adv[0] == "/m/wai.safetensors" and 1235 in adv
+    finally:
+        _app.SETTINGS_DIR = keep[0]
+        _app._GEN_HELPERS.clear()
+        _app._GEN_HELPERS.update(keep[1])
 
 
 print("\n" + "=" * 70)

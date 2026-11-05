@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import gradio as gr
 
 from backend import composition as comp
+from backend.i18n import T          # 中文 / English: the Chinese of a hint (backend/i18n.py)
 from backend import pose_control as pc
 
 
@@ -28,14 +29,19 @@ def _warn(t: str) -> str:
 
 
 def _files_status() -> str:
-    parts = []
-    parts.append("DWPose: " + ("✅" if pc.dwpose_available() else "❌ missing"))
+    from backend.i18n import L
+    en, zh = [], []
+    ok = pc.dwpose_available()
+    en.append("DWPose: " + ("✅" if ok else "❌ missing")); zh.append("DWPose：" + ("✅" if ok else "❌ 缺少"))
     models = pc.list_models("pose")
-    parts.append("OpenPose ControlNet: " + (", ".join(models) if models else "❌ none in models/controlnet/"))
-    parts.append("depth estimator: " + ("✅" if comp.estimator_available() else "❌ missing"))
+    en.append("OpenPose ControlNet: " + (", ".join(models) if models else "❌ none in models/controlnet/"))
+    zh.append("OpenPose ControlNet：" + (", ".join(models) if models else "❌ models/controlnet/ 里没有"))
+    ok = comp.estimator_available()
+    en.append("depth estimator: " + ("✅" if ok else "❌ missing")); zh.append("深度估计模型：" + ("✅" if ok else "❌ 缺少"))
     depth = pc.list_models("depth")
-    parts.append("depth ControlNet: " + (", ".join(depth) if depth else "❌ none in models/controlnet/"))
-    return '<p style="color:#9399b2;font-size:12px;">' + html.escape(" · ".join(parts)) + "</p>"
+    en.append("depth ControlNet: " + (", ".join(depth) if depth else "❌ none in models/controlnet/"))
+    zh.append("深度 ControlNet：" + (", ".join(depth) if depth else "❌ models/controlnet/ 里没有"))
+    return '<p style="color:#9399b2;font-size:12px;">' + L(html.escape(" · ".join(en)), html.escape(" · ".join(zh))) + "</p>"
 
 
 DEPTH_ESTIMATOR_CHOICE = f"Depth estimator (Depth-Anything-V2-Small, {comp.ESTIMATORS[comp.ESTIMATOR_FILE]['mb']} MB, {comp.ESTIMATORS[comp.ESTIMATOR_FILE]['license']})"
@@ -71,11 +77,9 @@ def build_section(ns, ls: dict) -> SimpleNamespace:
     strength0 = (comp.clamp_strength if is_comp else pc.clamp_strength)(ls.get("pc_strength")) if ls.get("pc_strength") is not None else s_def
     with gr.Accordion("🧍 Pose / composition control — pick the pose or copy a picture's composition, keep her look", open=bool(ls.get("pc_on"))):
         pc_cb = gr.Checkbox(label="Use pose / composition control", value=bool(ls.get("pc_on")),
-                            info="SDXL / Illustrious / Pony only · ≈ +10 s per picture · PAG is switched off while it is on · "
-                                 "Pose: pose match 4 → 18 of 24 on weak poses, pair it with Polish “— hands” · "
-                                 "Composition: the figure, framing and hands of a picture, but its clothes leak in ~1 of 4")
+                            info=T("SDXL / Illustrious / Pony only. About +10 s a picture, and PAG is off while it's on. Pose: follows the skeleton (pair it with Polish '— hands'). Composition: copies the figure and framing of a picture, but its clothes leak in about 1 in 4.", "只适用于 SDXL / Illustrious / Pony。每张图约多 10 秒，开着时 PAG 会关掉。姿势：按骨架摆姿势（建议配合精修“— hands”）。构图：照搬一张图的人物和构图，但约 1/4 会把原图的衣服也带过来。"))
         type_rd = gr.Radio([pc.TYPE_POSE, pc.TYPE_COMP], value=ptype, label="Control type",
-                           info="Pose = a skeleton (poses are saved, ★ starters) · Composition = the depth map of the picture: same figure and framing, new outfit (strength 0.5, never saved)")
+                           info=T("Pose = a skeleton (you can save poses; ★ are built in). Composition = the depth map of a picture: same figure and framing, new outfit (strength 0.5, not saved).", "姿势 = 骨架（姿势可以保存；★ 是自带的）。构图 = 一张图的深度图：同样的人物和构图，换新衣服（强度 0.5，不保存）。"))
         with gr.Row():
             img = gr.Image(label="Composition picture — its depth map is made on the CPU" if is_comp else "Pose picture — a picture of a person (the skeleton is read on the CPU)",
                            type="pil", sources=["upload", "clipboard"], height=280)
@@ -86,19 +90,20 @@ def build_section(ns, ls: dict) -> SimpleNamespace:
             extract_btn = gr.Button("🗺 Make the depth map" if is_comp else "🦴 Read skeleton from the picture", size="sm")
         with gr.Row(visible=not is_comp) as pose_row:
             pose_dd = gr.Dropdown(pc.list_poses(), value=str(ls.get("pc_pose") or ""), allow_custom_value=True, label="Pose",
-                                  info=f"★ = built-in starter poses · your saved poses (settings/poses) · “{pc.CURRENT}” = the picture above")
-            save_name = gr.Textbox(label="Save the chosen pose as…", placeholder="e.g. reaching, v-sign", max_lines=1, scale=1)
+                                  info=T(f"★ = built-in poses · your saved poses (settings/poses) · “{pc.CURRENT}” = the picture above",
+                                         f"★ = 自带的姿势 · 你保存的姿势（settings/poses）· “{pc.CURRENT}” = 上面那张图的姿势"))
+            save_name = gr.Textbox(label="Save the chosen pose as…", placeholder=T("reaching, v-sign", "reaching, v-sign"), max_lines=1, scale=1)
         with gr.Row(visible=not is_comp) as pose_btns:
             save_btn = gr.Button("💾 Save pose", size="sm")
             del_btn = gr.Button("🗑 Delete pose", size="sm")
             refresh_btn = gr.Button("🔄", size="sm", scale=0, min_width=40)
         with gr.Row():
             strength_sl = gr.Slider(s_min, s_max, value=strength0, step=0.05, label="Pose / composition strength",
-                                    info="Pose: 0.8 = measured sweet spot (0.4 / 0.6 follow the pose far less), 1.0 holds it tightest · Composition: 0.5 default, 0.4-0.8 (higher copies more of the source's clothes)")
+                                    info=T("Pose: 0.8 works best (0.4–0.6 follow the pose much less), 1.0 holds it tightest. Composition: 0.5 by default, 0.4–0.8 (higher copies more of the source's clothes).", "姿势：0.8 效果最好（0.4–0.6 跟得差很多），1.0 跟得最紧。构图：默认 0.5，范围 0.4–0.8（越高越容易带上原图的衣服）。"))
             legs_cb = gr.Checkbox(label="Hide legs", value=bool(ls.get("pc_legs")), visible=not is_comp,
-                                  info="For cowboy shots and portraits: the detector invents knees the picture does not show")
+                                  info=T("For cowboy shots and portraits: otherwise the detector invents knees the picture doesn't show.", "用于半身和头像：不然检测器会编出画面里没有的膝盖。"))
         model_dd = gr.Dropdown(models, value=model_val, allow_custom_value=True, label="ControlNet model",
-                               info="Folders of models/controlnet/ that suit the control type · the defaults are Apache-2.0")
+                               info=T("Folders in models/controlnet/ that fit the control type. The defaults are Apache-2.0.", "models/controlnet/ 里适合这种控制类型的文件夹。默认的是 Apache-2.0 许可。"))
         files_html = gr.HTML(_files_status())
         with gr.Row():
             dl_choices = _download_choices()

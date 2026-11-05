@@ -83,13 +83,13 @@ def polish_picks(d: dict, draws: int = 40) -> Counter:
     choice = PO.clean_choice(ex.get("polish"))
     if choice == "(off)":
         return Counter()
-    if choice != "Auto":
+    if not PO.is_auto(choice):
         return Counter({choice: 1})
     pose = bool(ex.get("pc_on")) and str(ex.get("pc_type") or "pose").lower().startswith("pose")
     prompt = str(d.get("prompt") or "")
     if not WC.is_dynamic(prompt):
-        return Counter({PO.shot_type(prompt, pose=pose): 1})
-    return Counter(PO.shot_type(WC.resolve(prompt, s), pose=pose) for s in range(draws))
+        return Counter({PO.auto_pick(choice, prompt, pose=pose): 1})
+    return Counter(PO.auto_pick(choice, WC.resolve(prompt, s), pose=pose) for s in range(draws))
 
 
 def passes(ex: dict) -> dict:
@@ -249,7 +249,7 @@ def card_html(name: str, d: dict | None, local_checkpoints=(), local_loras=(), m
             ("Recipe", e(f"{s['sampler']}, {s['steps']} steps, CFG {s['cfg']}, {s['size']}, batch {s['batch']}")
              + (f", PAG {s['pag']:g}" if s["pag"] else "") + (f", colour {s['colour']:g}" if s["colour"] < 1 else "")
              + (f", {e(s['control'])} control on" if s["control"] else ""))]
-    if s["polish"] == "Auto":
+    if PO.is_auto(s["polish"]):
         tot = sum(s["picks"].values()) or 1
         mix = ", ".join(f"{e(k)} {round(100 * v / tot)} %" for k, v in s["picks"].most_common())
         rows.append(("✨ Polish", "Auto — each picture's framing tag picks the recipe" + (f" (here: {mix})" if mix else "") + "."))

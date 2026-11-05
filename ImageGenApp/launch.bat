@@ -114,6 +114,9 @@ if exist "%PYTHON%" (
         del "!ROCM_ENV_FILE!" 2>nul
     )
 )
+:: HIP's automatic pick is a HIP number; DirectML numbers the GPUs its own way, so config.py picks the dGPU by name there
+set "IMAGEGEN_GPU_AUTO=1"
+if defined GPU_INDEX set "IMAGEGEN_GPU_AUTO="
 if not defined GPU_INDEX set "GPU_INDEX=!ROCM_GPU_INDEX!"
 if not defined GPU_INDEX set "GPU_INDEX=0"
 :: Native ROCm PyTorch replaces ZLUDA for this GPU when install_rocm.bat set it up

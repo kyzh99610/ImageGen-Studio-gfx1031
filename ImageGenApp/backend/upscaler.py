@@ -38,14 +38,16 @@ class Upscaler:
     def __init__(self):
         self._onnx_session = None
 
-    def release(self) -> None:
+    def release(self) -> bool:
         """Drop the ONNX session: on DirectML it keeps its memory arena on the dGPU, next to the SD
-        pipeline (the hires pass that follows peaks at ~10 of 12 GB; audit F-28)."""
+        pipeline (the hires pass that follows peaks at ~10 of 12 GB; audit F-28). True when something was loaded."""
+        was = self._onnx_session is not None or getattr(self, "_torch_upsampler", None) is not None
         if self._onnx_session is not None:
             self._onnx_session = None
             import gc
             gc.collect()
         self._torch_upsampler = None
+        return was
 
     # ── Public API ─────────────────────────────────────────────────────────────
     def upscale(
@@ -193,18 +195,14 @@ class Upscaler:
 
 
 # ── Utility ────────────────────────────────────────────────────────────────────
-def _dml_dgpu_id() -> int:
-    """DML index of the discrete GPU. DML order differs per machine: 0 is the
-    780M iGPU on the 8700G workstation but the RX 6800M on the laptop."""
+def _dml_dgpu_id() -> int | None:
+    """ONNX Runtime's DirectML device_id of the discrete GPU (the DXGI number, backend/dxgi.py), None when DXGI lists none.
+    It used torch-directml's number: 0 = the RX 6800M there, but device_id 0 = the Vega iGPU on the laptop."""
     try:
-        import torch_directml
-        from backend.hardware_detector import _classify_gpu
-        for i in range(torch_directml.device_count()):
-            if not _classify_gpu(torch_directml.device_name(i))[1]:
-                return i
+        from backend import dxgi
+        return dxgi.dml_index(igpu=False)
     except Exception:
-        pass
-    return 0
+        return None
 
 
 def _ort_providers() -> list:
@@ -212,7 +210,8 @@ def _ort_providers() -> list:
     import onnxruntime as ort
     available = ort.get_available_providers()
     if "DmlExecutionProvider" in available:
-        return [("DmlExecutionProvider", {"device_id": _dml_dgpu_id()}), "CPUExecutionProvider"]
+        dgpu = _dml_dgpu_id()       # None: ONNX Runtime's own pick, the high-performance GPU
+        return [("DmlExecutionProvider", {} if dgpu is None else {"device_id": dgpu}), "CPUExecutionProvider"]
     if "CUDAExecutionProvider" in available:
         return ["CUDAExecutionProvider", "CPUExecutionProvider"]
     return ["CPUExecutionProvider"]

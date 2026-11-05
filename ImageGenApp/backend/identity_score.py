@@ -17,6 +17,7 @@ So it catches a different character, a merged character and sometimes a lost LoR
 from __future__ import annotations
 
 import base64
+import re
 
 import numpy as np
 from PIL import Image
@@ -34,6 +35,15 @@ Z_FLAG_HAIR = 5.0         # … for a picture whose outfit changes the hair / he
                           # character. Round 13, her 66 outfit pictures (all her by eye, 12 references of daylight pictures): of the 46 with such an outfit
                           # 21 (46 %) fell below z −2, 14 below −3, 10 below −4, 6 (13 %) below −5, 4 below −6 (worst −7.8); the 20 others 3 (15 %) below −2, none below
                           # −3. Another girl (other hair / eyes) sits at z −29 … −43, so that stays caught at any margin.
+# what such an outfit says (the outfit batch reads the outfit's text, 🪄 Quick picture each picture's resolved prompt). Glasses added 2026-11-03: of 18
+# office-suit pictures of her with semi-rimless eyewear (all her by eye) 6 fell below z −2 (CCIP 0.86-0.90), none below −5.
+HAIR_COVER = re.compile(r"\b(hat|cap|bonnet|beret|veil|tiara|crown|headdress|headband|visor|beanie|goggles|headwear|hood|helmet|wig|bun|buns|"
+                        r"hair bun|ponytail|twintails|braid|braids|hairband|mask on head|glasses|eyewear|sunglasses|monocle)\b", re.I)
+
+
+def z_flag_for(text: str) -> float | None:
+    """The flag margin for a picture whose prompt / outfit is `text`: Z_FLAG_HAIR when it changes the head, else None (= Z_FLAG)."""
+    return Z_FLAG_HAIR if HAIR_COVER.search(str(text or "")) else None
 
 
 def available() -> bool:

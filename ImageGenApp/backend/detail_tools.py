@@ -89,8 +89,14 @@ def _no_shape_search(fn):
         if not getattr(_cfg, "NATIVE_ROCM", False):
             return fn(*args, **kwargs)
         import torch
-        with torch.backends.cudnn.flags(enabled=False):
+        # only `enabled`: cudnn.flags() also set every other flag (deterministic off, a benchmark limit MIOpen warns about on every
+        # process, the TF32 / precision switches) for the length of the pass
+        was = torch.backends.cudnn.enabled
+        torch.backends.cudnn.enabled = False
+        try:
             return fn(*args, **kwargs)
+        finally:
+            torch.backends.cudnn.enabled = was
     return run
 
 
@@ -151,7 +157,7 @@ def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, nega
                 step_callback(min(i + 1, eff), eff)
                 return kw
             cb = {"callback_on_step_end": _cb}
-        from backend.sampling import run_pipe      # FreeU / CFG rescale as in the main pass
+        from backend.sampling import grad_off, run_pipe      # FreeU / CFG rescale as in the main pass
         # The SDXL inpaint pipeline encodes the crop itself and, because the SDXL VAE config says
         # force_upcast, casts the whole VAE to fp32 first: with native (non-cuDNN) convs a 512 px fp32
         # tile needs a 1.12 GiB scratch buffer, which failed on every face-detail pass with 3 GB free.
@@ -167,7 +173,7 @@ def inpaint_region(sdp, image: Image.Image, mask: Image.Image, prompt: str, nega
                 if need32 and saved_vae[1]:
                     vae.tile_sample_min_size, vae.tile_latent_min_size = 256, 32
             try:
-                with torch.inference_mode():
+                with grad_off(sdp.device):
                     lat = run_pipe(sdp, pipe, "inpaint", **embeds, image=crop.resize((rw, rh), Image.LANCZOS),
                                    mask_image=crop_mask.resize((rw, rh), Image.NEAREST), width=rw, height=rh,
                                    strength=float(denoise), num_inference_steps=int(steps), guidance_scale=float(cfg),
@@ -665,21 +671,31 @@ def colour_guard(before: Image.Image, after: Image.Image, iris_boxes, region=Non
     return res
 
 
+# PRIVATE-ONLY extra words for the eye / hand passes' own prompts (expression and hand-action tags that the word lists below don't catch) live in
+# backend/detail_words_private.py, which the public port leaves out; without it these are empty and nothing changes.
+try:                                                       # pragma: no cover - present only in the private repo
+    from backend.detail_words_private import EYE_KEEP_EXTRA as _EYE_X, PUPIL_FREE_EXTRA as _PUPIL_X, HAND_KEEP_EXTRA as _HAND_X
+except Exception:
+    _EYE_X = _PUPIL_X = _HAND_X = ""
+_or = lambda extra: f"|{extra}" if extra else ""
+
 # the eye pass's own prompt (round 5, five Illustrious / NoobAI / Pony checkpoints, paired against the full prompt + three eye words):
 # quality + subject + the tags that describe the eyes, the expression and the gaze, then words that ask for the structures that should
 # show. Without "sparkling eyes, eye highlights, limbal ring": those drew 4-point star sparkles into the pupils in 3 of 8 pictures (3x crops).
 _EYE_KEEP = re.compile(r"eye|pupil|iris|lash|tsurime|jitome|tareme|sanpaku|heterochromia|glasses|eyewear|goggles|monocle|tears|crying|wink|"
                        r"smile|expression|blush|looking|bangs|hair over|hair between|eyebrow|makeup|eyeshadow|eyeliner|"
                        r"@_@|\+_\+|\^_\^|>_<|=_=|;_;|o_o|0_0|x_x|"
-                       r"squint|glar|sleepy|drowsy|heavy-lidded", re.I)          # (the kaomoji are eyes too; round 29: so are the lid states that have no 'eye' in their name)
+                       r"squint|glar|sleepy|drowsy|heavy-lidded" + _or(_EYE_X), re.I)   # (the kaomoji are eyes too; round 29: so are the lid states that have no 'eye' in their name)
 EYE_DETAIL_WORDS = "detailed eyes, beautiful detailed eyes, eyelashes, detailed pupils, iris detail"
 # "detailed pupils" alone drew bold outlined slit pupils (one checkpoint 4 of 4, Pony, some hassakuXL). With "round pupils" in the prompt and
 # "slit pupils, cat eyes" in the negative the pupils stay round and the iris keeps its shading (8 pictures, 3x crops; hassakuXL's eye sharpness over
 # the untouched base 1.12 -> 1.01) — unless the prompt asks for a pupil shape itself (slit / heart-shaped / @_@ …): then the pass leaves it alone.
 EYE_ROUND = "round pupils"
 EYE_ROUND_NEGATIVE = "slit pupils, cat eyes"
+# (2026-11-04) eyes rolled up or crossed have no round pupil to draw: "round pupils" would pull them back to the centre
 _PUPIL_SHAPE = re.compile(r"slit|cat eyes|reptil|snake|dragon|goat|animal eyes|-shaped|shaped pupils|horizontal pupils|vertical pupils|rectangular|no pupils|"
-                          r"blank eyes|empty eyes|mesmeriz|hypnosis|spiral|ringed eyes|@_@|\+_\+|solid circle eyes", re.I)
+                          r"blank eyes|empty eyes|mesmeriz|hypnosis|spiral|ringed eyes|@_@|\+_\+|solid circle eyes|"
+                          r"rolling eyes|rolled eyes|eyes rolled|cross-eyed|crossed eyes" + _or(_PUPIL_X), re.I)
 
 
 def _eye_tags(prompt: str) -> list[str]:
@@ -825,8 +841,10 @@ def swap_item(sdp, image: Image.Image, mask: Image.Image, item: str, prompt: str
 HAND_REDRAW_DENOISE = 0.7
 HAND_REDRAW_PAD = 0.6          # the re-draw's crop = the hand's box + this × its side on every side (round 10: 0.9 was worse than 0.6 on the hand that drew faces: correct 1 / 24 against 3 / 24, faces 2 against 4)
 HAND_EXTRA = "detailed hands, perfect hands, five fingers, detailed fingers, hand focus"
+# (2026-11-04) what a hand does when the tag has no hand word ("grabbing own hair", "touching own cheek"): kept, so the re-draw keeps the action
 _HAND_KEEP = re.compile(r"hand|finger|holding|peace|\bv\b|gesture|fist|nail|glove|wrist|bracelet|ring\b|fan|cup|mug|phone|flower|bouquet|"
-                        r"umbrella|reaching|outstretched|interlocked|adjusting|pointing|waving|sleeve|cuff", re.I)
+                        r"umbrella|reaching|outstretched|interlocked|adjusting|pointing|waving|sleeve|cuff|"
+                        r"grab|touch|caress|rubb|pinch|squeez|cupping|stroking" + _or(_HAND_X), re.I)
 
 
 def hand_prompt_from(prompt: str) -> str:

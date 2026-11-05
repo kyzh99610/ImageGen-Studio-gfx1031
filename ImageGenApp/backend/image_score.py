@@ -2,7 +2,7 @@
 image_score.py — ⭐ for generated pictures: the cheap CPU checks that separated good from broken ones in the audits.
 Nothing is downloaded here: a check only runs when its model is already in the Hugging Face cache.
 
-  * anatomy   — the anime face / hand detectors (backend/detail_tools): exactly one face, at most two hands
+  * anatomy   — the anime face / hand detectors (backend/detail_tools): exactly one face, at most two hands (the boxes a second look confirms)
   * look      — WD14 on the *head crop* (in the whole 832×1216 picture a hair pin or the eyes are a few pixels): the hair /
                 eye colours the character card names (backend/identity_check) and its hair accessory ("butterfly hair
                 ornament": WD14 on the head crop separated pictures with and without the pin at AUC 0.99)
@@ -108,8 +108,11 @@ def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=No
         from backend.detail_tools import detect_faces
         faces_fn = lambda im: detect_faces(im, "anime")
     if hands_fn is None and can["hands"]:
-        from backend.detail_tools import detect_hands, hands_look_off
-        hands_fn = detect_hands
+        from backend.detail_tools import confirmed_hands, detect_hands, hands_look_off
+        # The count is over the boxes the second look confirms (detail_tools.confirmed_hands). On the RX 9070 XT bench's test pictures
+        # (2026-11-02, 469 with one face) 3+ raw boxes came from 7 distinct pictures, a real third hand in 2 of them; the other
+        # third boxes were a ship turret, a leaf, a bench edge and a picture corner. The confirmed count flagged exactly the 2.
+        hands_fn = lambda im: confirmed_hands(im, detect_hands(im))
         if judge_fn is None:
             judge_fn = hands_look_off
     traits, acc = ic.traits(tags), accessories(tags)
@@ -166,6 +169,23 @@ def score_images(images, tags: str, *, probs_fn=None, faces_fn=None, hands_fn=No
         if notes:
             res_["notes"] = notes
         out.append(res_)
+    return out
+
+
+def age_flags(images, probs_fn=None) -> list[list[str]]:
+    """Per picture the child tags WD14 reads on the whole picture at or above the Studio Loop's age-guard threshold (loop_plan.AGE_TAGS /
+    AGE_THRESHOLD), e.g. ['loli 0.41']; all empty when WD14 isn't on this PC (nothing downloads). 🪄 Quick picture runs it on every picture,
+    the check box or not, as the loop's guard is always on. Her pictures read ≤ 0.001 on every one of these tags (162 pictures, 2026-11-03)."""
+    from backend.loop_plan import AGE_TAGS, AGE_THRESHOLD
+    images = list(images)
+    if probs_fn is None:
+        if not ic.available():
+            return [[] for _ in images]
+        probs_fn = ic.probs
+    out = []
+    for im in images:
+        p = {str(k).replace("_", " "): float(v) for k, v in probs_fn(im.convert("RGB")).items()}
+        out.append([f"{t} {p[t]:.2f}" for t in AGE_TAGS if p.get(t, 0.0) >= AGE_THRESHOLD])
     return out
 
 

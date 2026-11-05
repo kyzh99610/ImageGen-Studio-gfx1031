@@ -17,10 +17,11 @@ from pathlib import Path
 import gradio as gr
 
 from backend import loop_plan as LP
+from backend.i18n import T          # 中文 / English: the Chinese of a hint (backend/i18n.py)
 
 APP = Path(__file__).resolve().parent.parent
 STATE = {"proc": None, "plan": "", "log": None, "started": 0.0}
-_POLISH = ["", "Auto", "Cowboy shot — hires", "Cowboy shot", "Full body", "Portrait"]
+_POLISH = ["", "Auto", "Auto — best", "Cowboy shot — hires", "Cowboy shot", "Full body", "Portrait"]
 
 
 def _loop_dir(ns) -> Path:
@@ -193,7 +194,7 @@ def check_plan(ns, plan: dict, now=None) -> str:
         n = q["count"]
         round_s += n * secs
         pics += n
-        pol = s["polish"] if s["polish"] != "Auto" else "Auto → " + ", ".join(k for k, _ in s["picks"].most_common(2))
+        pol = s["polish"] if s["polish"] not in ("Auto", "Auto — best") else f"{s['polish']} → " + ", ".join(k for k, _ in s["picks"].most_common(2))
         rows.append(f"<tr><td>{e(name)}</td><td>{n}</td><td>{e(pol)}</td>"
                     f"<td>{SI.fmt_secs(secs)}{'' if meas.get(name) else ' ~'}</td><td>{e(s['checkpoint'])}</td></tr>")
     now = now or _dt.datetime.now()
@@ -357,8 +358,7 @@ def build_tab(ns) -> None:
             polish_dd = gr.Dropdown(pol_choices, value=_init("polish", ""), label="✨ Polish to force (empty = each setting's own)")
         explore_sl = gr.Slider(0, 1, value=_init("explore", 0.25), step=0.25,
                                label="Explore around the keepers (share of each later round)",
-                               info="From round 2, this share of a setting's pictures re-uses the seed of its best picture so far (same wildcard picks) "
-                                    "with a small variation (strength 0.1, like 🔀 More like this); the rest are new seeds. 0 = always new seeds.")
+                               info=T("From round 2 on, this share of a setting's pictures reuses the seed of its best picture so far with a small variation (like 🔀 More like this); the rest get new seeds. 0 = always new seeds.", "从第 2 轮起，每个设置有这么多比例的图会沿用目前最好那张的种子，再做一点小变化（像 🔀 更多类似）；其余用新种子。0 = 一直用新种子。"))
         reject_cb = gr.Checkbox(value=_init("reject", True),
                                 label="Reject pictures with exposure tags (the plan's block list: WD14 exposure tags and the 'explicit' rating). "
                                       "Clear it for a plan whose pictures may show that. The age guard (child-looking pictures) always stays on.")

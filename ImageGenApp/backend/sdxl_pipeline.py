@@ -11,6 +11,7 @@ from __future__ import annotations
 import gc
 import logging
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -37,50 +38,20 @@ def _device() -> str:
     return _cfg.DEVICE
 
 
-def _find_igpu_device() -> "str | None":
-    """
-    Return a DirectML device string for the iGPU (if one exists besides the dGPU).
-    Uses hardware_detector to find an iGPU, then maps to a torch_directml device index.
-    Returns None if no usable iGPU is found.
-    """
-    try:
-        import torch_directml
-        from backend.hardware_detector import detect_hardware
-        hw = detect_hardware()
-        # Find iGPU that's NOT the currently active dGPU
-        igpu = next((g for g in hw.gpus if g.is_igpu and g.backend == "directml"), None)
-        if igpu is None:
-            return None
-        # torch_directml enumerates in the same order as WMIC/registry
-        idx = igpu.index
-        if idx < torch_directml.device_count():
-            return str(torch_directml.device(idx))
-    except Exception:
-        pass
-    return None
-
-
-# Cache iGPU device detection (expensive — calls WMI)
-_igpu_dev: str | None = ...  # sentinel: not yet probed
-
-
-def _get_igpu_device() -> str | None:
-    global _igpu_dev
-    if _igpu_dev is ...:
-        _igpu_dev = _find_igpu_device()
-        if _igpu_dev:
-            print(f"[SDXL] iGPU detected for text encoding: {_igpu_dev}")
-        else:
-            print("[SDXL] No iGPU found — text encoding will use CPU (float32)")
-    return _igpu_dev
-
-
 _SDXL_EMBED_CACHE: dict[tuple, dict] = {}
+# One entry per 75-token chunk: (the model, the weighting mode, the chunk's text) -> (embedding, pooled), fp16 on the CPU.
+# Every chunk is encoded on its own, so a cached chunk is the same numbers as a fresh encode. Before 2026-11-04 only the
+# whole prompt + negative pair was cached: a new wildcard pick, or a face / hand / eye pass with its own short prompt,
+# parsed and encoded the whole negative again (a 32-chunk negative took 10 s, three times per picture; Compel's parser
+# alone takes ~140 ms a chunk).
+_SDXL_CHUNK_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+CHUNK_CACHE_MAX = 512            # ~160 MB of RAM at ~315 KB a chunk
 
 
 def _clear_embed_cache():
-    global _SDXL_EMBED_CACHE
+    """Called whenever the text encoders' weights change (a model load / unload, a LoRA fused or removed)."""
     _SDXL_EMBED_CACHE.clear()
+    _SDXL_CHUNK_CACHE.clear()
 
 
 def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
@@ -103,6 +74,7 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
         return {k: v.clone() for k, v in cached.items()}
 
     c = None
+    st = {"c": None, "cast": None, "new": 0, "cached": 0}
     # Clear this frame's references on the way out: something in the Compel call
     # path captures the call stack, which kept this frame — and through `pipe` the
     # whole pipeline — alive after the model was unloaded (the Bridge leaked 2 GB
@@ -114,42 +86,86 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
             print("[SDXL] Text encoder is on DML — cannot use Compel, truncating to 77 tokens")
             return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt)}
 
-        # ── Encode in float32, then cast the TEs back (fp16→fp32→fp16 is lossless) ──
-        # On the CPU fp16 matmuls are slow. On the GPU (ZLUDA) fp16 encoding is NOT
-        # deterministic: the same prompt encoded twice differed by up to 0.03, which made the
-        # same seed differ by 7–12/255 whenever the embedding cache was cleared (new session,
-        # LoRA change). fp32 gave bit-identical embeddings every time, ~0.5 s more per new
-        # prompt (cached after that); the fp32 copy (+1.6 GB) exists only during the encode.
-        te1_was_half = pipe.text_encoder.dtype == torch.float16
-        te2_was_half = pipe.text_encoder_2.dtype == torch.float16
-        if te1_was_half:
-            pipe.text_encoder.float()
-        if te2_was_half:
-            pipe.text_encoder_2.float()
+        def compel():
+            """Compel over the TEs in float32, made at the first chunk that isn't cached (none: no cast, no Compel)."""
+            if st["c"] is None:
+                # ── Encode in float32, then cast the TEs back (fp16→fp32→fp16 is lossless) ──
+                # On the CPU fp16 matmuls are slow. On the GPU (ZLUDA) fp16 encoding is NOT
+                # deterministic: the same prompt encoded twice differed by up to 0.03, which made the
+                # same seed differ by 7–12/255 whenever the embedding cache was cleared (new session,
+                # LoRA change). fp32 gave bit-identical embeddings every time, ~0.5 s more per new
+                # prompt (cached after that); the fp32 copy (+1.6 GB) exists only during the encode.
+                te1_was_half = pipe.text_encoder.dtype == torch.float16
+                te2_was_half = pipe.text_encoder_2.dtype == torch.float16
+                if te1_was_half:
+                    pipe.text_encoder.float()
+                if te2_was_half:
+                    pipe.text_encoder_2.float()
+                st["cast"] = (te1_was_half, te2_was_half)
+                st["c"] = Compel(
+                    tokenizer=[pipe.tokenizer, pipe.tokenizer_2],
+                    text_encoder=[pipe.text_encoder, pipe.text_encoder_2],
+                    returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+                    requires_pooled=[False, True],
+                    truncate_long_prompts=False,
+                )
+            return st["c"]
 
-        c = Compel(
-            tokenizer=[pipe.tokenizer, pipe.tokenizer_2],
-            text_encoder=[pipe.text_encoder, pipe.text_encoder_2],
-            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
-            requires_pooled=[False, True],
-            truncate_long_prompts=False,
-        )
-        # 75-token chunks cut at tag boundaries (BREAK = new chunk); pooled embedding
-        # from the first chunk, as A1111 does
-        from backend.prompt_tools import encode_chunked, pad_to_same_chunks
-        pos, pos_pool = encode_chunked(c, prompt, pipe.tokenizer, sdxl=True)
-        neg, neg_pool = encode_chunked(c, neg_prompt, pipe.tokenizer, sdxl=True)
-        pos, neg = pad_to_same_chunks(c, pos, neg, sdxl=True)
+        from backend.prompt_tools import chunk_prompt, fast_parsing
+        from backend.prompt_syntax import a1111_to_compel
+        ckey = (model_key, EMPHASIS["mode"])
+
+        def chunk(text):
+            """One 75-token chunk -> (embedding, pooled) in fp16 on the TE's device; from the chunk cache when it has it."""
+            k = ckey + (text,)
+            hit = _SDXL_CHUNK_CACHE.get(k)
+            if hit is None:
+                cp = compel()
+                build = getattr(cp, "build_conditioning_tensor", None)   # what Compel's __call__ does for one text, without its
+                with fast_parsing(), torch.no_grad():                    # padding step, which encoded "" every time (2 more passes)
+                    e, p = build(a1111_to_compel(text)) if build is not None else cp(a1111_to_compel(text))
+                if e.dim() == 2:                    # unbatched [tokens, dim]: __call__'s padding step added the batch axis
+                    e = e.unsqueeze(0)
+                hit = (e.half().cpu(), p.half().cpu())
+                _SDXL_CHUNK_CACHE[k] = hit
+                while len(_SDXL_CHUNK_CACHE) > CHUNK_CACHE_MAX:
+                    _SDXL_CHUNK_CACHE.popitem(last=False)
+                st["new"] += 1
+            else:
+                _SDXL_CHUNK_CACHE.move_to_end(k)
+                st["cached"] += 1
+            return hit[0].to(te_device), hit[1].to(te_device)
+
+        def encode(text):
+            # 75-token chunks cut at tag boundaries (BREAK = new chunk); pooled embedding
+            # from the first chunk, as A1111 does
+            parts = [chunk(", ".join(tags)) for tags in chunk_prompt(text, pipe.tokenizer)]
+            emb = torch.cat([e for e, _ in parts], dim=1) if len(parts) > 1 else parts[0][0]
+            return emb, parts[0][1]
+
+        pos, pos_pool = encode(prompt)
+        neg, neg_pool = encode(neg_prompt)
+        if pos.shape[1] != neg.shape[1]:              # pad the shorter one with empty-prompt chunks (A1111 behaviour)
+            empty = chunk("")[0]
+            n = max(pos.shape[1], neg.shape[1])
+
+            def pad(x):
+                reps = (n - x.shape[1]) // empty.shape[1]
+                return torch.cat([x] + [empty] * reps, dim=1) if reps > 0 else x
+            pos, neg = pad(pos), pad(neg)
 
         # ── Restore TEs to float16 BEFORE returning ──
-        if te1_was_half:
-            pipe.text_encoder.half()
-        if te2_was_half:
-            pipe.text_encoder_2.half()
-        if "cuda" in te_device:
-            torch.cuda.empty_cache()        # give the fp32 copy's memory back before denoising
+        if st["cast"] is not None:
+            te1_was_half, te2_was_half = st["cast"]
+            if te1_was_half:
+                pipe.text_encoder.half()
+            if te2_was_half:
+                pipe.text_encoder_2.half()
+            st["cast"] = None
+            if "cuda" in te_device:
+                torch.cuda.empty_cache()        # give the fp32 copy's memory back before denoising
 
-        # Cast embeddings to float16 to match pipeline expectations
+        # float16 to match the pipeline (the cached chunks already are)
         pos = pos.half()
         neg = neg.half()
         pos_pool = pos_pool.half()
@@ -158,6 +174,8 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
         seq_len = pos.shape[1]
         if seq_len > 77:
             print(f"[SDXL Compel] Long prompt: {seq_len} tokens across {seq_len // 77} chunks ✓")
+        if st["cached"]:
+            print(f"[SDXL Compel] {st['new']} chunk(s) encoded, {st['cached']} from the chunk cache")
 
         res = dict(
             prompt_embeds=pos,
@@ -173,7 +191,13 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
     except Exception as e:
         # Safety: restore TEs to float16 even on error
         try:
-            if pipe.text_encoder.dtype == torch.float32 and pipe.unet.dtype == torch.float16:
+            if st["cast"] is not None:
+                if st["cast"][0]:
+                    pipe.text_encoder.half()
+                if st["cast"][1]:
+                    pipe.text_encoder_2.half()
+                st["cast"] = None
+            elif pipe.text_encoder.dtype == torch.float32 and pipe.unet.dtype == torch.float16:
                 pipe.text_encoder.half()
                 pipe.text_encoder_2.half()
         except Exception:
@@ -181,6 +205,10 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
         print(f"[SDXL Compel] Failed ({e}), falling back to raw 77-token strings")
         return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt)}
     finally:
+        if st["c"] is not None:
+            st["c"] = None
+            from backend.prompt_tools import release_parser_cache
+            release_parser_cache()          # pyparsing's packrat cache keeps Compel's frames → the text encoders
         pipe = c = None
 
 
@@ -202,13 +230,24 @@ ONNX_CACHE_DIR = _cfg.APP_DIR / "onnx_cache"
 ONNX_CACHE_DIR.mkdir(exist_ok=True)
 
 def _dml_igpu_id() -> int:
-    """DML device index of the iGPU. DML order is not fixed: on some laptops
-    index 0 is the discrete GPU (e.g. an RX 6800M), so a hardcoded 0 would put the text encoders on the
-    same dGPU the UNet is using."""
-    igpu = _get_igpu_device()
-    if igpu is None:
-        raise RuntimeError("no iGPU found for accelerated text encoding")
-    return int(igpu.split(":")[1])
+    """ONNX Runtime's DirectML device_id of the iGPU: the DXGI number (backend/dxgi.py). It used torch-directml's number, 1 for the
+    Vega iGPU on the laptop, which ONNX Runtime reads as the RX 6800M: the text encoders ran on the GPU the UNet uses."""
+    from backend import dxgi
+    idx, why = dxgi.offload_igpu()
+    if idx is None:
+        raise RuntimeError(f"accelerated text encoding stays off: {why}")
+    return idx
+
+
+def accel_te_problem(device) -> str | None:
+    """Why accelerated text encoding stays off for a pipeline on this device, or None. On a GPU backend the text encoders already run on the card.
+    Measured on native ROCm (RX 9070 XT + 780M, SDXL loaded): the OpenCLIP-G export took free commit from 11.3 to 5.9 GB and kept 2.3 GB, the two
+    DirectML sessions on the iGPU held 3.7 GB more (released, 0.6 GB came back), and after one picture the export ran the commit out; a new prompt
+    took 250-330 ms on the iGPU against ~0.5 s on the card, and a repeated one is cached there (4 ms)."""
+    if str(device).startswith("cuda"):
+        return ("Off on this backend: the text encoders already run on your GPU (about 0.5 s for a new prompt, a repeated one is cached). The iGPU would "
+                "save under 0.3 s per prompt and hold ~6 GB of memory. It is for the DirectML backend, where they run on the CPU.")
+    return None
 
 
 def set_sdxl_npu_te(enabled: bool):
@@ -379,6 +418,17 @@ def _tokenize_chunked(tokenizer, text: str, max_len: int = 77):
         chunks.append(padded.reshape(1, max_len))
 
     return chunks
+
+
+def _release_accel_te() -> bool:
+    global _te1_session, _te2_session, _cached_model_stem
+    was = _te1_session is not None or _te2_session is not None
+    _te1_session = _te2_session = _cached_model_stem = None
+    return was
+
+
+from backend import memory_guard as _memory      # noqa: E402
+_memory.register("accelerated text encoders", _release_accel_te)
 
 
 def _get_ort_sessions(pipe, model_stem: str):
@@ -831,7 +881,8 @@ class SDXLPipeline:
             # ── Device placement ──
             if "privateuseone" in self.device:
                 import torch_directml
-                dml_dev = torch_directml.device()
+                from backend.sd_pipeline import _dml_index
+                dml_dev = torch_directml.device(_dml_index(self.device))
                 # UNet-only on GPU; text encoders + VAE stay on CPU in float16.
                 # TEs are temporarily cast to float32 during Compel encoding
                 # (CPU has no float16 HW) and restored to float16 before pipeline call.
@@ -869,7 +920,8 @@ class SDXLPipeline:
 
             model_name = path.stem if is_local else model_path_or_id
             fam = self.model_family.capitalize() + (" · v-pred" if self.prediction.get("v_pred") else "")
-            return f"✅ Loaded: {model_name} ({fam}, {self.device})"
+            from backend.sd_pipeline import _dml_igpu_note
+            return f"✅ Loaded: {model_name} ({fam}, {self.device})" + _dml_igpu_note(self.device)
 
         except Exception as e:
             self._unload()
@@ -1114,6 +1166,7 @@ class SDXLPipeline:
         self._restore_clean_state()
         self._lora_adapters = {}
         self.loaded_loras = []
+        _clear_embed_cache()        # the text encoders are back to their own weights: embeddings made with a LoRA's TE part are stale
         # Re-register hooks — _purge_peft replaced module objects
         if self._dml_dev is not None:
             for mod in self.pipe.unet.modules():
@@ -1206,7 +1259,7 @@ class SDXLPipeline:
             _stem = Path(self.current_model).stem if self.current_model else "sdxl"
             embeds = _build_sdxl_accel_embeds(self.pipe, prompt, negative_prompt, _stem)
             if embeds is None:
-                print(f"[SDXL] Accelerated encoding failed, falling back to CPU...")
+                print(f"[SDXL] Accelerated encoding failed, using the normal text encoders...")
 
         if embeds is None:
             _te_dev = next(self.pipe.text_encoder.parameters()).device

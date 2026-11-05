@@ -46,10 +46,14 @@ def arg(flag, default=None):
 
 
 def pick(items, arch_fn, arch, wanted=None):
+    """The checkpoint named by --ckpt / --xl-ckpt (a file name, its stem or a path), else the first of that family. A name that
+    matches nothing stops the run: a path used to match nothing and the test went on with another model without a word."""
     if wanted:
-        hit = [p for n, p in items if n.lower() == wanted.lower() or os.path.splitext(n)[0].lower() == wanted.lower()]
-        if hit:
-            return hit[0]
+        want = os.path.basename(str(wanted)).lower()
+        hit = [p for n, p in items if n.lower() == want or os.path.splitext(n)[0].lower() == os.path.splitext(want)[0]]
+        if not hit:
+            raise SystemExit(f"{wanted!r}: no such checkpoint in models/checkpoints")
+        return hit[0]
     return next((p for n, p in items if arch_fn(p) == arch), None)
 
 
@@ -70,7 +74,7 @@ def main() -> int:
     from backend.model_manager import list_checkpoints, list_loras, checkpoint_arch, lora_arch
     from backend.sd_pipeline import SDPipeline
     from backend import detail_tools as dt
-    print(f"device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}", flush=True)
+    print(f"device: {torch.cuda.get_device_name(torch.cuda.current_device()) if torch.cuda.is_available() else 'CPU'}", flush=True)
     ckpt = pick(list_checkpoints(), checkpoint_arch, "sd1", arg("--ckpt"))
     lora = pick(list_loras(), lora_arch, "sd1", arg("--lora"))
     if not ckpt:

@@ -122,6 +122,8 @@ from config import (
 from backend.hardware_detector import get_profile, GPUInfo, NPUInfo
 from backend.sd_pipeline    import SDPipeline, SCHEDULER_MAP
 from backend import records as _records
+from backend import i18n as _i18n
+from backend.i18n import T, L     # 中文 / English: T(en, zh) registers the Chinese of a hint / button, L(en, zh) = HTML that shows the chosen language
 from backend import colour as _colour
 from backend import pose_control as _pose
 from backend import composition as _comp
@@ -156,8 +158,9 @@ from backend.lora_keywords import chips_for, lora_keywords
 
 try:                                   # Settings → Prompt weights (saved choice)
     import json as _j0
-    from backend.prompt_syntax import set_emphasis as _set_emphasis
-    _set_emphasis(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("emphasis", "a1111"))
+    from backend.prompt_syntax import set_emphasis as _set_emphasis, DEFAULT_MODE as _EMPH_DEFAULT
+    if not os.environ.get("IMAGEGEN_TESTS"):         # the suite runs on the shipped default, not on the user's saved choice
+        _set_emphasis(_j0.loads((SETTINGS_DIR / "_prefs.json").read_text(encoding="utf-8")).get("emphasis", _EMPH_DEFAULT))
 except Exception:
     pass
 try:                                   # Settings → Eye style (saved choice)
@@ -183,6 +186,18 @@ sd       = SDPipeline()       # active pipeline — swapped to SDXLPipeline when
 _sd15    = sd                 # keep reference for quick switch-back
 _sdxl    = SDXLPipeline()     # dedicated SDXL / Pony / Illustrious pipeline
 upscaler = Upscaler()
+
+
+def _release_generation_models() -> bool:
+    was = _sd15.pipe is not None or _sdxl.pipe is not None
+    _sd15._unload()
+    _sdxl._unload()
+    return was
+
+
+from backend import memory_guard as _memory      # noqa: E402
+_memory.register("Real-ESRGAN", upscaler.release)
+_memory.register("the Generate tab's model", _release_generation_models, last=True)
 civitai  = CivitaiClient()
 
 # ── Bridge: SD 1.5 LoRAs to restore after the model was freed for the SDXL stage ──
@@ -286,7 +301,8 @@ def _native_gpu_note() -> str:
     from backend import rocm_env
     devs = rocm_env.gpu_devices(unfiltered=True)
     picks = ", ".join(f"--gpu {i} = {d['name']} ({d['arch']})" for i, d in enumerate(devs)) or "--gpu N"
-    return f"★ = in use. Native ROCm runs one GPU per start: to use another one, close the app and start launch.bat with {picks}."
+    return T(f"★ = in use. Native ROCm runs one GPU per start: to use another one, close the app and start launch.bat with {picks}.",
+             f"★ = 正在用的 GPU。native ROCm 每次启动只用一个 GPU：想换，就关掉 app，用 launch.bat 加参数重新启动（{picks}）。")
 
 
 def _npu_badge(npu: NPUInfo) -> str:
@@ -790,10 +806,10 @@ def _clean_extra(extra: dict | None) -> dict:
 def _apply_polish_auto(ex: dict, prompt: str) -> tuple[dict, str | None]:
     """✨ Polish = Auto (round 50): the recipe of THIS picture, chosen from its own (resolved) prompt — the framing tags, a gesture pose, 🧍 pose control (the skeleton mode) —
     replaces the hires / face / hand / eye settings of `ex`. Returns (extra, the recipe's name), or (ex, None) when Polish is not Auto."""
-    if ex.get("polish") != "Auto":
-        return ex, None
     from backend import polish as _pl
-    name = _pl.shot_type(prompt or "", pose=bool(ex.get("pc_on")) and ex.get("pc_type") == _pose.TYPE_POSE)
+    if not _pl.is_auto(ex.get("polish")):
+        return ex, None
+    name = _pl.auto_pick(ex["polish"], prompt or "", pose=bool(ex.get("pc_on")) and ex.get("pc_type") == _pose.TYPE_POSE)       # Auto — best: the slower recipe measured better for that framing
     return _clean_extra(dict(ex, **_pl.recipe(name))), name
 
 
@@ -805,7 +821,45 @@ _SDXL_BAD_SAMPLERS = ("PNDM", "Heun")
 _SDXL_FAMILIES = ("sdxl", "pony", "illustrious")
 
 _XY_AXES = ["none", "CFG", "Steps", "Sampler", "Seed", "LoRA 1 weight", "CLIP skip", "Hires denoise",
-            "Face denoise", "Hand denoise", "Eye denoise", "PAG scale", "CFG rescale", "Colour strength", "Pose strength", "Pose", "Prompt S/R", "Checkpoint"]
+            "Face denoise", "Hand denoise", "Eye denoise", "PAG scale", "CFG rescale", "Colour strength", "Pose strength", "Pose", "Prompt S/R",
+            "Negative S/R", "Checkpoint"]
+_XY_SR = ("Prompt S/R", "Negative S/R")
+
+
+def _sr_values(text: str) -> list[str]:
+    """Prompt / Negative S/R values: comma-separated, a "quoted value" may hold commas, and "" (an empty quoted value) means
+    'remove the phrase'. Unquoted empty fields (a stray or trailing comma) are skipped."""
+    out, cur, quoted, inq = [], "", False, False
+    for ch in str(text or ""):
+        if inq:
+            if ch == '"':
+                inq = False                          # the closing quote; anything after it up to the comma is ignored
+            else:
+                cur += ch
+        elif ch == '"' and not cur.strip():
+            cur, inq, quoted = "", True, True        # an opening quote (spaces before it don't count)
+        elif ch == ",":
+            if quoted:
+                out.append(cur)
+            elif cur.strip():
+                out.append(cur.strip())
+            cur, quoted = "", False
+        elif not quoted:
+            cur += ch
+    if quoted:
+        out.append(cur)                              # also an unclosed quote: its text to the end
+    elif cur.strip():
+        out.append(cur.strip())
+    return out
+
+
+def _sr_replace(text: str, find: str, repl: str) -> str:
+    """One S/R cell: replace `find` with `repl`; replacing it with nothing also drops the comma it leaves behind."""
+    out = (text or "").replace(find, repl)
+    if not repl:
+        import re as _re
+        out = _re.sub(r"(?:\s*,\s*){2,}", ", ", out).strip().strip(",").strip()
+    return out
 
 
 def _xy_pose_values(text: str) -> tuple[list, str]:
@@ -851,11 +905,15 @@ def _xy_values(axis: str, text: str) -> tuple[list, str]:
     Returns (values, error message)."""
     if not axis or axis == "none":
         return [None], ""
+    if axis in _XY_SR:
+        vals = _sr_values(text)
+        if not vals or not vals[0]:
+            return [], (f'{axis}: the first value is the words to find (then the replacements; "a, b" in quotes keeps a comma, '
+                        '"" removes the words).')
+        return vals, ""
     raw = [v.strip() for v in str(text or "").split(",") if v.strip()]
     if not raw:
         return [], f"Enter values for {axis}, separated by commas."
-    if axis == "Prompt S/R":
-        return raw, ""
     if axis == "Pose":
         return _xy_pose_values(text)
     if axis == "Checkpoint":
@@ -1249,8 +1307,7 @@ def _eye_pass_skipped(pipe) -> bool:
     return str(getattr(pipe, "model_family", "") or "").lower() == "pony"
 
 
-_HAIR_COVER = re.compile(r"\b(hat|cap|bonnet|beret|veil|tiara|crown|headdress|headband|visor|beanie|goggles|headwear|hood|helmet|wig|bun|buns|"
-                         r"hair bun|ponytail|twintails|braid|braids|hairband|mask on head)\b", re.I)
+from backend.identity_score import HAIR_COVER as _HAIR_COVER       # hats, hairstyles, glasses: shared with 🪄 Quick picture's check
 
 
 def _identity_margins(card: dict, outfits, n_seeds: int, n: int) -> list:
@@ -1427,8 +1484,7 @@ def _build_generate_tab():
                     choices=_ckpt_choices,
                     value=_init_ckpt,
                     allow_custom_value=True,
-                    info="Local .safetensors / .ckpt or HuggingFace ID. "
-                         "Loaded automatically when you press Generate.",
+                    info=T("The main model that draws the picture. It loads by itself when you press Generate.", "负责画图的主模型。按生成时会自动加载。"),
                 )
                 ckpt_info_html = gr.HTML(get_model_info(_init_ckpt) if _init_ckpt else "")
                 _vae_choices = ["none"] + list_vaes()
@@ -1438,7 +1494,7 @@ def _build_generate_tab():
                     label="VAE (optional)",
                     choices=_vae_choices,
                     value=_init_vae,
-                    info="Override the checkpoint's built-in VAE (e.g. vae-ft-mse for SD 1.5 = sharper colours).",
+                    info=T("Leave it at 'none' to use the model's own VAE. Pick another only if the model's page says so.", "选 none 就用模型自带的 VAE。只有模型页面要求时才换。"),
                 )
                 vae_info_html = gr.HTML("")
                 load_model_btn  = gr.Button("⏏ Preload model", variant="secondary", size="sm")
@@ -1457,11 +1513,11 @@ def _build_generate_tab():
                     label="LoRA Slot 1 (Primary — Character)",
                     choices=_lora_choices(_init_ckpt),
                     value=_ls_lora(0, 0.8)[0],
-                    info="Character LoRA — WHO is in the image. Slots 2–3 are for style/effects.",
+                    info=T("Slot 1 is for the character (who is in the picture). Slots 2–3 are for style and effects.", "第 1 槽放角色 LoRA（画的是谁）。第 2–3 槽放风格和效果。"),
                 )
                 lora_info1 = gr.HTML("")
                 lora_weight = gr.Slider(0.1, 1.5, value=_ls_lora(0, 0.8)[1], step=0.05, label="Weight 1",
-                                        info="0.7–0.85 recommended · >1.0 risks artifacts / burned colours.")
+                                        info=T("0.7–0.85 usually. Above 1.0 colours can burn and shapes break.", "一般 0.7–0.85。超过 1.0 容易颜色过曝、画面变形。"))
                 with gr.Row():
                     apply_lora_btn  = gr.Button("➕ Apply Slot 1", size="sm")
                     remove_lora1_btn = gr.Button("✖ Remove Slot 1", size="sm")
@@ -1473,11 +1529,11 @@ def _build_generate_tab():
                         label="LoRA Slot 2 (Style / Effect)",
                         choices=_lora_choices(_init_ckpt),
                         value=_ls_lora(1, 0.7)[0],
-                        info="Style / lighting / concept LoRA — HOW the image looks.",
+                        info=T("A style, lighting or concept LoRA: how the picture looks.", "风格、光影或概念 LoRA：决定画面看起来什么样。"),
                     )
                     lora_info2 = gr.HTML("")
                     lora_weight2 = gr.Slider(0.1, 1.5, value=_ls_lora(1, 0.7)[1], step=0.05, label="Weight 2",
-                                             info="0.5–0.7 recommended · keep below the character LoRA's weight.")
+                                             info=T("0.5–0.7 usually; keep it below the character LoRA's weight.", "一般 0.5–0.7；要比角色 LoRA 的权重低。"))
                     with gr.Row():
                         apply_lora_btn2  = gr.Button("➕ Apply Slot 2", size="sm")
                         remove_lora2_btn = gr.Button("✖ Remove Slot 2", size="sm")
@@ -1486,11 +1542,11 @@ def _build_generate_tab():
                         label="LoRA Slot 3 (Extra / Accent)",
                         choices=_lora_choices(_init_ckpt),
                         value=_ls_lora(2, 0.7)[0],
-                        info="Secondary effect. With 3 LoRAs keep the weights' sum ≤ 2.0.",
+                        info=T("A second effect. With all 3 slots used, keep the weights' sum at 2.0 or less.", "第二种效果。3 个槽都用时，权重加起来不要超过 2.0。"),
                     )
                     lora_info3 = gr.HTML("")
                     lora_weight3 = gr.Slider(0.1, 1.5, value=_ls_lora(2, 0.7)[1], step=0.05, label="Weight 3",
-                                             info="0.3–0.5 recommended when all 3 slots are used.")
+                                             info=T("0.3–0.5 when all 3 slots are used.", "3 个槽都用时一般 0.3–0.5。"))
                     with gr.Row():
                         apply_lora_btn3  = gr.Button("➕ Apply Slot 3", size="sm")
                         remove_lora3_btn = gr.Button("✖ Remove Slot 3", size="sm")
@@ -1529,14 +1585,13 @@ def _build_generate_tab():
                     _cards0 = _list_cards()
                     card_dd = gr.Dropdown(label="Character", choices=["(none)"] + _cards0,
                                           value=_cards0[0] if _cards0 else "(none)",
-                                          info="Saved in settings/characters/ (checkpoint, LoRAs, tags, outfits, size…). "
-                                               "📌 profiles: 🎴 Load uses the one for the checkpoint selected now")
+                                          info=T("A character card keeps the model, LoRAs, tags, outfits and size together (settings/characters/). 🎴 Load uses its profile for the model selected now, if it has one.", "角色卡把模型、LoRA、标签、服装、尺寸存在一起（settings/characters/）。🎴 加载时，如果卡里有当前所选模型的配置，就用那份。"))
                     from backend.character_cards import load_card as _load_card
                     _card0 = _load_card(_cards0[0]) if _cards0 else None
                     _outs0 = ["(no outfit tags)"] + list((_card0 or {}).get("outfits") or {})
                     outfit_dd = gr.Dropdown(label="Outfit", choices=_outs0, value=_outs0[1] if len(_outs0) > 1 else _outs0[0])
                     card_scene_txt = gr.Textbox(label="Scene / extra tags", lines=1,
-                                                placeholder="__pose__, __expression__, __background__")
+                                                placeholder=T("__pose__, __expression__, __background__", "__pose__, __expression__, __background__"))
                     card_load_btn = gr.Button("🎴 Load → checkpoint, LoRAs, prompt, settings", variant="primary",
                                               size="sm")
                     card_name_txt = gr.Textbox(label="Card name", lines=1, value=_cards0[0] if _cards0 else "")
@@ -1553,7 +1608,7 @@ def _build_generate_tab():
                         card_batch_seeds = gr.Number(value=2, precision=0, minimum=1, maximum=8,
                                                      label="Seeds per outfit", scale=1)
                         card_batch_resume = gr.Checkbox(value=True, label="Skip pairs already made", scale=2,
-                                                        info="Same settings + outfit + seed → reuse the saved image")
+                                                        info=T("Same settings + outfit + seed = reuse the picture already made.", "设置、服装、种子都一样时，直接用已经画好的图。"))
                     card_batch_btn = gr.Button("🎴▶ Generate every outfit (current settings, same seeds)",
                                                size="sm", variant="secondary")
 
@@ -1567,23 +1622,21 @@ def _build_generate_tab():
                     with gr.Column(scale=5, min_width=420):
                         prompt_txt = gr.Textbox(
                             label="Prompt",
-                            placeholder="score_9, score_8_up, masterpiece, best quality, 1girl, solo, ...",
+                            placeholder=T("masterpiece, best quality, 1girl, solo, ...", "masterpiece, best quality, 1girl, solo, ...（用英文标签）"),
                             lines=3,
                             value=_ls.get("prompt", ""),
-                            info="Most important tags first. (tag:1.2) boosts, (tag:0.8) weakens. Ctrl+Enter generates.",
+                            info=T("Most important things first. (tag:1.2) makes a tag stronger, (tag:0.8) weaker. Ctrl+Enter generates.", "重要的写在前面。(tag:1.2) 加强，(tag:0.8) 减弱。按 Ctrl+Enter 生成。"),
                         )
                         neg_prompt_txt = gr.Textbox(
                             label="Negative Prompt",
                             value=_ls.get("negative_prompt", DEFAULT_NEGATIVE),
                             lines=2,
-                            info="What to avoid. Pony/IL: add score_4, score_5, score_6. 20–40 tags is plenty.",
+                            info=T("What you don't want in the picture. 20–40 tags is plenty.", "不想在画面里出现的东西。20–40 个标签就够了。"),
                         )
                         auto_quality_cb = gr.Checkbox(
                             label="Auto-add quality tags",
                             value=_ls.get("auto_quality", True),
-                            info="Adds the quality tags your model family was trained with (Illustrious/NoobAI: "
-                                 "masterpiece … very aesthetic, absurdres · Pony: score_9… · SD 1.5: masterpiece, "
-                                 "best quality) and matching negative tags — only if you have none.",
+                            info=T("Adds the quality tags your model family was trained with, and matching negative tags, only if you wrote none yourself.", "自动加上这类模型训练时用的质量标签和对应的反向标签；你自己写了就不加。"),
                         )
                         with gr.Row():
                             # an estimate until the tokenizer has loaded in the background
@@ -1629,13 +1682,13 @@ def _build_generate_tab():
                             label="Sampler / Scheduler",
                             choices=list(SCHEDULER_MAP.keys()),
                             value=_ls.get("scheduler", "DPM++ 2M Karras"),
-                            info="DPM++ 2M Karras: all-rounder · DPM++ 2M AYS: same quality in 10–12 steps · PNDM / Heun: a little more grain on SDXL",
+                            info=T("How the picture is denoised step by step. DPM++ 2M AYS: good in 10–12 steps. DPM++ 2M Karras: the all-rounder. PNDM / Heun: a little more grain on SDXL.", "一步步去噪画出图片的方法。DPM++ 2M AYS：10–12 步就够好。DPM++ 2M Karras：万能。PNDM / Heun：SDXL 上颗粒感稍多。"),
                         )
                         with gr.Row():
                             steps_sl    = gr.Slider(1, 150, value=_ls.get("steps", DEFAULT_STEPS), step=1,  label="Steps",
-                                                    info="AYS: 10–12 · Karras / Euler: 20–30")
+                                                    info=T("AYS samplers: 10–12. Karras / Euler: 20–30.", "AYS 采样器：10–12。Karras / Euler：20–30。"))
                             cfg_sl      = gr.Slider(1, 30,  value=_ls.get("cfg_scale", DEFAULT_CFG), step=0.5, label="CFG Scale",
-                                                    info="Pony / IL: 5–7 · SD 1.5: 7–9")
+                                                    info=T("How closely it follows the prompt. Pony / Illustrious: 5–7. SD 1.5: 7–9.", "多严格地按提示词画。Pony / Illustrious：5–7。SD 1.5：7–9。"))
                         with gr.Row():
                             recipe_btn = gr.Button("⚡ Use the measured recipe for this checkpoint", size="sm", scale=2,
                                                    elem_id="recipe-btn")
@@ -1645,22 +1698,22 @@ def _build_generate_tab():
                             size_preset_dd = gr.Dropdown(
                                 label="Size preset", choices=_SIZE_PRESETS, value=_size_preset_now(_ls), scale=3,
                                 allow_custom_value=True,
-                                info="Native resolutions per model family — shows the size now set.",
+                                info=T("The sizes each model family was trained at. Shows the size set now.", "每类模型训练时用的尺寸。显示当前设的尺寸。"),
                             )
                             with gr.Column(scale=1, min_width=130):
                                 swap_size_btn = gr.Button("⇄ Swap W/H", size="sm")
 
                         with gr.Row():
                             width_sl    = gr.Slider(256, 2048, value=_ls.get("width", DEFAULT_WIDTH), step=64, label="Width",
-                                                    info="Multiple of 64.")
+                                                    info=T("A multiple of 64.", "64 的倍数。"))
                             height_sl   = gr.Slider(256, 2048, value=_ls.get("height", DEFAULT_HEIGHT), step=64, label="Height",
-                                                    info="SD 1.5 ≈ 512 · SDXL ≈ 1024.")
+                                                    info=T("SD 1.5 about 512, SDXL about 1024.", "SD 1.5 约 512，SDXL 约 1024。"))
                             batch_sl    = gr.Slider(1, 8,     value=_ls.get("batch_size", 1), step=1, label="Batch Size",
-                                                    info="Each image gets its own seed.")
+                                                    info=T("Each picture gets its own seed.", "每张图有自己的种子。"))
 
                         with gr.Row():
                             seed_num    = gr.Number(value=-1, label="Seed (-1 = random)", precision=0, scale=3,
-                                                    info="The seed used is saved in every PNG.")
+                                                    info=T("-1 = new every time. The seed used is saved in every picture.", "-1 = 每次随机。用过的种子会存在每张图里。"))
                             with gr.Column(scale=1, min_width=130):
                                 seed_reuse_btn  = gr.Button("♻️ Last seed", size="sm")
                                 seed_random_btn = gr.Button("🎲 Random", size="sm")
@@ -1668,97 +1721,83 @@ def _build_generate_tab():
                             clip_skip_rb = gr.Radio(
                                 [1, 2], value=_ls.get("clip_skip") if _ls.get("clip_skip") in (1, 2) else 1,
                                 label="CLIP skip",
-                                info="2 = what most SD 1.5 anime checkpoints expect (A1111 “Clip skip: 2”). SDXL ignores it.")
+                                info=T("2 = what most SD 1.5 anime models expect. SDXL ignores it.", "2 = 大多数 SD 1.5 动漫模型的要求。SDXL 不受影响。"))
                         from backend import polish as _polish
                         with gr.Row():
                             polish_dd = gr.Dropdown(
                                 list(_polish.CHOICES), value=_polish.clean_choice(_ls.get("polish")), scale=3,
                                 label="✨ Polish — fill hires fix / face / hand / eye detail for this kind of picture",
-                                info="Sets the controls below to the recipe measured for the framing (Help → ✨ Polish). "
-                                     "Auto reads the framing tags of each picture's own prompt when it is made (so a wildcard file can mix portrait / cowboy / full-body lines) "
-                                     "and replaces the hires / face / hand / eye settings; pick a fixed entry to change them by hand.")
+                                info=T("Sets the detail passes below to the recipe measured for the picture's framing. Auto decides for each picture from its own prompt (so a wildcard file can mix portraits and full bodies). Pick a fixed entry to change the passes by hand.", "把下面的细化步骤设成这种取景实测过的配方。自动：每张图按自己的提示词决定（所以通配符里可以混着头像和全身）。选一个固定项，就可以手动改下面的步骤。"))
                             polish_note = gr.HTML("")
                         with gr.Accordion("🔍 Hires fix — generate small, then refine at a higher resolution",
                                           open=bool(_ls.get("hires_on"))):
                             hires_cb = gr.Checkbox(
                                 label="Enable hires fix", value=bool(_ls.get("hires_on", False)),
-                                info="Composes at the model's native size (no doubled bodies), upscales, then "
-                                     "re-draws details at the big size. About 2–3× the time. txt2img only.")
+                                info=T("Draws at the model's own size, enlarges, then redraws the details at the big size. No doubled bodies. About 2–3× the time. New pictures only (not img2img).", "先按模型原生尺寸画，放大，再在大图上重画细节。不会画出重复的身体。时间约 2–3 倍。只用于新出图（不用于图生图）。"))
                             _hires_ups = ["Lanczos"] + [m for m in upscaler.available_methods() if m != "Lanczos"]
                             with gr.Row():
                                 hires_scale_sl = gr.Slider(1.1, 2.5, value=_ls.get("hires_scale", 1.5), step=0.05,
-                                                           label="Upscale by", info="1.5× is the sweet spot on 12 GB.")
+                                                           label="Upscale by", info=T("1.5× is the sweet spot.", "1.5 倍效果最好。"))
                                 hires_denoise_sl = gr.Slider(0.1, 0.8, value=_ls.get("hires_denoise", 0.45), step=0.05,
                                                              label="Hires denoise",
-                                                             info="0.3 keeps it · 0.45 adds detail · 0.6+ changes it.")
+                                                             info=T("0.3 keeps it as it is, 0.45 adds detail, 0.6+ changes it.", "0.3 基本不变，0.45 增加细节，0.6 以上会改画面。"))
                             with gr.Row():
                                 hires_steps_sl = gr.Slider(4, 60, value=_ls.get("hires_steps", 15), step=1,
                                                            label="Hires steps",
-                                                           info="8 is enough for a full body · wide shots: 14")
+                                                           info=T("8 is enough for a full body; wide shots: 14.", "全身 8 步够了；远景 14 步。"))
                                 hires_up_dd = gr.Dropdown(
                                     _hires_ups, label="Hires upscaler",
                                     value=_ls.get("hires_upscaler") if _ls.get("hires_upscaler") in _hires_ups else "Lanczos",
-                                    info="Lanczos is instant; Real-ESRGAN gives sharper line art (a few seconds more).")
+                                    info=T("Lanczos is instant; Real-ESRGAN gives sharper line art (a few seconds more).", "Lanczos 瞬间完成；Real-ESRGAN 线条更清晰（多几秒）。"))
                         with gr.Accordion("✨ Face & hand detail — re-draw faces / hands at full resolution "
                                           "(ADetailer-style)", open=bool(_ls.get("fd_on") or _ls.get("hd_on") or _ls.get("ed_on") or _ls.get("md_on"))):
                             fd_cb = gr.Checkbox(
                                 label="Enable face detail", value=bool(_ls.get("fd_on", False)),
-                                info="Re-draws each face at the model's native size: small faces in full-body or group "
-                                     "shots get proper eyes and mouths · ~5–15 s per face")
+                                info=T("Redraws each face at full resolution: small faces in full-body or group pictures get proper eyes and mouths. ~5–15 s per face.", "把每张脸放大重画：全身或多人图里的小脸能画出正常的眼睛和嘴。每张脸约 5–15 秒。"))
                             with gr.Row():
                                 fd_denoise_sl = gr.Slider(0.1, 0.8, value=_ls.get("fd_denoise", 0.4), step=0.05,
                                                           label="Face denoise",
-                                                          info="0.3 = touch-up · 0.4 = fix details · 0.8 = a different face · small faces are raised "
-                                                               "automatically (≤ 100 px: 0.55, ≤ 60 px: 0.65)")
+                                                          info=T("0.3 = touch-up, 0.4 = fix details, 0.8 = a different face. Small faces get more by themselves (≤ 100 px: 0.55, ≤ 60 px: 0.65).", "0.3 = 小修，0.4 = 修细节，0.8 = 换一张脸。小脸会自动加大（≤ 100 像素：0.55，≤ 60 像素：0.65）。"))
                                 fd_mode_rb = gr.Radio(["auto", "anime", "photo"],
                                                       value=_ls.get("fd_mode") if _ls.get("fd_mode") in
                                                       ("auto", "anime", "photo") else "auto",
                                                       label="Face detector")
                             fd_prompt_txt = gr.Textbox(label="Extra face prompt (optional)",
                                                        value=_ls.get("fd_prompt", ""),
-                                                       placeholder="e.g. detailed eyes, beautiful face",
-                                                       info="Added to your prompt for the face pass only.")
+                                                       placeholder=T("detailed eyes, beautiful face", "detailed eyes, beautiful face（用英文标签）"),
+                                                       info=T("Added to your prompt for the face pass only.", "只在修脸时加到提示词里。"))
                             with gr.Row():
                                 hd_cb = gr.Checkbox(
                                     label="✋ Also re-draw hands", value=bool(_ls.get("hd_on", False)),
-                                    info="Re-draws each hand at native size, before the faces · cleans up smudged fingers, "
-                                         "never fixes a finger count (use 🖐 in Inpaint) · ~5–15 s per hand")
+                                    info=T("Redraws each hand at full resolution, before the faces. Cleans up smudged fingers; it can't fix a wrong finger count (use 🖐 in Inpaint). ~5–15 s per hand.", "在修脸之前把每只手放大重画。能把糊掉的手指修干净，但改不了手指数量（用局部重绘里的 🖐）。每只手约 5–15 秒。"))
                                 hd_denoise_sl = gr.Slider(0.1, 0.7, value=_ls.get("hd_denoise", 0.35), step=0.05,
                                                           label="Hand denoise",
-                                                          info="0.35 = touch-up · 0.5–0.7 = fixes about 2 of 3 mitten / blob hands (9 hands) · "
-                                                               "a broken hand that stays: 🖐 Re-draw hand in Inpaint (several tries)")
+                                                          info=T("0.35 = touch-up. 0.5–0.7 fixes about 2 in 3 mitten or blob hands. A hand that stays broken: 🖐 Re-draw hand in Inpaint (a few tries).", "0.35 = 小修。0.5–0.7 能修好约 2/3 的手套状、团状的手。还是坏的：用局部重绘里的 🖐 重画手（多试几次）。"))
                             with gr.Row():
                                 ed_cb = gr.Checkbox(
                                     label="👁 Also re-draw eyes", value=bool(_ls.get("ed_on", False)),
-                                    info="Re-draws both eyes of each face after the face pass; the colour stays in the iris "
-                                         "(bangs and skin keep theirs) · ~5–25 s per face · skipped on Pony")
+                                    info=T("Redraws both eyes of each face after the face pass; the colour stays in the iris. ~5–25 s per face. Skipped on Pony models (it makes them softer).", "修脸之后重画每张脸的两只眼睛；颜色只留在虹膜里。每张脸约 5–25 秒。Pony 模型会跳过（会让它变糊）。"))
                                 ed_denoise_sl = gr.Slider(0.1, 0.6, value=_ls.get("ed_denoise", 0.4), step=0.05,
                                                           label="Eye denoise",
-                                                          info="0.25–0.3 = tidy up · 0.4 = more iris / pupil detail · 0.5+ = stray marks · "
-                                                               "pupils need the pixels: hires / upscale first")
+                                                          info=T("0.25–0.3 = tidy up, 0.4 = more iris and pupil detail, 0.5+ = stray marks. Pupils need pixels: use hires or an upscale first.", "0.25–0.3 = 整理，0.4 = 虹膜和瞳孔细节更多，0.5 以上 = 会有杂点。瞳孔需要像素：先用高清修复或放大。"))
                             md_cb = gr.Checkbox(
                                 label="🔬 Max detail — Real-ESRGAN 2× before the eye pass",
                                 value=bool(_ls.get("md_on", False)),
-                                info="Full-body eyes are pixel-limited: this doubles the picture (832×1216 + hires → 2496×3648) so the eye pass draws "
-                                     "on twice the pixels · eyes ~7× more detail, crisper lines · +50 % time, a bigger file")
+                                info=T("Doubles the picture before the eye pass, so the eyes get twice the pixels: eyes ~7× more detailed, crisper lines. +50 % time and a bigger file.", "修眼睛之前先把图放大 2 倍，眼睛就有两倍的像素可画：眼睛细节约多 7 倍，线条更清楚。时间多 50 %，文件更大。"))
                         with gr.Accordion("🎚 Quality boosters — PAG, FreeU, CFG rescale",
                                           open=bool(_ls.get("pag_scale") or _ls.get("freeu"))):
                             with gr.Row():
                                 pag_sl = gr.Slider(0, 6, value=_ls.get("pag_scale", 0), step=0.5, label="PAG scale",
-                                                   info="Perturbed-attention guidance: cleaner structure, anatomy and "
-                                                        "backgrounds. 0 = off · 2–3 recommended · ~1.5× the time.")
+                                                   info=T("Cleaner shapes, anatomy and backgrounds. 0 = off, 2–3 recommended. About 1.5× the time.", "形状、人体、背景更干净。0 = 关闭，推荐 2–3。时间约 1.5 倍。"))
                                 cfg_rescale_sl = gr.Slider(0, 1, value=_ls.get("cfg_rescale", 0), step=0.05,
                                                            label="CFG rescale",
-                                                           info="Tames burned colours at high CFG. 0 = auto: 0.7 for "
-                                                                "v-prediction models (NoobAI v-pred…), else off.")
+                                                           info=T("Calms burned colours at high CFG. 0 = auto: 0.7 for v-prediction models, otherwise off.", "CFG 高时压一压过曝的颜色。0 = 自动：v-prediction 模型用 0.7，其它关闭。"))
                             freeu_cb = gr.Checkbox(label="FreeU", value=bool(_ls.get("freeu", False)),
-                                                   info="Re-weights UNet features: more detail and contrast at no "
-                                                        "cost; can over-saturate some anime models.")
+                                                   info=T("More detail and contrast for free; can make some anime models too colourful.", "免费多一点细节和对比度；有些动漫模型会因此颜色过艳。"))
                         with gr.Accordion("🎨 Colour strength — paler pictures, same drawing",
                                           open=_colour.clamp_strength(_ls.get("cs")) < 1.0):
                             cs_sl = gr.Slider(0.5, 1.0, value=_colour.clamp_strength(_ls.get("cs")), step=0.05, label="Colour strength",
-                                              info="1 = as drawn · 0.8 = 20 % less colour · skin, hair and fabrics keep their hue and lightness, "
-                                                   "lines and shading stay · applied to the finished picture, after every pass")
+                                              info=T("1 = as drawn. 0.8 = 20 % less colour. Lines, shading and lightness stay; applied to the finished picture.", "1 = 原样。0.8 = 颜色淡 20 %。线条、阴影、明暗都不变；在成品图上调整。"))
                         from backend.ui_pose import build_section as _build_pose_section          # 🧍 Pose control (round 34): backend/ui_pose.py
                         pc_cb, pc_pose_dd, pc_str_sl, pc_model_dd, pc_legs_cb, pc_type_rd = _build_pose_section(sys.modules[__name__], _ls).extras
                         with gr.Accordion("🔀 Variations — small changes to an image you like", open=False):
@@ -1766,8 +1805,7 @@ def _build_generate_tab():
                                 var_seed_num = gr.Number(value=-1, precision=0, label="Variation seed (-1 = random)")
                                 var_strength_sl = gr.Slider(
                                     0, 1, value=0, step=0.01, label="Variation strength",
-                                    info="0 = off · 0.05–0.1 = a close relative (pose and details shift, the character stays) · "
-                                         "0.25+ = mostly a new picture · 1 = the variation seed's own image. Keep the main seed fixed.")
+                                    info=T("0 = off. 0.05–0.1 = a close relative (pose and details shift, the character stays). 0.25+ = mostly a new picture. Keep the main seed fixed.", "0 = 关闭。0.05–0.1 = 很像的一张（姿势和细节有变化，角色不变）。0.25 以上 = 基本是新图。主种子要保持不变。"))
                         last_seed_state = gr.State([])      # seed of each image in the gallery
                         selected_idx_state = gr.State(0)    # gallery image the user clicked
 
@@ -1784,16 +1822,12 @@ def _build_generate_tab():
                         with gr.Accordion("🖼 Image-to-Image (optional)", open=False) as i2i_acc:
                             init_image  = gr.Image(label="Input Image", type="pil")
                             strength_sl = gr.Slider(0.05, 1.0, value=0.75, step=0.05, label="Denoise Strength",
-                                                    info="How much to change the input: 0.05–0.2 touch-up · 0.3 subtle · 0.5 restyle · 0.8+ mostly new. "
-                                                         "Batch Size N = N variations (seed, seed + 1, …). "
-                                                         "Karras / AYS samplers change less at the same value (+0.15). "
-                                                         "Recolouring an outfit: same seed + edited prompt; 🖌 Inpaint for small things (pin, expression).")
+                                                    info=T("How much the input picture changes: 0.05–0.2 touch-up, 0.3 subtle, 0.5 restyle, 0.8+ mostly new. Batch Size N = N variations. To recolour an outfit, keep the seed and edit the prompt; for small things (a hair pin, the expression) use 🖌 Inpaint.", "输入图改动多少：0.05–0.2 小修，0.3 轻微，0.5 换风格，0.8 以上基本是新图。批量数 N = N 个变体。想换衣服颜色：保持种子、改提示词；小地方（发夹、表情）用 🖌 局部重绘。"))
                             use_i2i_cb  = gr.Checkbox(label="Use img2img mode", value=False,
-                                                      info="Start from the image above instead of pure noise.")
+                                                      info=T("Start from the picture above instead of from noise.", "从上面的图片开始画，而不是从噪点开始。"))
                             restore_cb  = gr.Checkbox(
                                 label="Restore settings from dropped images", value=True,
-                                info="An image made by this app (or A1111 / Forge / Civitai) brings back its "
-                                     "checkpoint, VAE, LoRAs + weights, prompts, sampler, steps, CFG, size and seed.")
+                                info=T("A picture made by this app (or A1111 / Forge / Civitai) brings back its model, LoRAs, prompts, sampler, steps, CFG, size and seed.", "这个 app（或 A1111 / Forge / Civitai）画的图，拖进来就能恢复它的模型、LoRA、提示词、采样器、步数、CFG、尺寸和种子。"))
                             i2i_restore_html = gr.HTML("")
                             recreate_btn = gr.Button("🔁 Recreate it exactly (img2img off → Generate)",
                                                      variant="primary", size="sm", visible=False)
@@ -1801,7 +1835,7 @@ def _build_generate_tab():
                                 tag_i2i_btn = gr.Button("🏷 Interrogate — write this image's tags into the prompt "
                                                         "(WD14)", size="sm", variant="secondary", scale=3)
                                 tag_thr_sl = gr.Slider(0.2, 0.8, value=0.35, step=0.05, label="Tag threshold",
-                                                       scale=1, info="lower = more tags")
+                                                       scale=1, info=T("Lower = more tags.", "越低标签越多。"))
                             tag_i2i_html = gr.HTML("")
                         with gr.Accordion("🖌 Inpaint — paint what to change", open=False):
                             inp_editor = gr.ImageEditor(
@@ -1812,10 +1846,9 @@ def _build_generate_tab():
                                 eraser=gr.Eraser(default_size=40))
                             with gr.Row():
                                 inp_denoise_sl = gr.Slider(0.1, 1.0, value=0.75, step=0.05, label="Inpaint denoise",
-                                                           info="0.5 = adjust (expression) · 0.8 = redraw · 1.0 = ignore what's there · "
-                                                                "to swap an accessory use 🦋 Swap below (0.9–0.95 leaves the old shape as lace)")
+                                                           info=T("0.5 = adjust (an expression), 0.8 = redraw, 1.0 = ignore what's there. To change an accessory use 🦋 Swap below.", "0.5 = 微调（比如表情），0.8 = 重画，1.0 = 完全不管原来的样子。换配饰请用下面的 🦋 更换。"))
                                 inp_pad_sl = gr.Slider(0, 256, value=48, step=8, label="Context padding (px)",
-                                                       info="Surroundings the model sees around the painted area.")
+                                                       info=T("How much of the surroundings the model sees around the painted area.", "模型能看到涂抹区域周围多大的范围。"))
                             gr.HTML('<p style="color:#a6adc8;font-size:13px;margin:2px 0;">Uses the prompt, '
                                     'model, LoRAs, sampler, steps, CFG and seed above. Only the painted area '
                                     'changes; it is redrawn at the model\'s native resolution, so small areas '
@@ -1823,15 +1856,12 @@ def _build_generate_tab():
                             inp_btn = gr.Button("🖌 Inpaint", variant="primary", size="sm")
                             with gr.Row():
                                 inp_swap_txt = gr.Textbox(value="", label="🦋 Swap an accessory — what should be there instead?", scale=3,
-                                                          placeholder="black butterfly hair ornament",
-                                                          info="Paint over the whole old accessory (a hat: its crown above the head too), type the new one: "
-                                                               "hair ornament, earrings, choker, hat · one pass at 1.0 · not there? another seed")
+                                                          placeholder=T("black butterfly hair ornament", "black butterfly hair ornament（用英文）"),
+                                                          info=T("Paint over the whole old accessory (for a hat, also its top above the head), then type the new one: hair ornament, earrings, choker, hat. Not there? Try another seed.", "把旧配饰整个涂掉（帽子要连头顶上面的部分一起涂），再写新的：发饰、耳环、颈圈、帽子。没画出来？换个种子再试。"))
                                 inp_swap_btn = gr.Button("🦋 Swap", size="sm", scale=1)
                             with gr.Row():
                                 inp_hand_tries = gr.Slider(1, 8, value=4, step=1, label="🖐 Re-draw a hand — tries", scale=3,
-                                                           info="Paint over the broken hand (nothing painted: the biggest detected hand) · each try has its own seed, "
-                                                                "pick the best · about every other try is a correct hand, 4 tries give one in 10 of 11 · "
-                                                                "a third come back changed (another glove or prop)")
+                                                           info=T("Paint over the broken hand (nothing painted = the biggest hand found). Each try has its own seed: pick the best. About every other try is a correct hand.", "把画坏的手涂掉（不涂 = 自动选最大的那只手）。每次尝试用不同的种子，挑最好的那张。大约一半的尝试能得到正确的手。"))
                                 inp_hand_btn = gr.Button("🖐 Re-draw hand", size="sm", scale=1)
 
 
@@ -1858,7 +1888,7 @@ def _build_generate_tab():
                                     for _chunk in range(0, len(_i2i_tags), 6):
                                         with gr.Row():
                                             for _tag in _i2i_tags[_chunk:_chunk + 6]:
-                                                _btn = gr.Button(_tag, size="sm")
+                                                _btn = gr.Button(_tag, size="sm", elem_classes=["ig-notr"])   # a tag chip shows (and inserts) its tag in every language
                                                 _i2i_btn_list.append((_btn, _tag))
 
                                 gr.HTML('<hr style="margin:6px 0;opacity:0.3;">')
@@ -1882,11 +1912,11 @@ def _build_generate_tab():
                             with gr.Row():
                                 loop_max_batches = gr.Number(
                                     label="Max Batches", value=0, precision=0,
-                                    info="0 = infinite (run until stopped). Otherwise stops after N batches.",
+                                    info=T("0 = keep going until you stop it. Otherwise stops after N batches.", "0 = 一直画到你停止。否则画完 N 批就停。"),
                                 )
                                 loop_delay = gr.Slider(
                                     0, 60, value=5, step=1, label="Delay (seconds)",
-                                    info="Pause between batches. Gives GPU a breather and lets you check results.",
+                                    info=T("A pause between batches: lets the GPU cool and gives you time to look.", "每批之间停一会儿：让显卡降温，也让你有时间看结果。"),
                                 )
                             with gr.Row():
                                 loop_start_btn = gr.Button("▶ Start Loop", variant="primary", size="sm")
@@ -1899,8 +1929,10 @@ def _build_generate_tab():
                                     'every combination of the values below (current settings for everything '
                                     'else). Numbers: <code>5, 7, 9</code> or ranges <code>4-10:2</code>. '
                                     '<b>Prompt S/R</b>: the first value is a word in your prompt, the others '
-                                    'replace it (<code>red hair, blue hair, green hair</code>). Each cell is '
-                                    'saved like a normal image; the grid is saved too.</p>')
+                                    'replace it, e.g. <code>red hair, blue hair, green hair</code>; <b>Negative S/R</b> '
+                                    'does the same in the negative prompt. A value in quotes keeps its commas, e.g. '
+                                    '<code>"pink eyes, magenta eyes"</code>. An empty value <code>""</code> removes the words. '
+                                    'Each cell is saved like a normal image; the grid is saved too.</p>')
                             with gr.Row():
                                 xy_x_axis = gr.Dropdown(_XY_AXES, value="CFG", label="X axis")
                                 xy_x_vals = gr.Textbox(value="5, 7, 9", label="X values")
@@ -1985,7 +2017,7 @@ def _build_generate_tab():
                             with gr.Row():
                                 user_preset_name = gr.Textbox(
                                     label="Preset name",
-                                    placeholder="e.g. cafe scene, white dress",
+                                    placeholder=T("cafe scene, white dress", "cafe scene, white dress"),
                                     scale=3,
                                 )
                                 user_save_btn = gr.Button("💾 Save Prompt", size="sm", scale=1)
@@ -2012,7 +2044,7 @@ def _build_generate_tab():
                             with gr.Row():
                                 settings_name_txt = gr.Textbox(
                                     label="Settings name",
-                                    placeholder="e.g. cafe scene, or portraits/cafe scene (a folder groups them)",
+                                    placeholder=T("cafe scene, or portraits/cafe scene (the folder groups them)", "cafe scene，或 portraits/cafe scene（斜杠前是分组文件夹）"),
                                     scale=3,
                                 )
                                 settings_save_btn = gr.Button("💾 Save Settings", size="sm", scale=1)
@@ -2040,7 +2072,7 @@ def _build_generate_tab():
                                 for _chunk_start in range(0, len(_tags), 8):
                                     with gr.Row():
                                         for _tag in _tags[_chunk_start:_chunk_start + 8]:
-                                            _btn = gr.Button(_tag, size="sm")
+                                            _btn = gr.Button(_tag, size="sm", elem_classes=["ig-notr"])   # a tag chip shows (and inserts) its tag in every language
                                             _tag_btn_list.append((_btn, _tag))
 
                         # ── SmartSplit status banner (shown when active) ─────────────
@@ -2321,7 +2353,7 @@ def _build_generate_tab():
         ex = _clean_extra(extra)
         # ✨ Polish = Auto: the recipe comes from this picture's own prompt. A dynamic prompt is split below into one call per picture (each with its resolved prompt, extra["polish"] still Auto), so it is applied there.
         polish_name = None
-        if ex["polish"] == "Auto":
+        if _polish.is_auto(ex["polish"]):
             from backend import wildcards as _wc_p
             if template is not None or not (_wc_p.is_dynamic(prompt) or _wc_p.is_dynamic(neg_prompt)):
                 ex, polish_name = _apply_polish_auto(ex, prompt)
@@ -2392,11 +2424,13 @@ def _build_generate_tab():
         tags_note = ((f'<br><span style="color:#9399b2;">Auto-added quality tags: <code>{added_tags}</code>'
                       + (f' · negative: <code>{added_neg}</code>' if added_neg else "") + '</span>')
                      if (added_tags or added_neg) else "") + fixes_note
-        # ── 🧹 Negative hygiene: drop the negative tags the prompt asks for, keep repeats once (Settings) ─
+        # ── 🧹 Negative hygiene: each repeated prompt tag once, drop the negative tags the prompt asks for, keep their repeats once
+        #    (Settings). The prompt box keeps what was typed; the record holds what ran.
         from backend import neg_hygiene as _nh
         if _nh.CONFIG["on"]:
+            prompt, _nh_prompt_merged = _nh.dedupe_prompt(prompt)
             neg_prompt, _nh_dropped, _nh_merged = _nh.prune_negative(prompt, neg_prompt, _nh.load_aliases(SETTINGS_DIR))
-            tags_note += _nh.note_html(_nh_dropped, _nh_merged)
+            tags_note += _nh.note_html(_nh_dropped, _nh_merged, _nh_prompt_merged)
 
         try:
             # ── SmartSplit path ────────────────────────────────────────────────
@@ -2576,7 +2610,7 @@ def _build_generate_tab():
                 **({"hand_detail": {"denoise": ex["hd_denoise"]}} if hd_note else {}),
                 **({"max_detail": {"scale": 2, "method": "Real-ESRGAN (ONNX)"}} if md_note else {}),
                 **({"colour": {"strength": ex["cs"], "method": _colour.METHOD}} if cs_note else {}),
-                **({"polish": {"recipe": polish_name, "auto": True}} if polish_name else {}),          # round 50: the recipe that actually ran (Auto only)
+                **({"polish": {"recipe": polish_name, "auto": True, **({"best": True} if ex["polish"] == _polish.AUTO_BEST else {})}} if polish_name else {}),          # round 50: the recipe that actually ran (Auto only)
                 **({pc_key: pc_rec} if pc_ctl else {}),
                 **({"eye_detail": {"denoise": ex["ed_denoise"], **({"style": "natural"} if _eye_style_now() == "natural" else {})}} if ed_note else {}),
                 **({"strength": strength, "source_image": Path(src).name if src else None} if i2i else {}),
@@ -3412,6 +3446,8 @@ def _build_generate_tab():
         for axis, vals in ((x_axis, xs), (y_axis, ys)):
             if axis == "Prompt S/R" and vals[0] not in (prompt or ""):
                 return err_html(f"Prompt S/R: “{html.escape(vals[0])}” isn't in the prompt.")
+            if axis == "Negative S/R" and vals[0] not in (neg_prompt or ""):
+                return err_html(f"Negative S/R: “{html.escape(vals[0])}” isn't in the negative prompt.")
             if axis == "LoRA 1 weight" and (not lora1 or lora1 == "none"):
                 return err_html("LoRA 1 weight: pick a LoRA in slot 1 first.")
             if axis == "Pose strength" and pc_type == _pose.TYPE_COMP and not _comp.has_current():
@@ -3438,7 +3474,7 @@ def _build_generate_tab():
                 for xi, xv in enumerate(xs):
                     if _generation_abort.is_set():
                         raise _GenerationAborted()
-                    p = dict(prompt=prompt or "", scheduler=scheduler, steps=steps, cfg=cfg, seed=seed,
+                    p = dict(prompt=prompt or "", neg=neg_prompt or "", scheduler=scheduler, steps=steps, cfg=cfg, seed=seed,
                              extra=dict(base_extra), lw=w1, model=model_path)
                     for axis, v, vals in ((x_axis, xv, xs), (y_axis, yv, ys)):
                         if axis == "CFG": p["cfg"] = v
@@ -3456,7 +3492,8 @@ def _build_generate_tab():
                         elif axis == "Colour strength": p["extra"]["cs"] = v
                         elif axis == "Pose strength": p["extra"].update(pc_on=True, pc_strength=v)
                         elif axis == "Pose": p["extra"].update(pc_on=False) if v == "none" else p["extra"].update(pc_on=True, pc_pose=v)
-                        elif axis == "Prompt S/R": p["prompt"] = p["prompt"].replace(vals[0], v)
+                        elif axis == "Prompt S/R": p["prompt"] = _sr_replace(p["prompt"], vals[0], v)
+                        elif axis == "Negative S/R": p["neg"] = _sr_replace(p["neg"], vals[0], v)
                         elif axis == "Checkpoint": p["model"] = v
                     if p["model"] != model_now:           # Checkpoint axis: switch models
                         progress((len(cells)) / total, desc=f"Loading {Path(str(p['model'])).stem}…")
@@ -3471,7 +3508,7 @@ def _build_generate_tab():
                         lora_w_now = p["lw"]
                     n = len(cells) + 1
                     progress((n - 1) / total, desc=f"Grid {n}/{total}")
-                    imgs, info, _ = do_generate(p["prompt"], neg_prompt, p["scheduler"], p["steps"], p["cfg"],
+                    imgs, info, _ = do_generate(p["prompt"], p["neg"], p["scheduler"], p["steps"], p["cfg"],
                                                 width, height, 1, p["seed"], init_img, strength, use_i2i,
                                                 auto_quality=auto_quality, extra=p["extra"])
                     if not imgs:
@@ -3486,9 +3523,11 @@ def _build_generate_tab():
             if lora_w_now is not None and lora_w_now != w1:
                 _sync_loras([(lora1, w1), (lora2, w2), (lora3, w3)])
         fmt = lambda a, v: "" if a in (None, "none") else Path(str(v)).stem[:24] if a == "Checkpoint" else str(v).replace("★ ", "") if a == "Pose" else \
-            f"{a} {v:g}" if isinstance(v, float) else f"{v}" if a in ("Sampler", "Prompt S/R", "Pose") else f"{a} {v}"
-        xl = [fmt(x_axis, v) for v in xs]
-        yl = [fmt(y_axis, v) for v in ys]
+            f"{a} {v:g}" if isinstance(v, float) else f"{v}" if a in ("Sampler", "Prompt S/R", "Pose") else \
+            f"neg: {v}" if a == "Negative S/R" else f"{a} {v}"
+        sr_lab = lambda a, v, vals: (("neg: " if a == "Negative S/R" else "") + f"without {vals[0]}"[:40]) if a in _XY_SR and v == "" else fmt(a, v)
+        xl = [sr_lab(x_axis, v, xs) for v in xs]
+        yl = [sr_lab(y_axis, v, ys) for v in ys]
         cols = len(xs)
         n_real = len(cells)
         while len(cells) % cols:                  # stopped mid-row: pad with blanks (for the grid picture only)
@@ -3601,14 +3640,14 @@ def _build_generate_tab():
     def on_polish(choice, prompt, pose_on=False):
         from backend import polish as _pl
         from backend import wildcards as _wc_n
-        if choice == "Auto" and _wc_n.is_dynamic(prompt or ""):
+        if _pl.is_auto(choice) and _wc_n.is_dynamic(prompt or ""):
             # round 50: a dynamic prompt has no framing yet — every picture gets the recipe of its own resolved prompt when it is made; the controls stay as they are
             return [gr.update()] * len(_polish_outs) + ['<p style="color:#a6e3a1;font-size:13px;">✨ Auto: each picture gets the recipe for its own prompt (framing tags, a gesture pose, 🧍 pose control) when it is made — the recipe that ran is named under the picture and in its record.</p>']
-        name = _pl.shot_type(prompt, pose=pose_on) if choice == "Auto" else choice
+        name = _pl.auto_pick(choice, prompt, pose=pose_on) if _pl.is_auto(choice) else choice
         r = _pl.recipe(name)
         if not r:
             return [gr.update()] * len(_polish_outs) + [""]
-        again = " Auto picks again for every picture when it is made." if choice == "Auto" else ""
+        again = " Auto picks again for every picture when it is made." if _pl.is_auto(choice) else ""
         return ([gr.update(value=r[k]) if k in r else gr.update() for k in _polish_keys]
                 + [f'<p style="color:#a6e3a1;font-size:13px;">✨ {html.escape(name)}: {html.escape(_pl.summary(name))} '
                    f'— about {_pl.time_factor(name):g}× the time of the plain picture.{again}</p>'])
@@ -3617,9 +3656,9 @@ def _build_generate_tab():
     # round 36: with 🧍 pose control on, Auto also takes the '— hands' recipe (cowboy / full body). on_polish's inputs are API (unchanged), so this is a second, API-less listener that sees the checkbox:
     # it runs right after on_polish (a Polish choice) and when the user ticks or clears the checkbox (not a programmatic change: Send to Generate must not be overwritten) while the dropdown says Auto; every other choice is left as it is
     def on_polish_pose(choice, prompt, pose_on, ptype=None):
-        if choice != "Auto":
+        if not _polish.is_auto(choice):
             return [gr.update()] * (len(_polish_outs) + 1)
-        return on_polish("Auto", prompt, bool(pose_on) and _pose.clean_type(ptype) == _pose.TYPE_POSE)       # round 37: only the skeleton mode (Composition was not measured with the hand pass)
+        return on_polish(choice, prompt, bool(pose_on) and _pose.clean_type(ptype) == _pose.TYPE_POSE)       # round 37: only the skeleton mode (Composition was not measured with the hand pass)
     _polish_evt.then(on_polish_pose, [polish_dd, prompt_txt, pc_cb, pc_type_rd], _polish_outs + [polish_note], api_name=False)
     pc_cb.input(on_polish_pose, [polish_dd, prompt_txt, pc_cb, pc_type_rd], _polish_outs + [polish_note], api_name=False)
     pc_type_rd.input(on_polish_pose, [polish_dd, prompt_txt, pc_cb, pc_type_rd], _polish_outs + [polish_note], api_name=False)
@@ -3643,7 +3682,7 @@ def _build_generate_tab():
         if r is None:
             return keep + [f'<p style="color:#f9e2af;font-size:13px;">⚡ No measured recipe for {html.escape(_rc.family_label(family))} yet; current settings kept.</p>']
         from backend import prompt_syntax as _ps
-        weights = ("" if _ps.EMPHASIS.get("mode", "a1111") == "a1111" else
+        weights = ("" if _ps.EMPHASIS.get("mode") != "compel" else
                    ' <span style="color:#f9e2af;">⚠ Settings → Prompt weights is “Compel”; the recipe was measured with A1111 weights.</span>')
         return ([gr.update(value=r["scheduler"]), gr.update(value=r["steps"]), gr.update(value=r["cfg"]), gr.update(value=r["pag"])]
                 + [f'<p style="color:#a6e3a1;font-size:13px;">⚡ {html.escape(_rc.family_label(family))}: {html.escape(_rc.summary(r))} — {html.escape(r["basis"])}. '
@@ -4363,7 +4402,9 @@ def _build_generate_tab():
         "gal_send_up_btn": gal_send_up_btn,
         "gal_status": gal_status,
     }
-    _GEN_HELPERS.update(ensure_model=_ensure_model, sync_loras=_sync_loras)
+    # 🪄 一键出图 (backend/ui_simple.py) runs the same Generate (the raw function: its own event holds the GPU lock) and fills these controls on "Open in Generate"
+    _GEN_HELPERS.update(ensure_model=_ensure_model, sync_loras=_sync_loras, generate_ui=do_generate_ui, stop=do_stop, gen_inputs=list(_gen_inputs),
+                        gen_outputs=[output_gallery, gen_info, last_generated_images, model_status, last_seed_state, active_loras_html])
     return model_dd, lora_dd, vae_dd, gen_controls
 
 
@@ -4413,15 +4454,14 @@ def _build_bridge_tab():
                     value=_bsv("sd15_model", _br_sd15[0][1] if _br_sd15 else "",
                                [c[1] for c in _br_sd15]),
                     label="SD 1.5 Model",
-                    info="Loaded automatically if it isn't already. LoRAs you applied to this "
-                         "same model in the Generate tab are kept.",
+                    info=T("Loads by itself. LoRAs you applied to this model on the Generate tab stay on.", "会自动加载。在生成页给这个模型加的 LoRA 会保留。"),
                 )
                 br_prompt = gr.Textbox(
                     label="Prompt",
                     lines=3,
                     value=_bsv("prompt", ""),
-                    placeholder="Character trigger, description, quality tags…",
-                    info="Used for both stages. SDXL prompt can be overridden below.",
+                    placeholder=T("Character trigger word, description, quality tags…", "角色触发词、描述、质量标签……"),
+                    info=T("Used for both stages. You can give SDXL its own prompt below.", "两个阶段都用这个提示词。也可以在下面单独给 SDXL 写一份。"),
                 )
                 br_neg = gr.Textbox(
                     label="Negative Prompt",
@@ -4447,15 +4487,14 @@ def _build_bridge_tab():
                     choices=_br_xl,
                     value=_bsv("sdxl_model", _br_xl[0][1] if _br_xl else "", [c[1] for c in _br_xl]),
                     label="SDXL / Pony / Illustrious Model",
-                    info="Loaded automatically if it isn't already. On 12 GB cards the SD 1.5 "
-                         "model is freed for this stage and reloads (with its LoRAs) next run.",
+                    info=T("Loads by itself. On a 12 GB card the SD 1.5 model is unloaded for this stage and comes back (with its LoRAs) next run.", "会自动加载。12 GB 显卡上这一步会先卸下 SD 1.5 模型，下次运行再带着 LoRA 装回来。"),
                 )
                 br_sdxl_prompt = gr.Textbox(
                     label="SDXL Prompt Override (optional)",
                     lines=2,
                     value=_bsv("sdxl_prompt", ""),
-                    placeholder="Leave empty to reuse Stage 1 prompt",
-                    info="If set, this replaces the prompt for SDXL. Otherwise Stage 1 prompt is used.",
+                    placeholder=T("Empty = use the Stage 1 prompt", "留空 = 用第 1 阶段的提示词"),
+                    info=T("If filled in, SDXL uses this instead of the Stage 1 prompt.", "填了的话，SDXL 用这里的提示词代替第 1 阶段的。"),
                 )
                 with gr.Row():
                     br_sdxl_steps = gr.Slider(10, 60, value=_bsv("sdxl_steps", 30), step=1, label="SDXL Steps")
@@ -4466,9 +4505,7 @@ def _build_bridge_tab():
                 br_denoise = gr.Slider(
                     0.1, 0.8, value=_bsv("denoise", 0.35), step=0.05,
                     label="SDXL Denoise Strength",
-                    info="How much SDXL changes the SD 1.5 base. "
-                         "0.30 = subtle refinement (best for character likeness). "
-                         "0.50 = moderate redraw. 0.70+ = heavy reinterpretation.",
+                    info=T("How much SDXL redraws the SD 1.5 picture: 0.3 = light touch (keeps the character best), 0.5 = clear redraw, 0.7+ = mostly new.", "SDXL 重画 SD 1.5 底图的程度：0.3 = 轻微（最能保住角色），0.5 = 明显重画，0.7 以上 = 基本是新图。"),
                 )
                 br_sdxl_sched = gr.Dropdown(
                     choices=list(SCHEDULER_MAP.keys()),
@@ -4596,7 +4633,7 @@ def _build_bridge_tab():
             try:
                 import torch as _t
                 small_card = (_t.cuda.is_available() and
-                              _t.cuda.get_device_properties(0).total_memory < 14 * 2**30)
+                              _t.cuda.get_device_properties(_t.cuda.current_device()).total_memory < 14 * 2**30)
             except Exception:
                 small_card = False
             # With the SDXL model resident, SD 1.5's untiled VAE decode peaks at ~11.9 of
@@ -4643,7 +4680,7 @@ def _build_bridge_tab():
                 model_path = model_path[1] if len(model_path) > 1 else model_path[0]
             xl_must_load = _sdxl.pipe is None or (model_path and _sdxl.current_model != model_path)
             from backend.model_manager import commit_problem
-            commit_short = _commit_short(BRIDGE_COMMIT_SDXL_GB) or bool(xl_must_load and model_path and commit_problem(model_path))
+            commit_short = _commit_short(BRIDGE_COMMIT_SDXL_GB) or bool(xl_must_load and model_path and commit_problem(model_path, check_only=True))
 
             # SD 1.5 + SDXL + SDXL's working memory don't fit in 12 GB: Windows would
             # spill to system RAM (stage 2 went from ~6 s to ~60 s). Free SD 1.5 on
@@ -4786,13 +4823,12 @@ def _build_upscale_tab():
             with gr.Column():
                 up_input   = gr.Image(label="Input Image", type="pil")
                 up_scale   = gr.Radio([2, 4, 8], value=4, label="Scale Factor",
-                                      info="Multiplier for output resolution. 4× on a 512px image → 2048px.")
+                                      info=T("How many times bigger. 4× on a 512 px picture gives 2048 px.", "放大几倍。512 像素的图放大 4 倍得到 2048 像素。"))
                 up_method  = gr.Dropdown(
                     choices=upscaler.available_methods(),
                     value=upscaler.available_methods()[-1],
                     label="Upscale Method",
-                    info="Lanczos = fast CPU-only. Real-ESRGAN = AI upscaler, "
-                         "sharper details. ONNX variant uses DirectML GPU.",
+                    info=T("Lanczos = fast, on the CPU. Real-ESRGAN = AI upscaler with sharper lines.", "Lanczos = 快，用 CPU。Real-ESRGAN = AI 放大，线条更清晰。"),
                 )
                 _up_total_mb = get_total_vram_mb()
                 _up_vram_bar = gr.HTML(
@@ -4805,20 +4841,16 @@ def _build_upscale_tab():
                 with gr.Row():
                     up_sd_cb = gr.Checkbox(
                         value=False, label="✨ SD detail pass (tiled, loaded model)", scale=2,
-                        info="After upscaling, re-draws the image in native-size tiles at low denoise with the model "
-                             "loaded on the Generate tab — real detail instead of smooth upscaling. Uses the image's "
-                             "own prompt when it has one. ~10–30 s per tile.")
+                        info=T("After upscaling, redraws the picture tile by tile at low strength with the Generate tab's model: real detail instead of smooth enlarging. Uses the picture's own prompt when it has one. ~10–30 s a tile.", "放大之后，用生成页的模型分块轻微重画：画出真正的细节，而不只是平滑放大。图片里有提示词就用它自己的。每块约 10–30 秒。"))
                     up_sd_den = gr.Slider(0.15, 0.5, value=0.3, step=0.05, label="Detail denoise", scale=1,
-                                          info="0.25 subtle · 0.35 more detail · higher can put faces into tiles")
+                                          info=T("0.25 = subtle, 0.35 = more detail; higher can draw faces into the tiles.", "0.25 = 轻微，0.35 = 细节更多；再高可能在分块里画出多余的脸。"))
                 upscale_btn = gr.Button("🔍 Upscale", variant="primary")
                 sharpen_btn = gr.Button("🔬 Sharpen eyes — Real-ESRGAN 2× + eye pass (uses the picture's own settings)", variant="secondary")
                 up_info     = gr.HTML("")
                 with gr.Accordion("📁 Batch — upscale a whole folder", open=False):
                     up_folder = gr.Textbox(label="Folder with images",
-                                           placeholder=r"e.g. D:\pictures\to_upscale  (PNG / JPG / WebP)",
-                                           info="Uses the scale and method above. Results go to "
-                                                "outputs/upscaled_<folder>/ with the originals' settings kept. "
-                                                "🔬 Sharpen eyes writes to outputs/sharpened_<folder>/ (2× pictures, skips what has no face).")
+                                           placeholder=T("D:\\pictures\\to_upscale  (PNG / JPG / WebP)", "D:\\pictures\\to_upscale（PNG / JPG / WebP）"),
+                                           info=T("Uses the size and method above. Results go to outputs/upscaled_<folder>/ with the originals' settings kept. 🔬 Sharpen eyes writes to outputs/sharpened_<folder>/ (2× pictures; pictures without a face are skipped).", "用上面的倍数和方法。结果存到 outputs/upscaled_<文件夹名>/，保留原图的参数。🔬 锐化眼睛存到 outputs/sharpened_<文件夹名>/（2 倍大小；没有脸的图跳过）。"))
                     up_batch_btn = gr.Button("📁 Upscale folder", variant="secondary")
                     with gr.Row():
                         sharpen_folder_btn = gr.Button("🔬 Sharpen eyes for every picture in this folder", variant="secondary", scale=3)
@@ -5111,15 +5143,15 @@ def _build_watermark_tab():
     )
 
     _ocr_note = (
-        "✅ EasyOCR installed — text detection enabled."
+        L("✅ EasyOCR installed — text detection enabled.", "✅ EasyOCR 已安装——可以检测文字。")
         if is_ocr_available() else
-        "⚠ EasyOCR not installed. Install with:  <code>pip install easyocr</code>  "
-        "Corner-watermark heuristic is still available."
+        L("⚠ EasyOCR not installed. Install with:  <code>pip install easyocr</code>  Corner-watermark heuristic is still available.",
+          "⚠ 没有安装 EasyOCR。安装命令：<code>pip install easyocr</code>　角落水印的检测仍然可用。")
     )
     _lama_note = (
-        "✅ LaMa ONNX available (auto-downloads ~100 MB on first use)."
+        L("✅ LaMa ONNX available (auto-downloads ~100 MB on first use).", "✅ LaMa ONNX 可用（第一次用时自动下载约 100 MB）。")
         if is_lama_available() else
-        "⚠ onnxruntime not found — LaMa unavailable."
+        L("⚠ onnxruntime not found — LaMa unavailable.", "⚠ 找不到 onnxruntime——LaMa 用不了。")
     )
 
     with gr.Tab("🗑️ Watermark Remover"):
@@ -5160,32 +5192,26 @@ def _build_watermark_tab():
                     wm_manual_only = gr.Checkbox(
                         value=False,
                         label="✏️ Manual mask only (no auto-detect)",
-                        info="Disable OCR + corner scanning. Only your brush strokes "
-                             "are used as the removal mask. Great for manga, emoji, "
-                             "or images where you want to keep some text.",
+                        info=T("Only your brush strokes are removed: no text search, no corner scan. Good for manga or pictures where some text should stay.", "只去掉你用画笔涂的地方：不找文字、不扫角落。适合漫画，或者想保留部分文字的图。"),
                     )
                     wm_conf   = gr.Slider(0.1, 0.9, value=0.3, step=0.05,
                                           label="OCR Confidence Threshold",
-                                          info="Minimum confidence for OCR to report a text region. "
-                                               "Lower = catches more but may include false positives.")
+                                          info=T("How sure the text finder must be. Lower finds more, but also things that aren't text.", "文字检测要多确定才算数。越低找到的越多，但也可能把不是文字的东西算进去。"))
                     wm_corner = gr.Slider(0.05, 0.30, value=0.12, step=0.01,
                                           label="Corner Scan Area (% of image edge)",
-                                          info="How far from each corner to scan for watermarks. "
-                                               "12% means the outer 12% of each edge is checked.")
+                                          info=T("How far in from each corner to look for logos. 12 % = the outer 12 % of each edge.", "从每个角往里找 logo 的范围。12 % = 每条边最外面的 12 %。"))
                     wm_langs  = gr.Dropdown(
                         # EasyOCR combines English with ONE of these scripts only — "en+ch_sim+ja+ko"
                         # always raised (audit F-22)
                         choices=["en", "en+ch_sim", "en+ja", "en+ko"],
                         value="en",
                         label="OCR Languages",
-                        info="Add languages if watermark text is non-English",
+                        info=T("Add a language if the watermark text isn't English.", "水印文字不是英文时，加上对应的语言。"),
                     )
                     wm_use_ocr    = gr.Checkbox(value=True,  label="Use OCR text detection",
-                                                info="Detect text/logo regions via EasyOCR "
-                                                     "(GPU under ZLUDA, ~1 s after the first run).")
+                                                info=T("Finds text and logos with EasyOCR (on the GPU; ~1 s after the first run).", "用 EasyOCR 找文字和 logo（用 GPU；第一次之后约 1 秒）。"))
                     wm_use_corner = gr.Checkbox(value=True,  label="Use corner heuristic",
-                                                info="Scan image corners for edge-density anomalies "
-                                                     "(logos, copyright marks). Very fast.")
+                                                info=T("Looks for logos and copyright marks in the corners. Very fast.", "在角落里找 logo 和版权标记。非常快。"))
 
                     # Hide OCR-related controls when manual-only is checked
                     def _toggle_detect_controls(manual):
@@ -5208,9 +5234,7 @@ def _build_watermark_tab():
 
                 wm_dilation = gr.Slider(0, 60, value=20, step=1,
                                         label="Mask Dilation (px) — expands each region",
-                                        info="Pixels to expand each detected region outward. "
-                                             "Ensures the full watermark + halo is covered. "
-                                             "20px is a good default; increase for large logos.")
+                                        info=T("How far each found area is widened, so the whole watermark and its halo are covered. 20 is a good start; more for big logos.", "把每块找到的区域向外扩多少像素，确保整个水印和它的光晕都盖住。一般 20；大 logo 调大一点。"))
                 wm_method = gr.Dropdown(
                     choices=[
                         "OpenCV TELEA (fast)",
@@ -5221,16 +5245,13 @@ def _build_watermark_tab():
                     value="LaMa ONNX (high quality)" if is_lama_available()
                           else "OpenCV TELEA (fast)",
                     label="Removal Method",
-                    info="LaMa: best for most watermarks (~7 s). OpenCV: instant, thin text only — "
-                         "smears large areas. SD: repaints with the model loaded in Generate (~10 s), "
-                         "can hallucinate objects.",
+                    info=T("LaMa: best for most watermarks (~7 s). OpenCV: instant, only for thin text, smears big areas. SD: repaints with the Generate tab's model (~10 s), may invent objects.", "LaMa：大多数水印效果最好（约 7 秒）。OpenCV：瞬间完成，只适合细文字，大块会糊。SD：用生成页的模型重画（约 10 秒），可能画出多余的东西。"),
                 )
                 wm_sd_prompt = gr.Textbox(
                     label="SD Inpainting Prompt (SD method only)",
                     value=SD_INPAINT_PROMPT,
                     visible=False,
-                    info="Describes what should replace the watermark. Only used "
-                         "with the SD Inpainting method.",
+                    info=T("What should be there instead of the watermark (SD method only).", "水印去掉后那里应该画什么（只有 SD 方法用）。"),
                 )
                 wm_method.change(
                     lambda m: gr.update(visible="SD" in m),
@@ -5251,10 +5272,8 @@ def _build_watermark_tab():
                 with gr.Accordion("📁 Batch — clean a whole folder (auto-detect)", open=False):
                     wm_folder = gr.Textbox(
                         label="Folder with images",
-                        placeholder=r"e.g. D:\datasets\my_character\raw",
-                        info="Every PNG / JPG / WebP: auto-detect with the settings above, then remove with the "
-                             "method above (LaMa recommended). Images where nothing is found are copied "
-                             "unchanged. Results go to outputs/cleaned_<folder>/ — handy for LoRA training sets.")
+                        placeholder=T("D:\\datasets\\my_character\\raw", "D:\\datasets\\my_character\\raw"),
+                        info=T("Every PNG / JPG / WebP: found with the settings above, removed with the method above (LaMa recommended). Pictures with nothing found are copied as they are. Results go to outputs/cleaned_<folder>/, handy for LoRA training sets.", "处理每张 PNG / JPG / WebP：用上面的设置查找，用上面的方法去除（推荐 LaMa）。什么都没找到的图原样复制。结果存到 outputs/cleaned_<文件夹名>/，整理 LoRA 训练集很方便。"))
                     wm_batch_btn = gr.Button("📁 Clean folder", variant="secondary")
                     wm_batch_info = gr.HTML("")
 
@@ -5508,28 +5527,28 @@ def _build_civitai_tab(model_dd, lora_dd, vae_dd, more_lora_dds=()):
         )
 
         with gr.Row():
-            search_box  = gr.Textbox(label="Name search", placeholder="searches model name/description…", scale=3)
-            tag_box     = gr.Textbox(label="Tag", placeholder="e.g. soft lighting, smile, cherry blossoms…", scale=2,
-                                     info="Searches Civitai tags — how popular models are actually indexed.")
+            search_box  = gr.Textbox(label="Name search", placeholder=T("Words from the model's name or description", "模型名称或描述里的词"), scale=3)
+            tag_box     = gr.Textbox(label="Tag", placeholder=T("soft lighting, smile, cherry blossoms", "soft lighting, smile, cherry blossoms（标签要用英文）"), scale=2,
+                                     info=T("Searches Civitai's tags, which is how most models are filed.", "按 Civitai 的标签搜索，大多数模型是按标签归类的。"))
             type_dd     = gr.Dropdown(
                 ["Checkpoint", "LoRA", "LoCon / LyCORIS", "DoRA", "TextualInversion", "VAE", "Upscaler", "All"],
                 value="LoRA", label="Type", scale=1,
-                info="LoRA = standard LoRAs. LoCon/LyCORIS = most SDXL/Illustrious style LoRAs.",
+                info=T("LoRA = ordinary LoRAs. LoCon / LyCORIS = most SDXL and Illustrious style LoRAs.", "LoRA = 普通 LoRA。LoCon / LyCORIS = 大多数 SDXL、Illustrious 风格 LoRA。"),
             )
             sort_dd     = gr.Dropdown(
                 ["Most Downloaded", "Highest Rated", "Newest"],
                 value="Most Downloaded", label="Sort", scale=1,
-                info="How to sort search results from Civitai.",
+                info=T("How Civitai orders the results.", "Civitai 搜索结果的排序方式。"),
             )
             base_dd     = gr.Dropdown(
                 ["", "SD 1.5", "SDXL 1.0", "SD 2.1", "Pony", "Illustrious", "NoobAI", "Flux.1 D", "Flux.1 S"],
                 value="", label="Base Model", scale=1,
-                info="Filter by base architecture. Leave blank for all.",
+                info=T("Only models for this base. Empty = all.", "只看这种底模的模型。留空 = 全部。"),
             )
             nsfw_dd     = gr.Dropdown(
                 ["SFW only", "R18+ / NSFW", "Explicit (XXX)"],
                 value="SFW only", label="Content", scale=1,
-                info="R18+/Explicit requires a Civitai API key set below.",
+                info=T("Adult (R18 / explicit) results need a Civitai API key, set below.", "要看成人（R18 / 露骨）结果，需要在下面填 Civitai API 密钥。"),
             )
             search_btn  = gr.Button("🔍 Search", variant="primary", scale=1)
 
@@ -5537,8 +5556,8 @@ def _build_civitai_tab(model_dd, lora_dd, vae_dd, more_lora_dds=()):
             api_key_box = gr.Textbox(
                 label="Civitai API Key (required for NSFW/explicit content)",
                 # never put the stored key into the component: Gradio serves every value in /config
-                placeholder=("●●● key saved — paste a new one to replace it, or type clear"
-                             if CIVITAI_API_KEY else "Paste your key from civitai.com/user/account → API Keys…"),
+                placeholder=(T("●●● key saved — paste a new one to replace it, or type clear", "●●● 密钥已保存 — 粘贴新的可替换，输入 clear 可删除")
+                             if CIVITAI_API_KEY else T("Paste your key from civitai.com/user/account → API Keys…", "粘贴你在 civitai.com/user/account → API Keys 里的密钥…")),
                 type="password",
                 value="",
                 scale=5,
@@ -5688,7 +5707,8 @@ def _build_civitai_tab(model_dd, lora_dd, vae_dd, more_lora_dds=()):
 
     def do_next_page():
         global _search_page
-        _search_page += 1
+        # the button is disabled on the last page, but an API call or a quick double click came through: "Page 2 / 1" with empty cards
+        _search_page = min(_search_page + 1, max(0, (len(_search_all_results) - 1) // _RESULTS_PER_PAGE))
         return _render_page()
 
     def do_prev_page():
@@ -5910,8 +5930,7 @@ def _build_train_tab(gen_lora_dds=()):
                     choices=_ds_choices,
                     value=_ds_choices[0] if _ds_choices else "",   # never None: crashes the Gradio 4.19 filter
                     allow_custom_value=True,
-                    info="Pick a folder from training_datasets/ or paste any folder path "
-                         "containing your raw training images (.png, .jpg, .webp …).",
+                    info=T("Pick a folder from training_datasets/, or paste the path of any folder with your training pictures (.png, .jpg, .webp …).", "从 training_datasets/ 里选一个文件夹，或者粘贴任何放训练图片的文件夹路径（.png、.jpg、.webp……）。"),
                     scale=4)
                 scan_btn = gr.Button("🔍 Scan", scale=1)
             scan_status = gr.HTML("")
@@ -5919,15 +5938,14 @@ def _build_train_tab(gen_lora_dds=()):
             with gr.Row():
                 trigger_word_txt = gr.Textbox(
                     label="✨ Trigger word",
-                    placeholder="my_character",
-                    info="A unique keyword prepended to every caption. "
-                         "You'll type this in the Generate tab to activate the LoRA.",
+                    placeholder=T("my_character", "my_character"),
+                    info=T("A made-up word put at the start of every caption. Type it in your prompt later to call up the LoRA.", "放在每条标注开头的一个自创词。以后在提示词里写上它就能调出这个 LoRA。"),
                     scale=2)
                 train_res_dd = gr.Dropdown(
                     label="Target resolution",
                     choices=["512 (SD 1.5)", "768 (SD 1.5 hi-res)", "1024 (SDXL / Pony / Illustrious)"],
                     value=_tr_default_res,
-                    info="Set automatically from the base model (Step 3). 768 = SD 1.5 hi-res.",
+                    info=T("Set by itself from the base model (Step 3). 768 = SD 1.5 high resolution.", "根据第 3 步的底模自动设置。768 = SD 1.5 的高分辨率。"),
                     scale=2)
             gr.HTML(
                 '<div class="tr-note">'
@@ -5967,7 +5985,7 @@ def _build_train_tab(gen_lora_dds=()):
                 caption_prefix_txt = gr.Textbox(
                     label="BLIP prefix hint",
                     value="an anime character",
-                    info="Optional context for the captioner (e.g. 'an anime character', 'a photo of')",
+                    info=T("Optional words for the captioner, e.g. 'an anime character', 'a photo of'.", "可选，给自动标注一点提示，例如 'an anime character'、'a photo of'。"),
                     scale=2)
                 autocap_btn = gr.Button("🤖 Auto-Caption All (BLIP)", scale=1)
                 unload_blip_btn = gr.Button("🗑️ Free BLIP RAM", scale=1)
@@ -5994,7 +6012,7 @@ def _build_train_tab(gen_lora_dds=()):
             caption_txt = gr.Textbox(
                 label="Caption (editable)",
                 lines=3,
-                info="Edit the caption for the selected image. Saved as a .txt file alongside the image.")
+                info=T("The text for the picture you clicked. It is saved as a .txt file next to the picture.", "你点中的图片的标注文字，会存成图片旁边的 .txt 文件。"))
             caption_save_btn = gr.Button("💾 Save Caption")
             cap_save_status = gr.HTML("")
 
@@ -6010,16 +6028,14 @@ def _build_train_tab(gen_lora_dds=()):
                 '</div>'
             )
             with gr.Row():
-                _tr_ckpts = _checkpoint_choices()
+                _tr_ckpts = _train_model_choices()
                 _tr_last = _tr_last_model
                 train_model_dd = gr.Dropdown(
                     label="🧠 Base model (checkpoint)",
                     choices=_tr_ckpts,
                     value=(_tr_last if _tr_last in [p for _, p in _tr_ckpts]
                            else (_tr_ckpts[0][1] if _tr_ckpts else "")),
-                    info="The model your LoRA will be trained against. "
-                         "Must match your target — e.g. train on an Illustrious checkpoint "
-                         "if you want to use the LoRA with Illustrious models.",
+                    info=T("The model the LoRA is trained on. Use the same family you'll generate with (Illustrious for Illustrious checkpoints, and so on).", "LoRA 训练时用的底模。要和以后出图用的模型同一类（例如 Illustrious 模型就用 Illustrious 训练）。"),
                     scale=3)
                 train_model_refresh = gr.Button("🔄 Refresh", scale=0, min_width=110)
 
@@ -6027,35 +6043,28 @@ def _build_train_tab(gen_lora_dds=()):
                 lora_rank_sl = gr.Slider(
                     4, 128, value=16, step=4,
                     label="LoRA Rank (dim)",
-                    info="Number of rank dimensions. Higher = more capacity but larger file. "
-                         "8 = lightweight, 16 = standard, 32+ = detailed styles.")
+                    info=T("How much the LoRA can learn: 8 = light, 16 = usual, 32+ = detailed styles (bigger file).", "LoRA 能学多少东西：8 = 轻量，16 = 常用，32 以上 = 细致的画风（文件更大）。"))
                 lora_alpha_sl = gr.Slider(
                     1, 128, value=16, step=1,
                     label="LoRA Alpha",
-                    info="Scaling factor. Rule of thumb: set equal to rank. "
-                         "Higher alpha/rank ratio = stronger LoRA effect per unit weight.")
+                    info=T("Usually the same as the rank. Higher alpha against the rank = a stronger LoRA at the same weight.", "一般和秩设成一样。alpha 比秩越高，同样权重下 LoRA 越强。"))
 
             with gr.Row():
                 lr_num = gr.Number(
                     value=1e-4, label="Learning rate",
-                    info="How fast the model learns. 1e-4 = safe default. "
-                         "Too high → overfitting (copies images exactly). "
-                         "Too low → undertrained (LoRA has no effect).")
+                    info=T("How fast it learns. 1e-4 is a safe default. Too high copies the pictures; too low and the LoRA does nothing.", "学习速度。1e-4 是稳妥的默认值。太高会照抄训练图；太低 LoRA 没效果。"))
                 te_lr_num = gr.Number(
                     value=5e-5, label="Text encoder LR",
-                    info="Separate learning rate for text encoder. "
-                         "Usually 0.5× the UNet LR. Teaches the model what your trigger word means.")
+                    info=T("Learning rate of the text encoder, usually half of the one above. It teaches the model what the trigger word means.", "文本编码器的学习率，一般是上面的一半。它让模型学会触发词的意思。"))
 
             with gr.Row():
                 epochs_sl = gr.Slider(
                     1, 100, value=10, step=1,
                     label="Epochs",
-                    info="Judge by steps = images × epochs. A 16-image character gave her look from 320 steps (20 epochs) "
-                         "at weight 0.8–1.0 (prompt = trigger + her core tags).")
+                    info=T("What counts is steps = pictures × epochs. A 16-picture character looked right from about 320 steps (20 epochs).", "关键看步数 = 图片数 × 轮数。16 张图的角色大约 320 步（20 轮）就像了。"))
                 train_te_cb = gr.Checkbox(
                     value=True, label="Train text encoder",
-                    info="Recommended for character LoRAs — teaches the model what "
-                         "your trigger word means. Disable for pure style LoRAs.")
+                    info=T("On for character LoRAs (teaches the trigger word). Off for pure style LoRAs.", "角色 LoRA 打开（教会触发词）。纯画风 LoRA 关掉。"))
 
             gr.HTML(
                 '<div class="tr-tip">'
@@ -6080,72 +6089,60 @@ def _build_train_tab(gen_lora_dds=()):
                         choices=["attn (attention only — fast, standard)",
                                  "full (attention + convolutions — more thorough)"],
                         value="attn (attention only — fast, standard)",
-                        info="'attn' targets Q/K/V/Out attention layers. "
-                             "'full' also includes ResNet conv layers for richer spatial detail.")
+                        info=T("'attn' trains the attention layers. 'full' also trains the conv layers, for richer detail.", "'attn' 只训练注意力层。'full' 也训练卷积层，细节更丰富。"))
                     sched_dd = gr.Dropdown(
                         label="LR scheduler",
                         choices=["cosine", "constant", "linear"],
                         value="cosine",
-                        info="How the learning rate changes during training. "
-                             "'cosine' gently decreases LR — usually best.")
+                        info=T("How the learning rate changes while training. 'cosine' lowers it gently and is usually best.", "训练过程中学习率怎么变化。'cosine' 慢慢降低，一般效果最好。"))
                 with gr.Row():
                     grad_accum_sl = gr.Slider(
                         1, 8, value=1, step=1,
                         label="Gradient accumulation",
-                        info="Simulates larger batch size. "
-                             "2 = accumulates gradients over 2 images before each update.")
+                        info=T("Acts like a bigger batch: 2 = learns from 2 pictures before each update.", "相当于更大的批量：2 = 每看 2 张图更新一次。"))
                     warmup_sl = gr.Slider(
                         0.0, 0.2, value=0.05, step=0.01,
                         label="Warmup ratio",
-                        info="Fraction of total steps with gradually increasing LR. "
-                             "0.05 = first 5% of training ramps up slowly.")
+                        info=T("Share of the steps where the learning rate ramps up slowly. 0.05 = the first 5 %.", "学习率慢慢升起来的那段占总步数的比例。0.05 = 前 5 %。"))
                 with gr.Row():
                     grad_ckpt_cb = gr.Checkbox(
                         value=True, label="Gradient checkpointing",
-                        info="Trades ~15% speed for much lower memory. Keep ON for CPU/DML training.")
+                        info=T("Uses much less memory for ~15 % more time. Keep it on.", "多花约 15 % 时间，换来少得多的内存占用。保持打开。"))
                     train_clip_skip_rb = gr.Radio(
                         [1, 2], value=2, label="CLIP skip (SD 1.5)",
-                        info="2 = what anime SD 1.5 checkpoints are used with (generate with CLIP skip 2 too). "
-                             "SDXL ignores it.")
+                        info=T("2 = what anime SD 1.5 models are made for (generate with CLIP skip 2 too). SDXL ignores it.", "2 = 动漫 SD 1.5 模型的常用值（出图时也用 2）。SDXL 不受影响。"))
                     flip_cb = gr.Checkbox(
                         value=False, label="Random horizontal flip",
-                        info="Doubles effective dataset size by randomly mirroring images. "
-                             "Disable for asymmetric subjects (text, logos, specific hand positions).")
+                        info=T("Mirrors pictures at random, which doubles the variety. Turn it off for one-sided things (text, logos, a hand that must be on one side).", "随机左右翻转图片，相当于素材翻倍。有方向性的内容要关掉（文字、logo、必须在某一侧的手）。"))
                 with gr.Row():
                     save_every_sl = gr.Slider(
                         0, 50, value=0, step=1,
                         label="Save checkpoint every N epochs",
-                        info="0 = save only the final LoRA. "
-                             ">0 = also save intermediate checkpoints (useful for comparing epochs).")
+                        info=T("0 = save only the final LoRA. More than 0 = also save in between, to compare.", "0 = 只保存最后的 LoRA。大于 0 = 中途也保存，方便对比。"))
                     seed_num = gr.Number(
                         value=42, label="Training seed",
-                        info="Random seed for reproducibility. Same seed + same data = identical LoRA.")
+                        info=T("The same seed and the same pictures give the same LoRA.", "同样的种子加同样的图片，会训练出同样的 LoRA。"))
                 with gr.Row():
                     train_device_dd = gr.Dropdown(
                         label="Training device",
                         choices=["auto", "cuda", "cpu", "directml"],
                         value="auto",
-                        info="Auto = the GPU (ZLUDA or native ROCm) if available, else CPU. "
-                             "The GPU gives ~5× speedup or more (launch via launch.bat). "
-                             "DirectML backward is broken for UNet — expert use only. "
-                             "CPU always works (uses your RAM).")
+                        info=T("Auto = the graphics card if there is one, else the CPU. The card is ~5× faster. CPU always works (uses your RAM).", "自动 = 有显卡就用显卡，否则用 CPU。显卡快约 5 倍。CPU 一定能用（占用内存）。"))
 
             with gr.Row():
                 output_name_txt = gr.Textbox(
                     value="my_lora", label="Output filename",
-                    info="Saved to models/loras/{name}.safetensors",
+                    info=T("Saved as models/loras/<name>.safetensors", "保存为 models/loras/<名称>.safetensors"),
                     scale=2)
 
             with gr.Row():
                 drop_shared_cb = gr.Checkbox(
                     value=False, label="Let the trigger carry the character (leave out the tags shared by most captions)",
-                    info="The auto-tagger writes her hair / eye colour and ornament into every caption, so the model ties them to those tags and the trigger word alone "
-                         "does not bring them back. On: tags present in at least N % of the captions are left out when you press Prepare (the caption files are not changed), "
-                         "so the trigger has to carry them. Off (default): captions are used as they are.",
+                    info=T("The auto-tagger writes her hair, eye colour and ornament into every caption, so those tags (not the trigger) end up carrying them. On: tags in at least N % of the captions are left out when you press Prepare (the files stay as they are), so the trigger word learns them. Off (default): captions are used as they are.", "自动打标签会把她的发色、瞳色、发饰写进每条标注，结果是这些标签（而不是触发词）记住了她的特征。打开：按“准备”时，出现在至少 N % 标注里的标签会被省略（文件本身不改），让触发词去学它们。关闭（默认）：标注原样使用。"),
                     scale=3)
                 drop_pct_sl = gr.Slider(
                     50, 100, value=80, step=5, label="N % of the captions",
-                    info="Lower = more tags left out (also scene tags the pictures share: 'standing', 'smile' ...).",
+                    info=T("Lower = more tags left out (also scene tags most pictures share, like 'standing', 'smile').", "越低省略的标签越多（也包括大多数图片共有的场景标签，例如 'standing'、'smile'）。"),
                     scale=1)
 
             gr.HTML(
@@ -6271,7 +6268,7 @@ def _build_history_tab(gen_controls: dict, up_input, png_input) -> dict:
                 'settings; ⭐ marks favourites. <b>📄 Open in PNG Info</b> → <b>Send to Generate</b> restores '
                 'everything it was made with.</p>')
         with gr.Row():
-            h_text = gr.Textbox(label="Search", placeholder="e.g. red dress beach   or   9001", scale=4)
+            h_text = gr.Textbox(label="Search", placeholder=T("red dress beach   or a model number like 9001", "red dress beach   或者模型编号，例如 9001"), scale=4)
             h_model = gr.Dropdown(["All"], value="All", label="Model", scale=2)
             h_lora = gr.Dropdown(["All"], value="All", label="LoRA", scale=2)
             with gr.Column(scale=1, min_width=120):
@@ -6409,7 +6406,7 @@ def _build_settings_tab():
                     choices=gpu_choices,
                     value=gpu_choices[best_idx] if gpu_choices else None,
                     label="Active GPU for inference",
-                    info=_native_gpu_note() if native_run else "★ = auto-selected best GPU. You can override this.",
+                    info=_native_gpu_note() if native_run else T("★ = the best GPU, picked by itself. You can choose another.", "★ = 自动选出的最好的 GPU。也可以换一个。"),
                     interactive=not native_run,
                 )
                 gpu_status = gr.HTML("")
@@ -6439,10 +6436,8 @@ def _build_settings_tab():
                     label="HF Token",
                     value="",                    # stored tokens stay out of Gradio's /config
                     type="password",
-                    placeholder="●●● token saved — paste a new one to replace it" if HF_TOKEN else "hf_…",
-                    info="HuggingFace access token — only for gated repos (e.g. FLUX.1-dev, SD 3.x); the "
-                         "built-in SD 1.5 / SDXL base downloads don't need one. "
-                         "Get one at huggingface.co/settings/tokens.",
+                    placeholder=T("●●● token saved — paste a new one to replace it", "●●● 令牌已保存 — 粘贴新的可替换") if HF_TOKEN else T("hf_…", "hf_…（粘贴 HuggingFace 令牌）"),
+                    info=T("Only needed for gated downloads (e.g. FLUX.1-dev, SD 3.x); the built-in SD 1.5 / SDXL downloads don't need one. Get one at huggingface.co/settings/tokens.", "只有受限的下载才需要（例如 FLUX.1-dev、SD 3.x）；自带的 SD 1.5 / SDXL 下载不需要。在 huggingface.co/settings/tokens 申请。"),
                 )
                 save_hf_btn    = gr.Button("Save HF Token")
                 hf_token_status = gr.HTML("")
@@ -6491,13 +6486,11 @@ def _build_settings_tab():
                 value=False,
                 interactive=_has_dml,
                 info=(
-                    "Offloads CLIP-L + OpenCLIP-G text encoders to the integrated GPU "
-                    "via ONNX Runtime DirectML during SDXL/Pony/Illustrious generation. "
-                    "Mainly helps the DirectML backend — under ZLUDA the text encoders "
-                    "already run on the dGPU. Reduces CPU prompt encoding from ~7s to ~100ms (780M). "
-                    "ONNX models are exported on first use and cached."
+                    T("Runs the SDXL text encoders on the integrated GPU. Only helps the DirectML backend: on native ROCm and ZLUDA they "
+                      "already run on the graphics card. Prepared once on first use.",
+                      "把 SDXL 的文本编码放到核显上运行。只对 DirectML 后端有用：native ROCm 和 ZLUDA 下它们本来就在独显上。第一次使用时准备一次。")
                     if _has_dml else
-                    "DirectML not available — install onnxruntime-directml."
+                    T("DirectML isn't available — install onnxruntime-directml.", "DirectML 不可用 — 需要安装 onnxruntime-directml。")
                 ),
             )
 
@@ -6519,9 +6512,7 @@ def _build_settings_tab():
                     label="Enable SmartSplit (iGPU + NPU + dGPU)",
                     value=False,
                     info=(
-                        "Distributes pipeline stages across all available compute units: "
-                        "text encoder → NPU/iGPU, UNet → dGPU, VAE decode → iGPU. "
-                        "Frees up to ~3-4 GB extra dGPU VRAM."
+                        T("Spreads the work over every chip: text encoder on the NPU / integrated GPU, drawing on the graphics card, decoding on the integrated GPU. Frees up to ~3-4 GB on the graphics card.", "把工作分给所有芯片：文本编码放 NPU / 核显，画图放独显，解码放核显。最多能给独显省出约 3–4 GB 显存。")
                     ),
                 )
 
@@ -6529,15 +6520,13 @@ def _build_settings_tab():
                     choices=_smartsplit_te_choices(_cap),
                     value=_smartsplit_te_choices(_cap)[0],
                     label="Text Encoder device",
-                    info="Where to run the CLIP text encoder. NPU frees ~1 GB "
-                         "dGPU VRAM. iGPU is the next best option.",
+                    info=T("Where the text encoder runs. The NPU frees ~1 GB on the graphics card; the integrated GPU is next best.", "文本编码器在哪里运行。放 NPU 能给独显省约 1 GB；其次是核显。"),
                 )
                 vae_device_dd = gr.Dropdown(
                     choices=_smartsplit_vae_choices(_cap),
                     value=_smartsplit_vae_choices(_cap)[0],
                     label="VAE Decode device",
-                    info="Where to decode latents to pixels. iGPU frees ~2 GB "
-                         "dGPU VRAM. CPU works but is slower.",
+                    info=T("Where the finished picture is decoded. The integrated GPU frees ~2 GB on the graphics card; the CPU works but is slower.", "最后解码成图片的地方。放核显能给独显省约 2 GB；CPU 也行，但更慢。"),
                 )
                 apply_split_btn = gr.Button("⚙ Apply SmartSplit Config", variant="secondary")
                 split_status    = gr.HTML("")
@@ -6551,12 +6540,14 @@ def _build_settings_tab():
                         get_npu_bridge().stop()
 
                     if is_dml_split:
-                        # DirectML multi-GPU mode — auto-configured, no ZLUDA needed
+                        # DirectML multi-GPU mode — auto-configured, no ZLUDA needed. The split runs the text encoder and the VAE
+                        # decode on the CPU (SmartSplitPipeline._setup exports nothing there): it said igpu_directml for both, so the
+                        # applied status and describe() named the iGPU while Settings, the banner and auto() said CPU
                         _smartsplit_cfg = SmartSplitConfig(
                             enabled=True,
-                            text_encoder_device="igpu_directml",
+                            text_encoder_device="cpu",
                             unet_device="dgpu_directml",
-                            vae_device="igpu_directml",
+                            vae_device="cpu",
                             dgpu_dml_idx=_cap_now.dgpu_dml_idx,
                             igpu_dml_idx=_cap_now.igpu_dml_idx,
                         )
@@ -6629,13 +6620,22 @@ def _build_settings_tab():
 
             # ── Accelerated TE toggle handler ─────────────────────────────
             def on_accel_te_toggle(enabled):
-                from backend.sdxl_pipeline import set_sdxl_npu_te, _get_igpu_device
-                if enabled and _get_igpu_device() is None:      # finding the iGPU's DirectML number takes torch-directml, which native ROCm's environment doesn't have
+                from backend.sdxl_pipeline import set_sdxl_npu_te, _dml_igpu_id, accel_te_problem
+                why = accel_te_problem(_sdxl.device) if enabled else None
+                if why:
                     set_sdxl_npu_te(False)
-                    return gr.update(value=False, info="⚠ No iGPU reachable through torch-directml here, so this stays off. The text encoders run on the GPU as usual.")
+                    return gr.update(value=False, info=_i18n.both("⚠ " + why, "⚠ 这个环境用不了，保持关闭（原因见英文）"))
+                try:
+                    if enabled:
+                        _dml_igpu_id()
+                except RuntimeError as e:      # no iGPU, or a Vega-class one (it hung under SmartSplit's VAE)
+                    set_sdxl_npu_te(False)
+                    why = str(e)
+                    return gr.update(value=False, info=_i18n.both(f"⚠ {why[:1].upper()}{why[1:]}. The text encoders run on the GPU as usual.",
+                                                                  "⚠ 没有可用的核显，所以保持关闭。文本编码照常在独显上运行。"))
                 set_sdxl_npu_te(enabled)
-                state = "✅ enabled — iGPU DML" if enabled else "disabled"
-                return gr.update(info=f"Accelerated text encoding {state}")
+                return gr.update(info=_i18n.both("Accelerated text encoding ✅ enabled (integrated GPU)" if enabled else "Accelerated text encoding disabled",
+                                                 "核显加速文本编码 ✅ 已打开" if enabled else "核显加速文本编码已关闭"))
 
             npu_sdxl_te.input(
                 on_accel_te_toggle,
@@ -7093,7 +7093,7 @@ def _params_text(rec: dict) -> str:
     if isinstance(rec.get("max_detail"), dict):
         parts.append("Max detail: 2× Real-ESRGAN")
     if isinstance(rec.get("polish"), dict) and rec["polish"].get("auto") and rec["polish"].get("recipe"):
-        parts.append(f"Polish: {rec['polish']['recipe']} (auto)")
+        parts.append(f"Polish: {rec['polish']['recipe']} (auto{' — best' if rec['polish'].get('best') else ''})")
     if isinstance(rec.get("colour"), dict) and rec["colour"].get("strength") is not None:
         parts.append(f"Colour strength: {_num(rec['colour']['strength'], 1.0):g}")
     if isinstance(rec.get("composition_control"), dict) and rec["composition_control"].get("model"):
@@ -7105,8 +7105,8 @@ def _params_text(rec: dict) -> str:
         parts.append(f"Eye detail: denoise {_num(rec['eye_detail']['denoise'], 0.3):g}")
         if rec["eye_detail"].get("style") == "natural":
             parts.append("Eye style: natural")
-    if rec.get("emphasis") == "compel":
-        parts.append("Emphasis: Compel")
+    if rec.get("emphasis") in ("compel", "a1111_normkeep"):      # no line = A1111's own maths (what A1111 / Forge pictures use)
+        parts.append("Emphasis: " + ("Compel" if rec["emphasis"] == "compel" else "Norm-keep"))
     if rec.get("pag_scale"):
         parts.append(f"PAG scale: {rec['pag_scale']:g}")
     if rec.get("freeu"):
@@ -7131,6 +7131,9 @@ def _params_text(rec: dict) -> str:
     if rec.get("loras"):   # last: PNG Info reads "LoRAs:" to the end of the line
         parts.append("LoRAs: " + ", ".join(f"{Path(l['file']).stem}:{l['weight']:g}" for l in rec["loras"]))
     return text + ("\n" + ", ".join(parts) if parts else "")
+
+
+_SAVE_LOG: list | None = None          # a list while 🪄 一键出图 runs: every saved file's path is appended
 
 
 def _save_outputs(images: list, meta: dict | None = None, pipe=None) -> list[Path]:
@@ -7171,6 +7174,8 @@ def _save_outputs(images: list, meta: dict | None = None, pipe=None) -> list[Pat
         img.save(path, pnginfo=pnginfo)
         img.info["saved_path"] = str(path)   # lets "📂 Show in folder" highlight this file
         saved.append(path)
+    if _SAVE_LOG is not None:
+        _SAVE_LOG.extend(saved)          # 🪄 一键出图 collects the files its run saved (⭐ favourite, the follow-up buttons)
     return saved
 
 
@@ -7190,6 +7195,12 @@ def _tagged(items: list, arch_fn) -> list:
 def _checkpoint_choices() -> list:
     from backend.model_manager import checkpoint_arch
     return _tagged(list_checkpoints(), checkpoint_arch)
+
+
+def _train_model_choices() -> list:
+    """The Train tab's base models. With none installed, one entry whose value is "" (Prepare then asks for a model): the empty
+    list left the dropdown's "" outside its choices, which Gradio 4.19 warned about at every start of a fresh install."""
+    return _checkpoint_choices() or [("(no checkpoint in models/checkpoints yet: add one, then 🔄 Refresh)", "")]
 
 
 def _lora_choices(model_path=None) -> list:
@@ -7279,6 +7290,7 @@ def build_app() -> gr.Blocks:
     .gradio-container { overflow: clip !important; }
     #gen-output-col { position: sticky; top: 8px; align-self: flex-start; }
 
+    """ + _i18n.CSS + """
     /* ── Readability & accessibility ─────────────────────────────────────── */
     .gradio-container { font-size: 15px; }
     .tab-nav button { font-size: 15px !important; padding: 8px 14px !important; }
@@ -7314,11 +7326,15 @@ def build_app() -> gr.Blocks:
             + (f'&nbsp;{_npu_badge(_profile.npu)}' if _profile.npu.available else '')
             + f'<span style="color:#9399b2;font-size:13px;margin-left:auto;">'
             f'Diffusers · ZLUDA · ROCm</span>'
+            + _i18n.toggle_button_html() +
             f'</div>'
         )
 
         with gr.Tabs() as main_tabs:
+            from backend import ui_simple as _ui_simple                  # 🪄 一键出图 first: a few plain choices, one button (it runs Generate's own pipeline)
+            _simple_ui = _ui_simple.build_tab(sys.modules[__name__])
             _gen_model_dd, _gen_lora_dd, _gen_vae_dd, _gen_ctrl = _build_generate_tab()
+            _ui_simple.wire(sys.modules[__name__], _simple_ui, main_tabs)
             _build_bridge_tab()
             _up_input = _build_upscale_tab()
             _build_watermark_tab()
@@ -7359,6 +7375,9 @@ def build_app() -> gr.Blocks:
             [_gen_ctrl["last_images"]], main_tabs,
         ).then(None, None, None, js=_TO_TOP_JS)
 
+    # 中文 / English: the labels (the API's names) stay English on the server; the page swaps what it shows (backend/i18n.py).
+    # The table is read after every tab was built, so it holds every hint registered with T().
+    app.js = _i18n.page_js(_KEYBOARD_JS)
     _serialize_gpu_events(app)
     return app
 
