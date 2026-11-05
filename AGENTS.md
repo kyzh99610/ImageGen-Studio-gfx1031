@@ -492,8 +492,17 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   Norm-keep, 8 of 8 seeds each), although the rescale differed as on the laptop (that chunk's weighted tokens ×1.61 on CLIP-L with
   A1111, ×1.19 with Norm-keep; its tags came out stronger with A1111, WD14 rain 0.87 against 0.76). A first chunk with most tags at
   1.2–1.4 was not shrunk here (×0.84 plain / ×1.12 weighted with A1111, ×0.85 / ×1.13 with Norm-keep; identity +0.013 with Norm-keep,
-  6 of 6). So the swing is real but drew no defect on this checkpoint; Norm-keep mainly applies very high weights less hard. Other
-  checkpoints and the full chain (hires / eyes) are open.
+  6 of 6). So the swing is real but drew no defect on this checkpoint; Norm-keep mainly applies very high weights less hard.
+  **The same day, heavily weighted settings through the full chain** (eight saved settings with most tags at 1.1–1.45 and a few at
+  1.58–1.8, two Illustrious-family anime checkpoints, each with its own hires 1.5× + face + hand + eye passes, 3 seeds, 48 pictures):
+  with A1111's maths two of the eight drew no picture at all in any seed (a grey wash, or a red field with a yellow blob; no face
+  found), with Norm-keep all 24 were the character (CCIP 0.905–0.933). On the other six the modes were alike: identity equal (0.919
+  against 0.922), rated blind 11 of 18 ties, Norm-keep better in 5, A1111 in 2. A text-encoder scan of 238 saved settings put every
+  Norm-keep chunk factor between ×0.63 and ×1.0, while A1111's ranged from −9.3 to ×108 (25 settings had a chunk below 0.5, above 2
+  or negative). The scan shows the risk but does not predict a broken picture: it flagged one of the two that broke and three that
+  drew fine. A tag pair written at 1.7 for A1111 got its old strength back at 1.8 under Norm-keep (WD14 0.79 at A1111 1.7; 0.66 /
+  0.81 / 0.82 / 0.85 at Norm-keep 1.7 / 1.8 / 1.9 / 2.0, 9 pictures each; 1.9 and 2.0 went past the old look). Other checkpoints
+  are open.
 - **BREAK** between the subject and the scene tags: my hair-band metric said SDXL −19 %, but the second session's
   subject-only metric (U2-Net mask + WD14) found the hair tint unchanged (+0.2) and background chroma −12 % — BREAK
   mostly tones the scene down; it is not a bleed fix. Same metric confirmed the weights result: tags at 1.5 under
