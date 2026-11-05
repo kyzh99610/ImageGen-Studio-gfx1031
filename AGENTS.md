@@ -501,8 +501,9 @@ border's colour direction), a grey-haired test character in a white dress, 5 str
   Norm-keep chunk factor between ×0.63 and ×1.0, while A1111's ranged from −9.3 to ×108 (25 settings had a chunk below 0.5, above 2
   or negative). The scan shows the risk but does not predict a broken picture: it flagged one of the two that broke and three that
   drew fine. A tag pair written at 1.7 for A1111 got its old strength back at 1.8 under Norm-keep (WD14 0.79 at A1111 1.7; 0.66 /
-  0.81 / 0.82 / 0.85 at Norm-keep 1.7 / 1.8 / 1.9 / 2.0, 9 pictures each; 1.9 and 2.0 went past the old look). Other checkpoints
-  are open.
+  0.81 / 0.82 / 0.85 at Norm-keep 1.7 / 1.8 / 1.9 / 2.0, 9 pictures each; 1.9 and 2.0 went past the old look). A base picture of
+  each of 122 saved settings on four Illustrious-family checkpoints then drew normally under Norm-keep (no blank, flat or abstract
+  frame; the only two-face pictures came from two-view sheets that ask for two).
 - **BREAK** between the subject and the scene tags: my hair-band metric said SDXL −19 %, but the second session's
   subject-only metric (U2-Net mask + WD14) found the hair tint unchanged (+0.2) and background chroma −12 % — BREAK
   mostly tones the scene down; it is not a bleed fix. Same metric confirmed the weights result: tags at 1.5 under
