@@ -7476,6 +7476,37 @@ def _():
             ParserElement.enable_packrat()
 
 
+@test("Eye / hand pass prompts (2026-11-04): eyes rolled up or crossed get no 'round pupils'; a hand action without a hand word stays in the hand prompt, a pose does not; a private word list, when present, extends both")
+def _():
+    from backend import detail_tools as DT
+    old = DT.EYE_STYLE["mode"]
+    try:
+        DT.set_eye_style("round")
+        for p, tag in (("1girl, solo, rolling eyes, blush", "rolling eyes"), ("1girl, solo, cross-eyed", "cross-eyed")):
+            e = DT.eye_prompt_from(p)
+            assert tag in e and "round pupils" not in e, e
+            assert DT.eye_negative_from(p, "bad hands") == "bad hands"                 # no "slit pupils, cat eyes" either
+        assert "round pupils" in DT.eye_prompt_from("1girl, solo, smile, red eyes")     # an ordinary prompt is unchanged
+    finally:
+        DT.set_eye_style(old)
+    h = DT.hand_prompt_from("masterpiece, 1girl, solo, grabbing own hair, touching own cheek, spread legs, lying, holding book")
+    assert all(t in h for t in ("grabbing own hair", "touching own cheek", "holding book")), h
+    assert "spread legs" not in h and "lying" not in h, h
+    try:
+        from backend import detail_words_private as X
+    except ImportError:
+        return                                                                           # public repo: no private word list
+    DT.set_eye_style("round")
+    try:
+        for words, build in ((X.EYE_KEEP_EXTRA, DT.eye_prompt_from), (X.HAND_KEEP_EXTRA, DT.hand_prompt_from)):
+            for w in words.split("|"):
+                assert w in build(f"1girl, solo, {w}, park"), w
+        for w in X.PUPIL_FREE_EXTRA.split("|"):
+            assert "round pupils" not in DT.eye_prompt_from(f"1girl, solo, {w}"), w
+    finally:
+        DT.set_eye_style(old)
+
+
 @test("VAE family from the quant_conv bias: an SD 1.5 VAE on SDXL (or back) is ignored with a warning, not decoded")
 def _():
     import json as _j, struct
