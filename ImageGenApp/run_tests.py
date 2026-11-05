@@ -5854,6 +5854,36 @@ def _():
             assert all(not s[o] for s in seen for o in others), (axis, seen)       # only the varied pass is on
 
 
+@test('X/Y grid: Prompt S/R and Negative S/R take a "quoted, value" with commas and "" (remove the words); Negative S/R changes only the negative')
+def _():
+    from PIL import Image
+    import app as _app
+    assert "Negative S/R" in _app._XY_AXES and "Prompt S/R" in _app._XY_AXES
+    sv = _app._xy_values
+    assert sv("Prompt S/R", "red hair, blue hair") == (["red hair", "blue hair"], "")
+    assert sv("Prompt S/R", '"pink eyes, magenta eyes", "", pink eyes') == (["pink eyes, magenta eyes", "", "pink eyes"], "")
+    assert sv("Negative S/R", "a, b,") == (["a", "b"], "")                    # a stray / trailing comma adds no cell
+    assert sv("Negative S/R", ' "x, y" , z')[0] == ["x, y", "z"]              # spaces around a quoted value don't count
+    assert sv("Prompt S/R", '"", x')[1] and sv("Prompt S/R", "")[1]           # the first value is what to find
+    assert _app._sr_replace("a, pink eyes, b", "pink eyes", "") == "a, b"
+    assert _app._sr_replace("pink eyes, b", "pink eyes", "") == "b" and _app._sr_replace("a, x", "x", "y") == "a, y"
+    with _BatchEnv() as E:
+        seen = []
+        cl = dict(zip(E.xy.__code__.co_freevars, E.xy.__closure__))
+        cl["do_generate"].cell_contents = lambda *a, **k: (seen.append((a[0], a[1])) or [Image.new("RGB", (a[5], a[6]))], "info", [])
+        out = E.run_xy("Negative S/R", 'bad, "", "bad, worse"')
+        assert seen == [("1girl", "bad"), ("1girl", ""), ("1girl", "bad, worse")], seen
+        assert "Grid of 3 images" in out[1], out[1]
+        seen.clear()
+        out = E.run_xy("Negative S/R", "missing, x")
+        assert not seen and "isn't in the negative prompt" in out[1], out[1]
+        out = E.run_xy("Prompt S/R", '1girl, "1girl, solo"')
+        assert [s for s in seen] == [("1girl", "bad"), ("1girl, solo", "bad")], seen
+    from backend import ui_messages as M
+    assert M.translate("❌ Negative S/R: “x” isn't in the negative prompt.") == "❌ Negative S/R：反向提示词里没有“x”。"
+    assert M.translate("An empty value") == "空值"
+
+
 @test("SD→SDXL Bridge (round 27): {a|b} / __name__ in the prompts are resolved from the seed like Generate (same picks in both stages, a seed -1 gets a real one), the records keep the template, unknown wildcards are named, a plain prompt leaves no trace")
 def _():
     import json as _j

@@ -821,7 +821,45 @@ _SDXL_BAD_SAMPLERS = ("PNDM", "Heun")
 _SDXL_FAMILIES = ("sdxl", "pony", "illustrious")
 
 _XY_AXES = ["none", "CFG", "Steps", "Sampler", "Seed", "LoRA 1 weight", "CLIP skip", "Hires denoise",
-            "Face denoise", "Hand denoise", "Eye denoise", "PAG scale", "CFG rescale", "Colour strength", "Pose strength", "Pose", "Prompt S/R", "Checkpoint"]
+            "Face denoise", "Hand denoise", "Eye denoise", "PAG scale", "CFG rescale", "Colour strength", "Pose strength", "Pose", "Prompt S/R",
+            "Negative S/R", "Checkpoint"]
+_XY_SR = ("Prompt S/R", "Negative S/R")
+
+
+def _sr_values(text: str) -> list[str]:
+    """Prompt / Negative S/R values: comma-separated, a "quoted value" may hold commas, and "" (an empty quoted value) means
+    'remove the phrase'. Unquoted empty fields (a stray or trailing comma) are skipped."""
+    out, cur, quoted, inq = [], "", False, False
+    for ch in str(text or ""):
+        if inq:
+            if ch == '"':
+                inq = False                          # the closing quote; anything after it up to the comma is ignored
+            else:
+                cur += ch
+        elif ch == '"' and not cur.strip():
+            cur, inq, quoted = "", True, True        # an opening quote (spaces before it don't count)
+        elif ch == ",":
+            if quoted:
+                out.append(cur)
+            elif cur.strip():
+                out.append(cur.strip())
+            cur, quoted = "", False
+        elif not quoted:
+            cur += ch
+    if quoted:
+        out.append(cur)                              # also an unclosed quote: its text to the end
+    elif cur.strip():
+        out.append(cur.strip())
+    return out
+
+
+def _sr_replace(text: str, find: str, repl: str) -> str:
+    """One S/R cell: replace `find` with `repl`; replacing it with nothing also drops the comma it leaves behind."""
+    out = (text or "").replace(find, repl)
+    if not repl:
+        import re as _re
+        out = _re.sub(r"(?:\s*,\s*){2,}", ", ", out).strip().strip(",").strip()
+    return out
 
 
 def _xy_pose_values(text: str) -> tuple[list, str]:
@@ -867,11 +905,15 @@ def _xy_values(axis: str, text: str) -> tuple[list, str]:
     Returns (values, error message)."""
     if not axis or axis == "none":
         return [None], ""
+    if axis in _XY_SR:
+        vals = _sr_values(text)
+        if not vals or not vals[0]:
+            return [], (f'{axis}: the first value is the words to find (then the replacements; "a, b" in quotes keeps a comma, '
+                        '"" removes the words).')
+        return vals, ""
     raw = [v.strip() for v in str(text or "").split(",") if v.strip()]
     if not raw:
         return [], f"Enter values for {axis}, separated by commas."
-    if axis == "Prompt S/R":
-        return raw, ""
     if axis == "Pose":
         return _xy_pose_values(text)
     if axis == "Checkpoint":
@@ -1887,8 +1929,10 @@ def _build_generate_tab():
                                     'every combination of the values below (current settings for everything '
                                     'else). Numbers: <code>5, 7, 9</code> or ranges <code>4-10:2</code>. '
                                     '<b>Prompt S/R</b>: the first value is a word in your prompt, the others '
-                                    'replace it (<code>red hair, blue hair, green hair</code>). Each cell is '
-                                    'saved like a normal image; the grid is saved too.</p>')
+                                    'replace it, e.g. <code>red hair, blue hair, green hair</code>; <b>Negative S/R</b> '
+                                    'does the same in the negative prompt. A value in quotes keeps its commas, e.g. '
+                                    '<code>"pink eyes, magenta eyes"</code>. An empty value <code>""</code> removes the words. '
+                                    'Each cell is saved like a normal image; the grid is saved too.</p>')
                             with gr.Row():
                                 xy_x_axis = gr.Dropdown(_XY_AXES, value="CFG", label="X axis")
                                 xy_x_vals = gr.Textbox(value="5, 7, 9", label="X values")
@@ -3402,6 +3446,8 @@ def _build_generate_tab():
         for axis, vals in ((x_axis, xs), (y_axis, ys)):
             if axis == "Prompt S/R" and vals[0] not in (prompt or ""):
                 return err_html(f"Prompt S/R: “{html.escape(vals[0])}” isn't in the prompt.")
+            if axis == "Negative S/R" and vals[0] not in (neg_prompt or ""):
+                return err_html(f"Negative S/R: “{html.escape(vals[0])}” isn't in the negative prompt.")
             if axis == "LoRA 1 weight" and (not lora1 or lora1 == "none"):
                 return err_html("LoRA 1 weight: pick a LoRA in slot 1 first.")
             if axis == "Pose strength" and pc_type == _pose.TYPE_COMP and not _comp.has_current():
@@ -3428,7 +3474,7 @@ def _build_generate_tab():
                 for xi, xv in enumerate(xs):
                     if _generation_abort.is_set():
                         raise _GenerationAborted()
-                    p = dict(prompt=prompt or "", scheduler=scheduler, steps=steps, cfg=cfg, seed=seed,
+                    p = dict(prompt=prompt or "", neg=neg_prompt or "", scheduler=scheduler, steps=steps, cfg=cfg, seed=seed,
                              extra=dict(base_extra), lw=w1, model=model_path)
                     for axis, v, vals in ((x_axis, xv, xs), (y_axis, yv, ys)):
                         if axis == "CFG": p["cfg"] = v
@@ -3446,7 +3492,8 @@ def _build_generate_tab():
                         elif axis == "Colour strength": p["extra"]["cs"] = v
                         elif axis == "Pose strength": p["extra"].update(pc_on=True, pc_strength=v)
                         elif axis == "Pose": p["extra"].update(pc_on=False) if v == "none" else p["extra"].update(pc_on=True, pc_pose=v)
-                        elif axis == "Prompt S/R": p["prompt"] = p["prompt"].replace(vals[0], v)
+                        elif axis == "Prompt S/R": p["prompt"] = _sr_replace(p["prompt"], vals[0], v)
+                        elif axis == "Negative S/R": p["neg"] = _sr_replace(p["neg"], vals[0], v)
                         elif axis == "Checkpoint": p["model"] = v
                     if p["model"] != model_now:           # Checkpoint axis: switch models
                         progress((len(cells)) / total, desc=f"Loading {Path(str(p['model'])).stem}…")
@@ -3461,7 +3508,7 @@ def _build_generate_tab():
                         lora_w_now = p["lw"]
                     n = len(cells) + 1
                     progress((n - 1) / total, desc=f"Grid {n}/{total}")
-                    imgs, info, _ = do_generate(p["prompt"], neg_prompt, p["scheduler"], p["steps"], p["cfg"],
+                    imgs, info, _ = do_generate(p["prompt"], p["neg"], p["scheduler"], p["steps"], p["cfg"],
                                                 width, height, 1, p["seed"], init_img, strength, use_i2i,
                                                 auto_quality=auto_quality, extra=p["extra"])
                     if not imgs:
@@ -3476,9 +3523,11 @@ def _build_generate_tab():
             if lora_w_now is not None and lora_w_now != w1:
                 _sync_loras([(lora1, w1), (lora2, w2), (lora3, w3)])
         fmt = lambda a, v: "" if a in (None, "none") else Path(str(v)).stem[:24] if a == "Checkpoint" else str(v).replace("★ ", "") if a == "Pose" else \
-            f"{a} {v:g}" if isinstance(v, float) else f"{v}" if a in ("Sampler", "Prompt S/R", "Pose") else f"{a} {v}"
-        xl = [fmt(x_axis, v) for v in xs]
-        yl = [fmt(y_axis, v) for v in ys]
+            f"{a} {v:g}" if isinstance(v, float) else f"{v}" if a in ("Sampler", "Prompt S/R", "Pose") else \
+            f"neg: {v}" if a == "Negative S/R" else f"{a} {v}"
+        sr_lab = lambda a, v, vals: (("neg: " if a == "Negative S/R" else "") + f"without {vals[0]}"[:40]) if a in _XY_SR and v == "" else fmt(a, v)
+        xl = [sr_lab(x_axis, v, xs) for v in xs]
+        yl = [sr_lab(y_axis, v, ys) for v in ys]
         cols = len(xs)
         n_real = len(cells)
         while len(cells) % cols:                  # stopped mid-row: pad with blanks (for the grid picture only)

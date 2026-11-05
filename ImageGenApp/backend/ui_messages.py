@@ -36,8 +36,10 @@ EXACT: dict[str, str] = {
         "使用上面的提示词、模型、LoRA、采样器、步数、CFG 和种子。只改涂抹的区域；它会按模型原生分辨率重画，所以小区域（手、脸）也有完整细节。写清楚那里应该画什么。",
     "One fixed seed, every combination of the values below (current settings for everything else). Numbers:": "固定一个种子，把下面的值两两组合各画一张（其它参数用当前设置）。数字：",
     "or ranges": "或范围",
-    ": the first value is a word in your prompt, the others replace it (": "：第一个值是提示词里的一个词，后面的值依次替换它（",
-    "). Each cell is saved like a normal image; the grid is saved too.": "）。每一格都像普通图片一样保存，整张网格也会保存。",
+    ": the first value is a word in your prompt, the others replace it, e.g.": "：第一个值是提示词里的一个词，后面的值依次替换它，例如",
+    "does the same in the negative prompt. A value in quotes keeps its commas, e.g.": "在反向提示词里做同样的替换。带逗号的值用引号括起来，例如",
+    "An empty value": "空值",
+    "removes the words. Each cell is saved like a normal image; the grid is saved too.": "表示删掉这些词。每一格都像普通图片一样保存，整张网格也会保存。",
     "picks one per image ·": "每张图选一个 ·", "picks two ·": "选两个 ·", "makes a 3× likelier ·": "让 a 的概率高 3 倍 ·",
     "picks a line from": "从这个文件随机取一行：", "(add your own .txt files there or in": "（可以在那里或这个文件夹放你自己的 .txt 文件：",
     "). Picks come from each image's seed, so the same seed gives the same picks; the resolved prompt is saved in the image.":
@@ -525,6 +527,10 @@ TEMPLATES += [
     ("NPU: {} (via bridge → Ryzen AI environment)", "NPU：{}（经桥接 → Ryzen AI 环境）"),
     (", ~{} pictures. ‘~’ = a rough estimate with the heat pause (no loop run has timed that setting yet); settings that keep failing get parked and starred ones get more, so later rounds differ.",
      "，约 {} 张图。“~” = 包含过热暂停的粗略估计（还没有循环给这个设置计过时）；一直失败的设置会被搁置，加星的会多画，所以后面的轮次会不一样。"),
+    ("❌ Prompt S/R: “{}” isn't in the prompt.", "❌ Prompt S/R：提示词里没有“{}”。"),
+    ("❌ Negative S/R: “{}” isn't in the negative prompt.", "❌ Negative S/R：反向提示词里没有“{}”。"),
+    ('❌ {}: the first value is the words to find (then the replacements; "a, b" in quotes keeps a comma, "" removes the words).',
+     '❌ {}：第一个值是要找的词（后面是替换成的词；带逗号的值用引号括起来，"" 表示删掉这些词）。'),
 ]
 # generic templates last: the first template that matches wins, so a broad one must not shadow a specific one
 TEMPLATES += [("Page {}", "第 {} 页"), ("Saved: {}", "已保存：{}"), ("✅ Loaded: {} ({}, {})", "✅ 已加载：{}（{}，{}）")]

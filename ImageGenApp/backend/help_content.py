@@ -825,9 +825,12 @@ def parameters_html() -> str:
              _cn("WD14 反推图片的 Danbooru 标签；训练页可批量打标。")],
             ["📊 X/Y grid",
              "Same seed, every combination of two settings (CFG, steps, sampler, seed, LoRA 1 weight, CLIP skip, "
-             "hires / face / hand / eye denoise, PAG scale, CFG rescale, 🎨 colour strength, checkpoint, or Prompt S/R word swaps) in one labelled grid image. "
-             "A denoise axis switches its pass on with the cell's value.",
-             _cn("同一种子下对比两组参数的所有组合，生成带标签的网格图。可选轴：CFG、步数、采样器、种子、LoRA 1 权重、CLIP skip、高清修复/脸/手/眼降噪、PAG、CFG rescale、颜色强度、模型、提示词替换（Prompt S/R）；降噪轴会按单元格的值开启对应步骤。")],
+             "hires / face / hand / eye denoise, PAG scale, CFG rescale, 🎨 colour strength, checkpoint, or Prompt S/R / Negative S/R word swaps) in one labelled grid image. "
+             "A denoise axis switches its pass on with the cell's value. An S/R value in quotes keeps its commas, and an empty value \"\" removes the words: "
+             "<code>\"pink eyes, magenta eyes\", \"\"</code> on Negative S/R shows the picture with and without those two negative tags.",
+             _cn("同一种子下对比两组参数的所有组合，生成带标签的网格图。可选轴：CFG、步数、采样器、种子、LoRA 1 权重、CLIP skip、高清修复/脸/手/眼降噪、PAG、CFG rescale、颜色强度、模型、"
+                 "提示词替换（Prompt S/R）、反向提示词替换（Negative S/R）；降噪轴会按单元格的值开启对应步骤。替换的值带逗号时用引号括起来，空值 \"\" 表示删掉这些词："
+                 "在 Negative S/R 里填 <code>\"pink eyes, magenta eyes\", \"\"</code>，就能并排看到反向提示词里有和没有这两个标签的图。")],
         ]
     )
     h += _tip("All of these are saved in the image and come back when you drop it into Image-to-Image. "
