@@ -7381,6 +7381,101 @@ def _():
         SX._SDXL_EMBED_CACHE.update(saved)
 
 
+@test("SDXL chunk cache: a new wildcard pick / a detail pass's own prompt encodes only its new 75-token chunks (the long negative comes from the cache), the result equals a fresh encode, and Clear LoRAs empties both caches")
+def _():
+    import torch
+    try:
+        from transformers import CLIPTokenizer
+        tok = CLIPTokenizer.from_pretrained("stable-diffusion-v1-5/stable-diffusion-v1-5", subfolder="tokenizer",
+                                            local_files_only=True)
+    except Exception:
+        raise Skip("SD 1.5 CLIP tokenizer not in .hf_cache")
+    from types import SimpleNamespace
+    from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTextConfig
+    from backend import sdxl_pipeline as SX
+    torch.manual_seed(0)
+    cfg = dict(vocab_size=len(tok), hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=4,
+               max_position_embeddings=77)
+    te1, te2 = CLIPTextModel(CLIPTextConfig(**cfg)), CLIPTextModelWithProjection(CLIPTextConfig(projection_dim=16, **cfg))
+    calls = []
+    for te in (te1, te2):
+        orig = te.forward
+        te.forward = (lambda o: (lambda *a, **k: (calls.append(1), o(*a, **k))[1]))(orig)
+    pipe = SimpleNamespace(_model_name_or_path="toy", tokenizer=tok, tokenizer_2=tok, text_encoder=te1, text_encoder_2=te2,
+                           unet=SimpleNamespace(dtype=torch.float32))
+    words = ["red", "blue", "green", "smile", "night", "rain", "city", "sea", "sky", "tree", "cat", "dog"]
+    long_neg = ", ".join(f"bad {w} {x}" for w in words for x in ("hands", "eyes", "text")) * 2           # several chunks
+    scene = lambda pick: "1girl, solo, (grey hair:1.2), " + ", ".join(f"{w} light" for w in words) + f", BREAK {pick}, (night:1.3)"
+    saved = (dict(SX._SDXL_EMBED_CACHE), dict(SX._SDXL_CHUNK_CACHE))
+    from pyparsing import ParserElement as _PE
+    packrat_before = bool(getattr(_PE, "_packratEnabled", False))
+    try:
+        SX._clear_embed_cache()
+        calls.clear()
+        a = SX._build_sdxl_embeds(pipe, scene("beach"), long_neg)
+        cold, n_chunks = len(calls), len(SX._SDXL_CHUNK_CACHE)
+        assert a["negative_prompt_embeds"].shape[1] >= 3 * 77 and n_chunks >= 5, (a["negative_prompt_embeds"].shape, n_chunks)
+        calls.clear()
+        b = SX._build_sdxl_embeds(pipe, scene("forest"), long_neg)                  # another wildcard pick: one chunk is new
+        one = len(calls)
+        assert 0 < one and one * 3 <= cold, (one, cold, n_chunks)                    # that chunk only (cold encoded them all)
+        calls.clear()
+        c = SX._build_sdxl_embeds(pipe, "detailed eyes, red eyes", long_neg)       # an eye pass's own prompt
+        assert 0 < len(calls) and len(calls) * 3 <= cold, (len(calls), cold)
+        assert c["negative_prompt_embeds"].shape == a["negative_prompt_embeds"].shape
+        calls.clear()
+        SX._build_sdxl_embeds(pipe, "detailed eyes, red eyes", "")                  # a new pair whose chunks are all known
+        assert not calls, len(calls)                                                # (the empty chunk came from the padding)
+        from pyparsing import ParserElement
+        assert bool(getattr(ParserElement, "_packratEnabled", False)) == packrat_before   # pyparsing as it was (fast_parsing)
+        SX._clear_embed_cache()
+        fresh = SX._build_sdxl_embeds(pipe, scene("forest"), long_neg)             # nothing cached: the same numbers
+        for k in fresh:
+            assert torch.equal(fresh[k], b[k]), k
+        assert torch.equal(a["negative_prompt_embeds"], fresh["negative_prompt_embeds"])
+        assert te1.dtype == te2.dtype == torch.float32
+        SX._SDXL_CHUNK_CACHE[("x",)] = (torch.zeros(1), torch.zeros(1))
+        SX._SDXL_EMBED_CACHE[("p",)] = {}
+        p = SX.SDXLPipeline()
+        p.pipe = SimpleNamespace()                                                   # nothing to unfuse, no snapshot
+        p.unload_loras()
+        assert not SX._SDXL_CHUNK_CACHE and not SX._SDXL_EMBED_CACHE                # a LoRA's text-encoder part leaves with it
+    finally:
+        SX._clear_embed_cache()
+        SX._SDXL_EMBED_CACHE.update(saved[0])
+        SX._SDXL_CHUNK_CACHE.update(saved[1])
+
+
+@test("fast_parsing: Compel's parse is the same with pyparsing's packrat memo, which is switched off again afterwards (left on when something else had it on), its cache emptied")
+def _():
+    from pyparsing import ParserElement
+    from compel.prompt_parser import PromptParser
+    from backend.prompt_tools import fast_parsing
+    from backend.prompt_syntax import a1111_to_compel
+    texts = ["1girl, (grey hair:1.2), [blurry], ((smile)), (school uniform, pleated skirt:1.15), night, \\(cosplay\\)",
+             "(kneeling upright on the sand facing the viewer:1.38), masterpiece, (detailed eyes:1.2), (dark crimson eyes:1.42)", ""]
+    was = bool(getattr(ParserElement, "_packratEnabled", False))
+    try:
+        if was:
+            ParserElement.disable_memoization()
+        plain = [repr(PromptParser().parse_conjunction(a1111_to_compel(t))) for t in texts]
+        for t, ref in zip(texts, plain):
+            with fast_parsing():
+                assert getattr(ParserElement, "_packratEnabled", False)
+                assert repr(PromptParser().parse_conjunction(a1111_to_compel(t))) == ref, t
+            assert not getattr(ParserElement, "_packratEnabled", False)
+        ParserElement.enable_packrat()
+        with fast_parsing():
+            pass
+        assert getattr(ParserElement, "_packratEnabled", False)                     # someone else's setting is left alone
+    finally:
+        ParserElement.reset_cache()
+        if not was and hasattr(ParserElement, "disable_memoization"):
+            ParserElement.disable_memoization()
+        elif was:
+            ParserElement.enable_packrat()
+
+
 @test("VAE family from the quant_conv bias: an SD 1.5 VAE on SDXL (or back) is ignored with a warning, not decoded")
 def _():
     import json as _j, struct

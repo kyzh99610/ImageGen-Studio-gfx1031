@@ -11,6 +11,7 @@ from __future__ import annotations
 import gc
 import logging
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -38,11 +39,19 @@ def _device() -> str:
 
 
 _SDXL_EMBED_CACHE: dict[tuple, dict] = {}
+# One entry per 75-token chunk: (the model, the weighting mode, the chunk's text) -> (embedding, pooled), fp16 on the CPU.
+# Every chunk is encoded on its own, so a cached chunk is the same numbers as a fresh encode. Before 2026-11-04 only the
+# whole prompt + negative pair was cached: a new wildcard pick, or a face / hand / eye pass with its own short prompt,
+# parsed and encoded the whole negative again (a 32-chunk negative took 10 s, three times per picture; Compel's parser
+# alone takes ~140 ms a chunk).
+_SDXL_CHUNK_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+CHUNK_CACHE_MAX = 512            # ~160 MB of RAM at ~315 KB a chunk
 
 
 def _clear_embed_cache():
-    global _SDXL_EMBED_CACHE
+    """Called whenever the text encoders' weights change (a model load / unload, a LoRA fused or removed)."""
     _SDXL_EMBED_CACHE.clear()
+    _SDXL_CHUNK_CACHE.clear()
 
 
 def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
@@ -65,6 +74,7 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
         return {k: v.clone() for k, v in cached.items()}
 
     c = None
+    st = {"c": None, "cast": None, "new": 0, "cached": 0}
     # Clear this frame's references on the way out: something in the Compel call
     # path captures the call stack, which kept this frame — and through `pipe` the
     # whole pipeline — alive after the model was unloaded (the Bridge leaked 2 GB
@@ -76,42 +86,86 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
             print("[SDXL] Text encoder is on DML — cannot use Compel, truncating to 77 tokens")
             return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt)}
 
-        # ── Encode in float32, then cast the TEs back (fp16→fp32→fp16 is lossless) ──
-        # On the CPU fp16 matmuls are slow. On the GPU (ZLUDA) fp16 encoding is NOT
-        # deterministic: the same prompt encoded twice differed by up to 0.03, which made the
-        # same seed differ by 7–12/255 whenever the embedding cache was cleared (new session,
-        # LoRA change). fp32 gave bit-identical embeddings every time, ~0.5 s more per new
-        # prompt (cached after that); the fp32 copy (+1.6 GB) exists only during the encode.
-        te1_was_half = pipe.text_encoder.dtype == torch.float16
-        te2_was_half = pipe.text_encoder_2.dtype == torch.float16
-        if te1_was_half:
-            pipe.text_encoder.float()
-        if te2_was_half:
-            pipe.text_encoder_2.float()
+        def compel():
+            """Compel over the TEs in float32, made at the first chunk that isn't cached (none: no cast, no Compel)."""
+            if st["c"] is None:
+                # ── Encode in float32, then cast the TEs back (fp16→fp32→fp16 is lossless) ──
+                # On the CPU fp16 matmuls are slow. On the GPU (ZLUDA) fp16 encoding is NOT
+                # deterministic: the same prompt encoded twice differed by up to 0.03, which made the
+                # same seed differ by 7–12/255 whenever the embedding cache was cleared (new session,
+                # LoRA change). fp32 gave bit-identical embeddings every time, ~0.5 s more per new
+                # prompt (cached after that); the fp32 copy (+1.6 GB) exists only during the encode.
+                te1_was_half = pipe.text_encoder.dtype == torch.float16
+                te2_was_half = pipe.text_encoder_2.dtype == torch.float16
+                if te1_was_half:
+                    pipe.text_encoder.float()
+                if te2_was_half:
+                    pipe.text_encoder_2.float()
+                st["cast"] = (te1_was_half, te2_was_half)
+                st["c"] = Compel(
+                    tokenizer=[pipe.tokenizer, pipe.tokenizer_2],
+                    text_encoder=[pipe.text_encoder, pipe.text_encoder_2],
+                    returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+                    requires_pooled=[False, True],
+                    truncate_long_prompts=False,
+                )
+            return st["c"]
 
-        c = Compel(
-            tokenizer=[pipe.tokenizer, pipe.tokenizer_2],
-            text_encoder=[pipe.text_encoder, pipe.text_encoder_2],
-            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
-            requires_pooled=[False, True],
-            truncate_long_prompts=False,
-        )
-        # 75-token chunks cut at tag boundaries (BREAK = new chunk); pooled embedding
-        # from the first chunk, as A1111 does
-        from backend.prompt_tools import encode_chunked, pad_to_same_chunks
-        pos, pos_pool = encode_chunked(c, prompt, pipe.tokenizer, sdxl=True)
-        neg, neg_pool = encode_chunked(c, neg_prompt, pipe.tokenizer, sdxl=True)
-        pos, neg = pad_to_same_chunks(c, pos, neg, sdxl=True)
+        from backend.prompt_tools import chunk_prompt, fast_parsing
+        from backend.prompt_syntax import a1111_to_compel
+        ckey = (model_key, EMPHASIS["mode"])
+
+        def chunk(text):
+            """One 75-token chunk -> (embedding, pooled) in fp16 on the TE's device; from the chunk cache when it has it."""
+            k = ckey + (text,)
+            hit = _SDXL_CHUNK_CACHE.get(k)
+            if hit is None:
+                cp = compel()
+                build = getattr(cp, "build_conditioning_tensor", None)   # what Compel's __call__ does for one text, without its
+                with fast_parsing(), torch.no_grad():                    # padding step, which encoded "" every time (2 more passes)
+                    e, p = build(a1111_to_compel(text)) if build is not None else cp(a1111_to_compel(text))
+                if e.dim() == 2:                    # unbatched [tokens, dim]: __call__'s padding step added the batch axis
+                    e = e.unsqueeze(0)
+                hit = (e.half().cpu(), p.half().cpu())
+                _SDXL_CHUNK_CACHE[k] = hit
+                while len(_SDXL_CHUNK_CACHE) > CHUNK_CACHE_MAX:
+                    _SDXL_CHUNK_CACHE.popitem(last=False)
+                st["new"] += 1
+            else:
+                _SDXL_CHUNK_CACHE.move_to_end(k)
+                st["cached"] += 1
+            return hit[0].to(te_device), hit[1].to(te_device)
+
+        def encode(text):
+            # 75-token chunks cut at tag boundaries (BREAK = new chunk); pooled embedding
+            # from the first chunk, as A1111 does
+            parts = [chunk(", ".join(tags)) for tags in chunk_prompt(text, pipe.tokenizer)]
+            emb = torch.cat([e for e, _ in parts], dim=1) if len(parts) > 1 else parts[0][0]
+            return emb, parts[0][1]
+
+        pos, pos_pool = encode(prompt)
+        neg, neg_pool = encode(neg_prompt)
+        if pos.shape[1] != neg.shape[1]:              # pad the shorter one with empty-prompt chunks (A1111 behaviour)
+            empty = chunk("")[0]
+            n = max(pos.shape[1], neg.shape[1])
+
+            def pad(x):
+                reps = (n - x.shape[1]) // empty.shape[1]
+                return torch.cat([x] + [empty] * reps, dim=1) if reps > 0 else x
+            pos, neg = pad(pos), pad(neg)
 
         # ── Restore TEs to float16 BEFORE returning ──
-        if te1_was_half:
-            pipe.text_encoder.half()
-        if te2_was_half:
-            pipe.text_encoder_2.half()
-        if "cuda" in te_device:
-            torch.cuda.empty_cache()        # give the fp32 copy's memory back before denoising
+        if st["cast"] is not None:
+            te1_was_half, te2_was_half = st["cast"]
+            if te1_was_half:
+                pipe.text_encoder.half()
+            if te2_was_half:
+                pipe.text_encoder_2.half()
+            st["cast"] = None
+            if "cuda" in te_device:
+                torch.cuda.empty_cache()        # give the fp32 copy's memory back before denoising
 
-        # Cast embeddings to float16 to match pipeline expectations
+        # float16 to match the pipeline (the cached chunks already are)
         pos = pos.half()
         neg = neg.half()
         pos_pool = pos_pool.half()
@@ -120,6 +174,8 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
         seq_len = pos.shape[1]
         if seq_len > 77:
             print(f"[SDXL Compel] Long prompt: {seq_len} tokens across {seq_len // 77} chunks ✓")
+        if st["cached"]:
+            print(f"[SDXL Compel] {st['new']} chunk(s) encoded, {st['cached']} from the chunk cache")
 
         res = dict(
             prompt_embeds=pos,
@@ -135,7 +191,13 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
     except Exception as e:
         # Safety: restore TEs to float16 even on error
         try:
-            if pipe.text_encoder.dtype == torch.float32 and pipe.unet.dtype == torch.float16:
+            if st["cast"] is not None:
+                if st["cast"][0]:
+                    pipe.text_encoder.half()
+                if st["cast"][1]:
+                    pipe.text_encoder_2.half()
+                st["cast"] = None
+            elif pipe.text_encoder.dtype == torch.float32 and pipe.unet.dtype == torch.float16:
                 pipe.text_encoder.half()
                 pipe.text_encoder_2.half()
         except Exception:
@@ -143,6 +205,10 @@ def _build_sdxl_embeds(pipe, prompt: str, neg_prompt: str) -> dict:
         print(f"[SDXL Compel] Failed ({e}), falling back to raw 77-token strings")
         return {"prompt": plain_prompt(prompt), "negative_prompt": plain_prompt(neg_prompt)}
     finally:
+        if st["c"] is not None:
+            st["c"] = None
+            from backend.prompt_tools import release_parser_cache
+            release_parser_cache()          # pyparsing's packrat cache keeps Compel's frames → the text encoders
         pipe = c = None
 
 
@@ -1100,6 +1166,7 @@ class SDXLPipeline:
         self._restore_clean_state()
         self._lora_adapters = {}
         self.loaded_loras = []
+        _clear_embed_cache()        # the text encoders are back to their own weights: embeddings made with a LoRA's TE part are stale
         # Re-register hooks — _purge_peft replaced module objects
         if self._dml_dev is not None:
             for mod in self.pipe.unet.modules():

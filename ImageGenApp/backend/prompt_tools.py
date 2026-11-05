@@ -463,6 +463,34 @@ def release_parser_cache():
         pass
 
 
+class fast_parsing:
+    """pyparsing's packrat memo around one Compel parse: the same parse trees ~3x faster (99 -> 35 ms a 75-token chunk of a heavy
+    preset, 70 chunks compared, 2026-11-04; without it Compel's grammar backtracks ~80,000 times a chunk). Switched on only for
+    the parse and off again unless something else in the process had it on; the cache is emptied afterwards either way (it can
+    hold frames -> the text encoders, see release_parser_cache)."""
+
+    def __enter__(self):
+        self.was_on = True
+        try:
+            from pyparsing import ParserElement
+            self.was_on = bool(getattr(ParserElement, "_packratEnabled", False))
+            if not self.was_on:
+                ParserElement.enable_packrat()
+        except Exception:
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            from pyparsing import ParserElement
+            ParserElement.reset_cache()
+            if not self.was_on and hasattr(ParserElement, "disable_memoization"):
+                ParserElement.disable_memoization()
+        except Exception:
+            pass
+        return False
+
+
 def encode_chunked(compel, prompt: str, tokenizer=None, sdxl: bool = False):
     """Encode each tag-aligned chunk with Compel and concatenate: [1, 77·k, dim]
     (+ the first chunk's pooled embedding for SDXL, as A1111 does)."""
@@ -474,12 +502,19 @@ def encode_chunked(compel, prompt: str, tokenizer=None, sdxl: bool = False):
         chunks = chunk_prompt(prompt, tokenizer)
         embs, pooled = [], None
         for tags in chunks:
-            out = compel(a1111_to_compel(", ".join(tags)))
+            # Compel's __call__ for one text, without its padding step: that built (parsed + encoded) the empty prompt for
+            # every chunk although one text never needs padding — the same tensors, half the parsing (2026-11-04)
+            text = a1111_to_compel(", ".join(tags))
+            build = getattr(compel, "build_conditioning_tensor", None)
+            with fast_parsing(), torch.no_grad():
+                out = build(text) if build is not None else compel(text)
             if sdxl:
                 e, p = out
                 pooled = p if pooled is None else pooled
             else:
                 e = out
+            if e.dim() == 2:                        # unbatched [tokens, dim]: __call__'s padding step added the batch axis
+                e = e.unsqueeze(0)
             embs.append(e)
         emb = torch.cat(embs, dim=1) if len(embs) > 1 else embs[0]
         return (emb, pooled) if sdxl else emb
